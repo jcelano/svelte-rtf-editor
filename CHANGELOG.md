@@ -1,5 +1,11 @@
 # svelte-rtf-editor
 
+## 1.0.1
+
+### Patch Changes
+
+- Updates to git URLs in package.json
+
 ## 1.0.0
 
 ### Major Changes
