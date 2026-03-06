@@ -58,6 +58,24 @@ describe('paragraphs', () => {
 // Add a new `it` block for each bug you fix. Include the raw RTF that triggered
 // the bug and assert the expected HTML output.
 
+// ── Color table ───────────────────────────────────────────────────────────────
+
+describe('color table', () => {
+	it('renders colored text (no auto-color entry)', () => {
+		// Color table without leading auto entry: \cf1=red, \cf2=green
+		const input = String.raw`{\rtf1\ansi\deff0 {\colortbl\red255\green0\blue0;\red0\green128\blue0;}\cf1 Red\cf0  and \cf2 Green\cf0 }`;
+		expect(rtfToHtml(input)).toBe(
+			'<p><span style="color:rgb(255,0,0)">Red</span> and <span style="color:rgb(0,128,0)">Green</span></p>'
+		);
+	});
+
+	it('renders colored text (with leading auto-color entry)', () => {
+		// Color table with leading ";" auto entry: \cf1=auto, \cf2=red
+		const input = String.raw`{\rtf1\ansi\deff0 {\colortbl;\red255\green0\blue0;}\cf2 Red text\cf0 }`;
+		expect(rtfToHtml(input)).toBe('<p><span style="color:rgb(255,0,0)">Red text</span></p>');
+	});
+});
+
 describe('bug regressions', () => {
 	// Add a new `it` block for each bug you fix. Include the raw RTF that
 	// triggered the bug and assert the expected HTML output.

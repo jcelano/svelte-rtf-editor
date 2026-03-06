@@ -12,6 +12,10 @@
 			label: 'Paragraphs',
 			rtf: String.raw`{\rtf1\ansi First paragraph.\par Second paragraph.\par\par After blank line.}`
 		},
+		{
+			label: 'Colors',
+			rtf: String.raw`{\rtf1\ansi\deff0 {\colortbl\red255\green0\blue0;\red0\green128\blue0;\red0\green0\blue255;}Normal, \cf1 red\cf0 , \cf2 green\cf0 , \cf3 blue\cf0 .}`
+		},
 		// ── Bug reproductions ──────────────────────────────────────────────────
 		// Add entries here to visually inspect failing RTF.
 		{

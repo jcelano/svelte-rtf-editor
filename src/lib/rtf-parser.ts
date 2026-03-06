@@ -189,13 +189,11 @@ function parseColorTable(group: RtfGroup): string[] {
 			else if (node.word === 'green') g = node.param ?? 0;
 			else if (node.word === 'blue') b = node.param ?? 0;
 		} else if (node.type === 'text' && node.value.includes(';')) {
-			// Semicolons delimit color entries; there may be multiple in one text node
-			const parts = node.value.split(';');
-			for (let i = 0; i < parts.length; i++) {
-				if (i < parts.length - 1 || node.value.endsWith(';')) {
-					colors.push(`rgb(${r},${g},${b})`);
-					r = 0; g = 0; b = 0;
-				}
+			// Each ';' terminates one color entry
+			const semiCount = (node.value.match(/;/g) || []).length;
+			for (let i = 0; i < semiCount; i++) {
+				colors.push(`rgb(${r},${g},${b})`);
+				r = 0; g = 0; b = 0;
 			}
 		}
 	}
