@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { rtfToHtml } from '$lib/rtf-parser.js';
+	import { htmlToRtf } from '$lib/rtf-writer.js';
 
 	// Add your RTF test cases here. Each entry shows side-by-side in the dev page.
 	const cases: { label: string; rtf: string }[] = [
@@ -30,9 +31,19 @@
 
 	let copied = $state<string | null>(null);
 
-	async function copyRtf(label: string, rtfString: string) {
+	async function copySource(label: string, rtfString: string) {
 		await navigator.clipboard.writeText(rtfString);
-		copied = label;
+		copied = label + ':source';
+		setTimeout(() => (copied = null), 1500);
+	}
+
+	async function copyRoundtrip(label: string, rtfString: string) {
+		const html = parse(rtfString);
+		const container = document.createElement('div');
+		container.innerHTML = html;
+		const rtf = htmlToRtf(container);
+		await navigator.clipboard.writeText(rtf);
+		copied = label + ':roundtrip';
 		setTimeout(() => (copied = null), 1500);
 	}
 </script>
@@ -58,9 +69,14 @@
 		<div class="case">
 			<div class="case-label">
 				<span>{c.label}</span>
-				<button class:copied={copied === c.label} onclick={() => copyRtf(c.label, c.rtf)}>
-					{copied === c.label ? 'Copied!' : 'Copy RTF'}
-				</button>
+				<span>
+					<button class:copied={copied === c.label + ':source'} onclick={() => copySource(c.label, c.rtf)}>
+						{copied === c.label + ':source' ? 'Copied!' : 'Copy source RTF'}
+					</button>
+					<button class:copied={copied === c.label + ':roundtrip'} onclick={() => copyRoundtrip(c.label, c.rtf)}>
+						{copied === c.label + ':roundtrip' ? 'Copied!' : 'Copy round-trip RTF'}
+					</button>
+				</span>
 			</div>
 			<div class="pane"><pre>{c.rtf}</pre></div>
 			<div class="pane rendered">{@html parse(c.rtf)}</div>

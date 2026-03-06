@@ -550,7 +550,7 @@ export function rtfToHtml(rtfString: string): string {
 		const next = i + 1 < trimmedParagraphs.length ? trimmedParagraphs[i + 1] : '';
 
 		if (!trimmed) {
-			if (isListLine(prev) || isListLine(next)) {
+			if (isListLine(prev) && isListLine(next)) {
 				continue;
 			}
 			const last = rendered[rendered.length - 1];
