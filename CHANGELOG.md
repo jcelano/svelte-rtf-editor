@@ -1,5 +1,11 @@
 # svelte-rtf-editor
 
+## 1.0.3
+
+### Patch Changes
+
+- Fixed issue where coloring was not set correctly
+
 ## 1.0.2
 
 ### Patch Changes
