@@ -221,12 +221,16 @@ npm run version
 
 # 2. Commit the version bump
 git add .
-git commit -m "chore: release vX.Y.Z"
+git commit -m "chore: release v$(node -p "require('./package.json').version")"
 git push
 
-# 3. Create a GitHub release from the new tag
-#    → CI automatically builds and publishes to npm via OIDC (no token needed)
+# 3. Create a GitHub release — this triggers CI to build and publish to npm
+VERSION=$(node -p "require('./package.json').version")
+gh release create "v$VERSION" --title "v$VERSION" --generate-notes
 ```
+
+Requires the [GitHub CLI](https://cli.github.com/) (`brew install gh`, then `gh auth login` once).
+The `--generate-notes` flag has GitHub auto-generate release notes from commits since the last tag.
 
 ### Version bump rules
 
