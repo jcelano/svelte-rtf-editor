@@ -1,5 +1,11 @@
 # svelte-rtf-editor
 
+## 1.0.2
+
+### Patch Changes
+
+- Added testing framework, fixed issue with new line being skipped
+
 ## 1.0.1
 
 ### Patch Changes
