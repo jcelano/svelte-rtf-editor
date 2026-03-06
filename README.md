@@ -196,6 +196,60 @@ The components use CSS custom properties with sensible fallbacks, so they work o
 
 ---
 
+## Contributing & releasing
+
+This project uses [Changesets](https://github.com/changesets/changesets) for versioning and changelog generation.
+
+### Making changes
+
+After making code changes, describe them with a changeset:
+
+```bash
+npm run changeset
+# → interactive prompt: pick patch / minor / major, write a short description
+```
+
+Commit both your code and the generated `.changeset/*.md` file together.
+
+### Publishing a new version
+
+When ready to cut a release:
+
+```bash
+# 1. Consume pending changesets — bumps package.json and updates CHANGELOG.md
+npm run version
+
+# 2. Commit the version bump
+git add .
+git commit -m "chore: release vX.Y.Z"
+git push
+
+# 3. Create a GitHub release from the new tag
+#    → CI automatically builds and publishes to npm via OIDC (no token needed)
+```
+
+### Version bump rules
+
+| Change type | Bump |
+|---|---|
+| Bug fix | `patch` — 0.1.0 → 0.1.1 |
+| New feature (backwards compatible) | `minor` — 0.1.0 → 0.2.0 |
+| Breaking change | `major` — 0.1.0 → 1.0.0 |
+
+### First-time npm publish
+
+The npm Trusted Publisher (OIDC) setup requires the package to exist on npm before it can be configured. For the very first publish, run locally:
+
+```bash
+npm login
+npm run prepack
+npm publish --access public
+```
+
+Then go to `npmjs.com/package/svelte-rtf-editor` → **Settings** → **Trusted Publishers** and add the GitHub Actions publisher pointing at this repo's `publish.yml`. All subsequent releases will go through CI automatically.
+
+---
+
 ## Local development
 
 Clone this repo and link it to your project for instant iteration without publishing:

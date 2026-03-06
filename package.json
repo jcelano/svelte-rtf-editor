@@ -1,6 +1,6 @@
 {
 	"name": "svelte-rtf-editor",
-	"version": "0.1.0",
+	"version": "1.0.0",
 	"description": "RTF viewer and rich-text editor components for Svelte 5",
 	"license": "MIT",
 	"homepage": "https://github.com/jfc76/svelte-rtf-editor#readme",
@@ -16,7 +16,10 @@
 		"prepare": "svelte-kit sync || echo ''",
 		"prepack": "svelte-kit sync && svelte-package && publint",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
-		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
+		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+		"changeset": "changeset",
+		"version": "changeset version",
+		"release": "npm run prepack && changeset publish"
 	},
 	"files": [
 		"dist",
@@ -39,6 +42,7 @@
 		"svelte": "^5.0.0"
 	},
 	"devDependencies": {
+		"@changesets/cli": "^2.30.0",
 		"@sveltejs/adapter-auto": "^7.0.0",
 		"@sveltejs/kit": "^2.50.2",
 		"@sveltejs/package": "^2.5.7",
