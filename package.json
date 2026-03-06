@@ -3,12 +3,12 @@
 	"version": "1.0.0",
 	"description": "RTF viewer and rich-text editor components for Svelte 5",
 	"license": "MIT",
-	"homepage": "https://github.com/jfc76/svelte-rtf-editor#readme",
+	"homepage": "https://github.com/jcelano/svelte-rtf-editor#readme",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/jfc76/svelte-rtf-editor.git"
+		"url": "git+https://github.com/jcelano/svelte-rtf-editor.git"
 	},
-	"bugs": "https://github.com/jfc76/svelte-rtf-editor/issues",
+	"bugs": "https://github.com/jcelano/svelte-rtf-editor/issues",
 	"scripts": {
 		"dev": "vite dev",
 		"build": "vite build && npm run prepack",
