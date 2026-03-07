@@ -65,7 +65,6 @@
 </script>
 
 <style>
-	body { font-family: sans-serif; margin: 0; }
 	h1 { padding: 1rem; margin: 0; font-size: 1.2rem; background: #f0f0f0; border-bottom: 1px solid #ccc; }
 	h2 { padding: 0.75rem 1rem; margin: 0; font-size: 1rem; background: #f8f8f8; border-bottom: 1px solid #ddd; display: flex; align-items: center; justify-content: space-between; }
 	.editor-wrap { padding: 1rem; }

@@ -5,24 +5,22 @@
 		onchange?: (color: string) => void;
 	}
 
-	let { value = '#2C2520', title = 'Color', onchange }: Props = $props();
-
-	let currentColor = $state(value);
+	let { value = $bindable('#2C2520'), title = 'Color', onchange }: Props = $props();
 
 	function handleChange(e: Event) {
-		currentColor = (e.target as HTMLInputElement).value;
-		onchange?.(currentColor);
+		value = (e.target as HTMLInputElement).value;
+		onchange?.(value);
 	}
 </script>
 
 <div class="color-picker-wrap">
 	<button class="color-swatch" {title} type="button">
-		<div class="color-swatch-inner" style="background: {currentColor};"></div>
+		<div class="color-swatch-inner" style="background: {value};"></div>
 	</button>
 	<input
 		type="color"
 		class="color-input"
-		value={currentColor}
+		value={value}
 		onchange={handleChange}
 		{title}
 	/>
