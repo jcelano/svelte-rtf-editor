@@ -204,20 +204,29 @@ function buildTree(tokens: Token[]): RtfGroup {
 // ── Color table parser ──
 
 function parseColorTable(group: RtfGroup): string[] {
-	const colors: string[] = [''];  // index 0 = auto/default (black)
+	const colors: string[] = [''];  // index 0 = auto/default
 	let r = 0, g = 0, b = 0;
+	let hasComponents = false;
+
+	function finalizeEntry() {
+		// In standard RTF, a leading ";" represents the auto color (index 0).
+		// We already reserve colors[0] for auto, so do not append another entry.
+		if (colors.length === 1 && !hasComponents) return;
+		colors.push(`rgb(${r},${g},${b})`);
+	}
 
 	for (const node of group.children) {
 		if (node.type === 'control') {
-			if (node.word === 'red') r = node.param ?? 0;
-			else if (node.word === 'green') g = node.param ?? 0;
-			else if (node.word === 'blue') b = node.param ?? 0;
+			if (node.word === 'red') { r = node.param ?? 0; hasComponents = true; }
+			else if (node.word === 'green') { g = node.param ?? 0; hasComponents = true; }
+			else if (node.word === 'blue') { b = node.param ?? 0; hasComponents = true; }
 		} else if (node.type === 'text' && node.value.includes(';')) {
 			// Each ';' terminates one color entry
 			const semiCount = (node.value.match(/;/g) || []).length;
 			for (let i = 0; i < semiCount; i++) {
-				colors.push(`rgb(${r},${g},${b})`);
+				finalizeEntry();
 				r = 0; g = 0; b = 0;
+				hasComponents = false;
 			}
 		}
 	}

@@ -105,7 +105,9 @@ export function htmlToRtf(editorEl: HTMLElement): string {
 		colorIndex.set(colorKey(c), i + 1);
 	});
 
-	let colorTable = '{\\colortbl';
+	// Emit a leading auto/default color entry for broad RTF compatibility:
+	// \cf0 = auto, first explicit color starts at \cf1.
+	let colorTable = '{\\colortbl;';
 	for (const c of colors) {
 		colorTable += `\\red${c.r}\\green${c.g}\\blue${c.b};`;
 	}

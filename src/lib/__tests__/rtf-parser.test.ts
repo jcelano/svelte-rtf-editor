@@ -61,23 +61,30 @@ describe('paragraphs', () => {
 // ── Color table ───────────────────────────────────────────────────────────────
 
 describe('color table', () => {
-	it('renders colored text (no auto-color entry)', () => {
-		// Color table without leading auto entry: \cf1=red, \cf2=green
-		const input = String.raw`{\rtf1\ansi\deff0 {\colortbl\red255\green0\blue0;\red0\green128\blue0;}\cf1 Red\cf0  and \cf2 Green\cf0 }`;
+	it('renders colored text (with leading auto-color entry)', () => {
+		// Color table with leading ";" auto entry: \cf0=auto, \cf1=red, \cf2=green
+		const input = String.raw`{\rtf1\ansi\deff0 {\colortbl;\red255\green0\blue0;\red0\green128\blue0;}\cf1 Red\cf0  and \cf2 Green\cf0 }`;
 		expect(rtfToHtml(input)).toBe(
 			'<p><span style="color:rgb(255,0,0)">Red</span> and <span style="color:rgb(0,128,0)">Green</span></p>'
 		);
 	});
 
-	it('renders colored text (with leading auto-color entry)', () => {
-		// Color table with leading ";" auto entry: \cf1=auto, \cf2=red
-		const input = String.raw`{\rtf1\ansi\deff0 {\colortbl;\red255\green0\blue0;}\cf2 Red text\cf0 }`;
+	it('renders single colored run (with leading auto-color entry)', () => {
+		// Color table with leading ";" auto entry: \cf0=auto, \cf1=red
+		const input = String.raw`{\rtf1\ansi\deff0 {\colortbl;\red255\green0\blue0;}\cf1 Red text\cf0 }`;
 		expect(rtfToHtml(input)).toBe('<p><span style="color:rgb(255,0,0)">Red text</span></p>');
+	});
+
+	it('renders three colored runs with standard auto slot indexing', () => {
+		const input = String.raw`{\rtf1\ansi\deff0 {\colortbl;\red255\green0\blue0;\red0\green128\blue0;\red0\green0\blue255;}Normal, \cf1 red\cf0 , \cf2 green\cf0 , \cf3 blue\cf0 .}`;
+		expect(rtfToHtml(input)).toBe(
+			'<p>Normal, <span style="color:rgb(255,0,0)">red</span>, <span style="color:rgb(0,128,0)">green</span>, <span style="color:rgb(0,0,255)">blue</span>.</p>'
+		);
 	});
 
 	it('drops \\cb background color on import (not rendered)', () => {
 		// \cb is dropped; use \highlight in the writer for background color
-		const input = String.raw`{\rtf1\ansi\deff0 {\colortbl\red243\green224\blue18;}\cb1 Highlighted\cb0  text}`;
+		const input = String.raw`{\rtf1\ansi\deff0 {\colortbl;\red243\green224\blue18;}\cb1 Highlighted\cb0  text}`;
 		expect(rtfToHtml(input)).toBe('<p>Highlighted text</p>');
 	});
 
@@ -90,14 +97,14 @@ describe('color table', () => {
 	});
 
 	it('renders combined \\cf foreground and \\highlight background', () => {
-		const input = String.raw`{\rtf1\ansi\deff0 {\colortbl\red255\green0\blue0;}\cf1\highlight7 Red on yellow\cf0\highlight0 }`;
+		const input = String.raw`{\rtf1\ansi\deff0 {\colortbl;\red255\green0\blue0;}\cf1\highlight7 Red on yellow\cf0\highlight0 }`;
 		expect(rtfToHtml(input)).toBe(
 			'<p><span style="color:rgb(255,0,0);background-color:#ffff00">Red on yellow</span></p>'
 		);
 	});
 
 	it('\\cb is silently dropped but \\cf still renders', () => {
-		const input = String.raw`{\rtf1\ansi\deff0 {\colortbl\red255\green0\blue0;\red243\green224\blue18;}\cf1\cb2 Red on yellow\cf0\cb0 }`;
+		const input = String.raw`{\rtf1\ansi\deff0 {\colortbl;\red255\green0\blue0;\red243\green224\blue18;}\cf1\cb2 Red on yellow\cf0\cb0 }`;
 		expect(rtfToHtml(input)).toBe(
 			'<p><span style="color:rgb(255,0,0)">Red on yellow</span></p>'
 		);
