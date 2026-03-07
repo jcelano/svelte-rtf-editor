@@ -3,8 +3,11 @@
  *
  * Parses RTF control words and groups into an HTML string.
  * Supports: bold, italic, underline, strikethrough, super/subscript,
- * font size, foreground color, color table, font table, paragraphs,
- * bullet/numbered lists, Unicode characters, hex escapes, and nested groups.
+ * font size, foreground color (\cf), highlight background color (\highlight),
+ * color table, font table, paragraphs, bullet/numbered lists,
+ * Unicode characters, hex escapes, and nested groups.
+ *
+ * \cb (character background) is silently ignored on import.
  */
 
 // ── Types ──
@@ -42,11 +45,32 @@ interface RenderState {
 	sub: boolean;
 	fontSize: number;
 	colorIndex: number;
+	highlightIndex: number;
 	fontIndex: number;
 	ucSkip: number;
 	inList: boolean;
-	listType: 'bullet' | 'number' | null;
 }
+
+// ── Highlight palette (RTF \highlight 1-16) ──
+
+const HIGHLIGHT_COLORS: Record<number, string> = {
+	1:  '#000000', // Black
+	2:  '#0000ff', // Blue
+	3:  '#00ffff', // Cyan
+	4:  '#00ff00', // Green
+	5:  '#ff00ff', // Magenta
+	6:  '#ff0000', // Red
+	7:  '#ffff00', // Yellow
+	8:  '#ffffff', // White
+	9:  '#000080', // Dark Blue
+	10: '#008080', // Dark Cyan
+	11: '#008000', // Dark Green
+	12: '#800080', // Dark Magenta
+	13: '#800000', // Dark Red
+	14: '#808000', // Dark Yellow
+	15: '#808080', // Dark Gray
+	16: '#c0c0c0', // Light Gray
+};
 
 // ── Tokenizer ──
 
@@ -266,10 +290,10 @@ export function rtfToHtml(rtfString: string): string {
 			sub: false,
 			fontSize: 24, // 12pt default
 			colorIndex: 0,
+			highlightIndex: 0,
 			fontIndex: 0,
 			ucSkip: 1,
 			inList: false,
-			listType: null
 		};
 	}
 
@@ -291,6 +315,11 @@ export function rtfToHtml(rtfString: string): string {
 			if (color && color !== 'rgb(0,0,0)') {
 				styles.push(`color:${color}`);
 			}
+		}
+
+		if (state.highlightIndex > 0) {
+			const bg = HIGHLIGHT_COLORS[state.highlightIndex];
+			if (bg) styles.push(`background-color:${bg}`);
 		}
 
 		const ptSize = state.fontSize / 2;
@@ -420,6 +449,11 @@ export function rtfToHtml(rtfString: string): string {
 					case 'cf':
 						if (p != null) state.colorIndex = p;
 						break;
+					case 'cb':
+						break; // \cb not rendered on import
+					case 'highlight':
+						if (p != null) state.highlightIndex = p;
+						break;
 					case 'f':
 						if (p != null) state.fontIndex = p;
 						break;
@@ -469,6 +503,8 @@ export function rtfToHtml(rtfString: string): string {
 						state.sub = false;
 						state.fontSize = 24;
 						state.colorIndex = 0;
+						state.highlightIndex = 0;
+						state.fontIndex = 0;
 						break;
 					case 'page':
 						flushParagraph();
@@ -575,9 +611,8 @@ export function rtfToHtml(rtfString: string): string {
 
 	const output = rendered.join('\n');
 
-	// Suppress unused variable warnings
+	// fontTable is parsed (for future font rendering) but not yet used in output
 	void fontTable;
-	void paragraphHasText;
 
 	return output || '<p></p>';
 }

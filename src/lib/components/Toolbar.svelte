@@ -65,7 +65,6 @@
 	<!-- Colors -->
 	<div class="toolbar-group">
 		<ColorPicker value="#2C2520" title="Text color" onchange={(c) => exec('foreColor', c)} />
-		<ColorPicker value="#FFFBCC" title="Highlight" onchange={(c) => exec('hiliteColor', c)} />
 	</div>
 
 	<div class="toolbar-divider"></div>

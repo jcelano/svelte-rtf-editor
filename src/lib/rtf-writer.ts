@@ -2,9 +2,13 @@
  * HTML to RTF converter
  *
  * Walks a contenteditable DOM tree and produces a valid RTF 1.x string.
- * Supports: bold, italic, underline, strikethrough, font sizes (headings),
- * foreground colors, paragraphs, bullet lists, numbered lists, blockquotes,
- * code blocks, links, horizontal rules, line breaks, and inline styles.
+ * Supports: bold, italic, underline, strikethrough, font sizes (h1–h3),
+ * foreground colors (\cf), paragraphs, bullet/numbered lists, blockquotes,
+ * code blocks, hyperlinks, images (as alt-text placeholders), horizontal
+ * rules, line breaks, and Unicode characters.
+ *
+ * Background color is intentionally not written — RTF highlight support
+ * is inconsistent across viewers (TextEdit uses \AppleHighlight, not \highlight).
  */
 
 // ── Types ──
@@ -101,7 +105,7 @@ export function htmlToRtf(editorEl: HTMLElement): string {
 		colorIndex.set(colorKey(c), i + 1);
 	});
 
-	let colorTable = '{\\colortbl ;';
+	let colorTable = '{\\colortbl';
 	for (const c of colors) {
 		colorTable += `\\red${c.r}\\green${c.g}\\blue${c.b};`;
 	}
@@ -128,18 +132,17 @@ export function htmlToRtf(editorEl: HTMLElement): string {
 	return rtf;
 }
 
+function addColor(colorStr: string | null | undefined, colorMap: Map<string, RGB>): void {
+	if (!colorStr) return;
+	const c = parseColor(colorStr);
+	if (c) colorMap.set(colorKey(c), c);
+}
+
 function collectColors(el: HTMLElement, colorMap: Map<string, RGB>): void {
-	if (el.style?.color) {
-		const c = parseColor(el.style.color);
-		if (c) colorMap.set(colorKey(c), c);
-	}
-	if (el.style?.backgroundColor) {
-		const c = parseColor(el.style.backgroundColor);
-		if (c) colorMap.set(colorKey(c), c);
-	}
-	for (const child of el.children) {
-		collectColors(child as HTMLElement, colorMap);
-	}
+	addColor(el.style?.color, colorMap);
+	// <font color="..."> is produced by execCommand('foreColor')
+	if (el.tagName?.toLowerCase() === 'font') addColor(el.getAttribute('color'), colorMap);
+	for (const child of el.children) collectColors(child as HTMLElement, colorMap);
 }
 
 function walkChildren(parent: Node, ctx: WalkContext): string {
@@ -298,6 +301,14 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 				break;
 			}
 
+			// <font color="..."> is produced by execCommand('foreColor') in contenteditable
+			case 'font': {
+				const colorPfx = getColorPrefix(el, ctx);
+				const colorSfx = colorPfx ? '\\cf0 ' : '';
+				rtf += `${colorPfx}${walkChildren(el, ctx)}${colorSfx}`;
+				break;
+			}
+
 			default:
 				rtf += walkChildren(el, ctx);
 				break;
@@ -308,7 +319,9 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 }
 
 function getColorPrefix(el: HTMLElement, ctx: WalkContext): string {
-	const color = el.style?.color;
+	// Support both inline style.color (spans) and the color attribute (<font>)
+	const color = el.style?.color ||
+		(el.tagName.toLowerCase() === 'font' ? (el.getAttribute('color') ?? '') : '');
 	if (!color) return '';
 	const c = parseColor(color);
 	if (!c) return '';

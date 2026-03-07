@@ -187,6 +187,13 @@
 	function exec(cmd: string, value: string | null = null): void {
 		restoreSelection();
 		editorEl?.focus();
+		// Color commands require an actual text selection — a collapsed cursor
+		// would silently apply the color to nothing (or to subsequently typed
+		// text), which causes accidental color spans to appear in the RTF output.
+		if (cmd === 'foreColor' || cmd === 'hiliteColor') {
+			const sel = window.getSelection();
+			if (!sel || sel.isCollapsed) return;
+		}
 		document.execCommand(cmd, false, value ?? undefined);
 		updateToolbarState();
 	}

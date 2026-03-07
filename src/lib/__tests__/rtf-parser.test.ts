@@ -74,6 +74,34 @@ describe('color table', () => {
 		const input = String.raw`{\rtf1\ansi\deff0 {\colortbl;\red255\green0\blue0;}\cf2 Red text\cf0 }`;
 		expect(rtfToHtml(input)).toBe('<p><span style="color:rgb(255,0,0)">Red text</span></p>');
 	});
+
+	it('drops \\cb background color on import (not rendered)', () => {
+		// \cb is dropped; use \highlight in the writer for background color
+		const input = String.raw`{\rtf1\ansi\deff0 {\colortbl\red243\green224\blue18;}\cb1 Highlighted\cb0  text}`;
+		expect(rtfToHtml(input)).toBe('<p>Highlighted text</p>');
+	});
+
+	it('renders \\highlight background color', () => {
+		// \highlight7 = yellow from the 16-color RTF palette
+		const input = String.raw`{\rtf1\ansi\deff0 \highlight7 Highlighted\highlight0  text}`;
+		expect(rtfToHtml(input)).toBe(
+			'<p><span style="background-color:#ffff00">Highlighted</span> text</p>'
+		);
+	});
+
+	it('renders combined \\cf foreground and \\highlight background', () => {
+		const input = String.raw`{\rtf1\ansi\deff0 {\colortbl\red255\green0\blue0;}\cf1\highlight7 Red on yellow\cf0\highlight0 }`;
+		expect(rtfToHtml(input)).toBe(
+			'<p><span style="color:rgb(255,0,0);background-color:#ffff00">Red on yellow</span></p>'
+		);
+	});
+
+	it('\\cb is silently dropped but \\cf still renders', () => {
+		const input = String.raw`{\rtf1\ansi\deff0 {\colortbl\red255\green0\blue0;\red243\green224\blue18;}\cf1\cb2 Red on yellow\cf0\cb0 }`;
+		expect(rtfToHtml(input)).toBe(
+			'<p><span style="color:rgb(255,0,0)">Red on yellow</span></p>'
+		);
+	});
 });
 
 describe('bug regressions', () => {
@@ -81,24 +109,23 @@ describe('bug regressions', () => {
 	// triggered the bug and assert the expected HTML output.
 
 	it('blank lines between bullet section and next header are preserved', () => {
-		// RTF from TST-AP-S-0003/final-diagnosis.rtf
 		// Bug: \par\par after a bullet paragraph produces no blank line because
 		// isListLine(prev) === true causes the empty paragraph to be skipped.
 		const input = String.raw`{\rtf1\ansi\deff0 {\fonttbl {\f0 Arial;}}
-{\b A. UTERUS, CERVIX, BILATERAL TUBES AND OVARIES:}\par \bullet Endometrioid adenocarcinoma, FIGO grade 1.\line \bullet Myometrial invasion present: 28% (0.5 cm of 1.8 cm).\line \bullet Cervix: negative for carcinoma.\line \bullet Bilateral ovaries and fallopian tubes: negative for carcinoma.\par \par {\b B. RIGHT PELVIC SENTINEL LYMPH NODE:}\par \bullet One lymph node, negative for metastatic carcinoma (0/1).\par \par {\b C. LEFT PELVIC SENTINEL LYMPH NODE:}\par \bullet One lymph node, negative for metastatic carcinoma (0/1).\par \par {\b COMMENT:}\par MMR protein immunohistochemistry shows intact expression of MLH1, PMS2, MSH2, and MSH6.\par }`;
+{\b A. SECTION ONE:}\par \bullet First item.\line \bullet Second item.\line \bullet Third item.\par \par {\b B. SECTION TWO:}\par \bullet Only item here.\par \par {\b C. SECTION THREE:}\par \bullet Only item here.\par \par {\b NOTES:}\par Some additional commentary goes here.\par }`;
 
 		expect(rtfToHtml(input)).toBe(
-			'<p><strong>A. UTERUS, CERVIX, BILATERAL TUBES AND OVARIES:</strong></p>\n' +
-			'<p>\u2022Endometrioid adenocarcinoma, FIGO grade 1.<br>\u2022Myometrial invasion present: 28% (0.5 cm of 1.8 cm).<br>\u2022Cervix: negative for carcinoma.<br>\u2022Bilateral ovaries and fallopian tubes: negative for carcinoma.</p>\n' +
+			'<p><strong>A. SECTION ONE:</strong></p>\n' +
+			'<p>\u2022First item.<br>\u2022Second item.<br>\u2022Third item.</p>\n' +
 			'<p><br></p>\n' +
-			'<p><strong>B. RIGHT PELVIC SENTINEL LYMPH NODE:</strong></p>\n' +
-			'<p>\u2022One lymph node, negative for metastatic carcinoma (0/1).</p>\n' +
+			'<p><strong>B. SECTION TWO:</strong></p>\n' +
+			'<p>\u2022Only item here.</p>\n' +
 			'<p><br></p>\n' +
-			'<p><strong>C. LEFT PELVIC SENTINEL LYMPH NODE:</strong></p>\n' +
-			'<p>\u2022One lymph node, negative for metastatic carcinoma (0/1).</p>\n' +
+			'<p><strong>C. SECTION THREE:</strong></p>\n' +
+			'<p>\u2022Only item here.</p>\n' +
 			'<p><br></p>\n' +
-			'<p><strong>COMMENT:</strong></p>\n' +
-			'<p>MMR protein immunohistochemistry shows intact expression of MLH1, PMS2, MSH2, and MSH6.</p>'
+			'<p><strong>NOTES:</strong></p>\n' +
+			'<p>Some additional commentary goes here.</p>'
 		);
 	});
 });

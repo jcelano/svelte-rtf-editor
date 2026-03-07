@@ -1,8 +1,20 @@
 <script lang="ts">
 	import { rtfToHtml } from '$lib/rtf-parser.js';
 	import { htmlToRtf } from '$lib/rtf-writer.js';
+	import { InkEditor } from '$lib/index.js';
 
-	// Add your RTF test cases here. Each entry shows side-by-side in the dev page.
+	// ── Editor section ────────────────────────────────────────────────────────
+	let editorRef: { getRTF: () => string; importRtf: () => void } | null = $state(null);
+	let editorCopied = $state(false);
+
+	async function copyEditorRtf() {
+		if (!editorRef) return;
+		await navigator.clipboard.writeText(editorRef.getRTF());
+		editorCopied = true;
+		setTimeout(() => (editorCopied = false), 1500);
+	}
+
+	// ── Test cases ────────────────────────────────────────────────────────────
 	const cases: { label: string; rtf: string }[] = [
 		{
 			label: 'Basic formatting',
@@ -19,9 +31,9 @@
 		// ── Bug reproductions ──────────────────────────────────────────────────
 		// Add entries here to visually inspect failing RTF.
 		{
-			label: 'Bug: blank lines after bullet sections dropped (TST-AP-S-0003)',
+			label: 'Bug: blank lines after bullet sections dropped',
 			rtf: String.raw`{\rtf1\ansi\deff0 {\fonttbl {\f0 Arial;}}
-{\b A. UTERUS, CERVIX, BILATERAL TUBES AND OVARIES:}\par \bullet Endometrioid adenocarcinoma, FIGO grade 1.\line \bullet Myometrial invasion present: 28% (0.5 cm of 1.8 cm).\line \bullet Cervix: negative for carcinoma.\line \bullet Bilateral ovaries and fallopian tubes: negative for carcinoma.\par \par {\b B. RIGHT PELVIC SENTINEL LYMPH NODE:}\par \bullet One lymph node, negative for metastatic carcinoma (0/1).\par \par {\b C. LEFT PELVIC SENTINEL LYMPH NODE:}\par \bullet One lymph node, negative for metastatic carcinoma (0/1).\par \par {\b COMMENT:}\par MMR protein immunohistochemistry shows intact expression of MLH1, PMS2, MSH2, and MSH6.\par }`
+{\b A. SECTION ONE:}\par \bullet First item.\line \bullet Second item.\line \bullet Third item.\par \par {\b B. SECTION TWO:}\par \bullet Only item here.\par \par {\b C. SECTION THREE:}\par \bullet Only item here.\par \par {\b NOTES:}\par Some additional commentary goes here.\par }`
 		},
 	];
 
@@ -55,6 +67,8 @@
 <style>
 	body { font-family: sans-serif; margin: 0; }
 	h1 { padding: 1rem; margin: 0; font-size: 1.2rem; background: #f0f0f0; border-bottom: 1px solid #ccc; }
+	h2 { padding: 0.75rem 1rem; margin: 0; font-size: 1rem; background: #f8f8f8; border-bottom: 1px solid #ddd; display: flex; align-items: center; justify-content: space-between; }
+	.editor-wrap { padding: 1rem; }
 	.cases { display: flex; flex-direction: column; gap: 0; }
 	.case { display: grid; grid-template-columns: 1fr 1fr; border-bottom: 1px solid #ddd; }
 	.case-label { grid-column: 1 / -1; padding: 0.4rem 1rem; background: #e8e8e8; font-weight: bold; font-size: 0.85rem; display: flex; align-items: center; justify-content: space-between; }
@@ -66,8 +80,22 @@
 	.rendered { font-family: serif; }
 </style>
 
-<h1>RTF Parser — Visual Test Cases</h1>
+<h1>RTF Dev Harness</h1>
 
+<h2>
+	<span>Editor</span>
+	<span>
+		<button onclick={() => editorRef?.importRtf()}>Import RTF</button>
+		<button class:copied={editorCopied} onclick={copyEditorRtf}>
+			{editorCopied ? 'Copied!' : 'Copy RTF'}
+		</button>
+	</span>
+</h2>
+<div class="editor-wrap">
+	<InkEditor bind:this={editorRef} autosave={false} storageKey="dev-harness" minHeight="20vh" />
+</div>
+
+<h2><span>Parser test cases</span></h2>
 <div class="cases">
 	{#each cases as c}
 		<div class="case">
