@@ -1,5 +1,11 @@
 # svelte-rtf-editor
 
+## 1.1.0
+
+### Minor Changes
+
+- Removed background color tool
+
 ## 1.0.3
 
 ### Patch Changes
