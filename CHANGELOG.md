@@ -1,5 +1,11 @@
 # svelte-rtf-editor
 
+## 1.2.0
+
+### Minor Changes
+
+- Added support for rendering tables
+
 ## 1.1.0
 
 ### Minor Changes
