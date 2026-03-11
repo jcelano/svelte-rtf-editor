@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { rtfToHtml } from '../rtf-parser.js';
+import { htmlToRtf } from '../rtf-writer.js';
+
+/** Parse an HTML string into a div element (requires happy-dom environment). */
+function htmlEl(html: string): HTMLElement {
+	const div = document.createElement('div');
+	div.innerHTML = html;
+	return div;
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -134,5 +142,67 @@ describe('bug regressions', () => {
 			'<p><strong>NOTES:</strong></p>\n' +
 			'<p>Some additional commentary goes here.</p>'
 		);
+	});
+});
+
+// ── Tables ────────────────────────────────────────────────────────────────────
+
+describe('tables', () => {
+	it('renders a simple 2-column table', () => {
+		// Header row (with \clbrdrb) + one data row
+		const input = String.raw`{\rtf1\ansi\deff0 {\trowd \trgaph120 \clbrdrb\brdrs\cellx2160\clbrdrb\brdrs\cellx4320 \trkeep\intbl { {{\pard\intbl Name\par}\cell}{{\pard\intbl Value\par}\cell}} \intbl\row}{\trowd \trgaph120 \cellx2160\cellx4320 \trkeep\intbl { {{\pard\intbl Heart\par}\cell}{{\pard\intbl 620 g\par}\cell}} \intbl\row}}`;
+		const result = rtfToHtml(input);
+		expect(result).toContain('<table');
+		expect(result).toContain('<th');
+		expect(result).toContain('Name');
+		expect(result).toContain('Value');
+		expect(result).toContain('<td');
+		expect(result).toContain('Heart');
+		expect(result).toContain('620 g');
+		expect(result).toContain('</table>');
+	});
+
+	it('renders the organ-weights RTF file with tables', async () => {
+		const { readFileSync } = await import('node:fs');
+		const rtf = readFileSync('test-files/organ-weights.rtf', 'ascii');
+		const result = rtfToHtml(rtf);
+		expect(result).toContain('<table');
+		expect(result).toContain('Heart Weight');
+		expect(result).toContain('620 g');
+		expect(result).toContain('Brain Weight');
+		expect(result).toContain('</table>');
+	});
+});
+
+// ── Table round-trip (parser → writer → parser) ───────────────────────────────
+
+describe('table round-trip', () => {
+	it('writer emits \trowd/\\cell/\\row for a <table>', () => {
+		const html = rtfToHtml(String.raw`{\rtf1\ansi\deff0 {\trowd \trgaph120 \clbrdrb\brdrs\cellx4320\clbrdrb\brdrs\cellx8640 \trkeep\intbl {{{\pard\intbl Name\par}\cell}{{\pard\intbl Value\par}\cell}}\intbl\row}{\trowd \trgaph120 \cellx4320\cellx8640 \trkeep\intbl {{{\pard\intbl Heart\par}\cell}{{\pard\intbl 620 g\par}\cell}}\intbl\row}}`);
+		const rtf = htmlToRtf(htmlEl(html));
+		expect(rtf).toContain('\\trowd');
+		expect(rtf).toContain('\\cell');
+		expect(rtf).toContain('\\row');
+		expect(rtf).toContain('\\clbrdrb\\brdrs'); // header row preserved
+	});
+
+	it('round-trip preserves cell text content', () => {
+		const sourceRtf = String.raw`{\rtf1\ansi\deff0 {\trowd \trgaph120 \clbrdrb\brdrs\cellx4320\clbrdrb\brdrs\cellx8640 \trkeep\intbl {{{\pard\intbl Organ\par}\cell}{{\pard\intbl Weight\par}\cell}}\intbl\row}{\trowd \trgaph120 \cellx4320\cellx8640 \trkeep\intbl {{{\pard\intbl Heart\par}\cell}{{\pard\intbl 620 g\par}\cell}}\intbl\row}}`;
+		const html = rtfToHtml(sourceRtf);
+		const rtf2 = htmlToRtf(htmlEl(html));
+		// Re-parse the written RTF and check all cell values survive
+		const html2 = rtfToHtml(rtf2);
+		expect(html2).toContain('Organ');
+		expect(html2).toContain('Weight');
+		expect(html2).toContain('Heart');
+		expect(html2).toContain('620 g');
+	});
+
+	it('round-trip preserves bold formatting inside cells', () => {
+		const sourceRtf = String.raw`{\rtf1\ansi\deff0 {\trowd \trgaph120 \cellx8640 \trkeep\intbl {{{\pard\intbl {\b HIGH}\par}\cell}}\intbl\row}}`;
+		const html = rtfToHtml(sourceRtf);
+		const rtf2 = htmlToRtf(htmlEl(html));
+		const html2 = rtfToHtml(rtf2);
+		expect(html2).toContain('<strong>HIGH</strong>');
 	});
 });

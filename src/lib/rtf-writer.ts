@@ -23,6 +23,7 @@ interface WalkContext {
 	colorIndex: Map<string, number>;
 	inPre: boolean;
 	listCounter: number;
+	inTableCell: boolean;
 }
 
 // ── Color helpers ──
@@ -120,7 +121,7 @@ export function htmlToRtf(editorEl: HTMLElement): string {
 		'{\\f2\\fmodern\\fcharset0 Courier New;}' +
 		'}';
 
-	const body = walkChildren(editorEl, { colorIndex, inPre: false, listCounter: 0 });
+	const body = walkChildren(editorEl, { colorIndex, inPre: false, listCounter: 0, inTableCell: false });
 
 	const rtf =
 		'{\\rtf1\\ansi\\ansicpg1252\\deff0' +
@@ -184,6 +185,11 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 
 			case 'p':
 			case 'div': {
+				// Inside a table cell \pard is already declared; just emit inline content.
+				if (ctx.inTableCell) {
+					rtf += walkChildren(el, ctx);
+					break;
+				}
 				// A <p> with no children or only a single <br> is a blank line —
 				// emit a bare \par rather than \pard \line\par, which adds an extra line.
 				const isBlankLine =
@@ -197,6 +203,47 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 				const colorPrefix = getColorPrefix(el, ctx);
 				const colorSuffix = colorPrefix ? '\\cf0 ' : '';
 				rtf += `\\pard ${colorPrefix}${inlineRtf}${colorSuffix}\\par\n`;
+				break;
+			}
+
+			case 'table': {
+				const PAGE_WIDTH = 8640; // twips ≈ 6 in (standard letter body width)
+				const rows = Array.from(
+					el.querySelectorAll(':scope > tr, :scope > thead > tr, :scope > tbody > tr, :scope > tfoot > tr')
+				);
+				for (const row of rows) {
+					const cells = Array.from(row.querySelectorAll(':scope > td, :scope > th'));
+					if (cells.length === 0) continue;
+					const isHeader = cells.some(c => c.tagName.toLowerCase() === 'th');
+
+					// Derive right-edge twip positions from the width:X% style set by the parser.
+					// Fall back to equal column widths if the style is absent.
+					const cellRights: number[] = [];
+					let cumTwips = 0;
+					for (const cell of cells) {
+						const pct = parseFloat((cell as HTMLElement).style.width) || (100 / cells.length);
+						cumTwips += Math.round((pct / 100) * PAGE_WIDTH);
+						cellRights.push(cumTwips);
+					}
+					cellRights[cellRights.length - 1] = PAGE_WIDTH; // snap last edge to avoid rounding drift
+
+					// Row definition
+					let rowRtf = '{\n\\trowd \\trgaph120\n';
+					for (let ci = 0; ci < cells.length; ci++) {
+						if (isHeader) rowRtf += `\\clbrdrb\\brdrs`;
+						rowRtf += `\\cellx${cellRights[ci]}`;
+					}
+					rowRtf += '\n\\trkeep\\intbl\n{';
+
+					// Cell bodies
+					const cellCtx = { ...ctx, inTableCell: true };
+					for (const cell of cells) {
+						const content = walkChildren(cell as HTMLElement, cellCtx);
+						rowRtf += `{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 ${content}\\par}\n\\cell`;
+					}
+					rowRtf += '}\n\\intbl\\row}\n';
+					rtf += rowRtf;
+				}
 				break;
 			}
 

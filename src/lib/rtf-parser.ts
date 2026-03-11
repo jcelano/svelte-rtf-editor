@@ -273,6 +273,13 @@ export function rtfToHtml(rtfString: string): string {
 	let paragraphHasText = false;
 	let paragraphHasListMarker = false;
 
+	// Table state
+	let tableRows: Array<{ cells: string[]; isHeader: boolean; cellRights: number[] }> = [];
+	let currentRowCells: string[] = [];
+	let currentRowIsHeader = false;
+	let currentRowCellRights: number[] = [];
+	let inTableCell = false;
+
 	// First pass: extract color table and font table from the root group
 	const rootGroup = tree.children[0]?.type === 'group' ? (tree.children[0] as RtfGroup) : tree;
 
@@ -375,7 +382,32 @@ export function rtfToHtml(rtfString: string): string {
 		'title', 'subject', 'doccomm', 'company', 'category', 'keywords'
 	]);
 
+	function flushTable() {
+		if (tableRows.length === 0) return;
+		let html = '<table style="border-collapse:collapse;width:100%;margin:4px 0">';
+		for (const row of tableRows) {
+			html += '<tr>';
+			const tag = row.isHeader ? 'th' : 'td';
+			const total = row.cellRights[row.cellRights.length - 1] || 1;
+			let prevRight = 0;
+			for (let ci = 0; ci < row.cells.length; ci++) {
+				const right = row.cellRights[ci] ?? total;
+				const pct = ((right - prevRight) / total * 100).toFixed(1);
+				prevRight = right;
+				const style = row.isHeader
+					? `border-bottom:1px solid;padding:2px 6px;text-align:left;width:${pct}%`
+					: `padding:2px 6px;width:${pct}%`;
+				html += `<${tag} style="${style}">${row.cells[ci] || ''}</${tag}>`;
+			}
+			html += '</tr>';
+		}
+		html += '</table>';
+		paragraphs.push(html);
+		tableRows = [];
+	}
+
 	function flushParagraph() {
+		flushTable();
 		const trimmed = currentParagraph.trim();
 		if (!trimmed) {
 			if (!paragraphHasListMarker) {
@@ -467,7 +499,43 @@ export function rtfToHtml(rtfString: string): string {
 						if (p != null) state.fontIndex = p;
 						break;
 					case 'par':
-						flushParagraph();
+						if (!inTableCell) flushParagraph();
+						break;
+					case 'trowd':
+						currentRowCells = [];
+						currentRowIsHeader = false;
+						currentRowCellRights = [];
+						break;
+					case 'trgaph':
+					case 'trkeep':
+					case 'trleft':
+					case 'trhdr':
+					case 'brdrs':
+					case 'brdrnil':
+					case 'clbrdrr':
+					case 'clbrdrl':
+					case 'clbrdrt':
+						break; // table formatting, ignored
+					case 'clbrdrb':
+						currentRowIsHeader = true;
+						break;
+					case 'cellx':
+						if (p != null) currentRowCellRights.push(p);
+						break;
+					case 'intbl':
+						inTableCell = true;
+						break;
+					case 'cell':
+						currentRowCells.push(currentParagraph.trim());
+						currentParagraph = '';
+						paragraphHasText = false;
+						break;
+					case 'row':
+						tableRows.push({ cells: currentRowCells, isHeader: currentRowIsHeader, cellRights: currentRowCellRights });
+						currentRowCells = [];
+						currentRowIsHeader = false;
+						currentRowCellRights = [];
+						inTableCell = false;
 						break;
 					case 'pard':
 						state.bold = false;
@@ -575,6 +643,7 @@ export function rtfToHtml(rtfString: string): string {
 	}
 
 	walk(rootGroup.children);
+	flushTable(); // flush any trailing table rows
 	// Only flush if there's actually pending content — the final \par in most RTF
 	// files already flushed the last paragraph, so an unconditional call here
 	// would push a spurious empty paragraph that becomes a trailing <p><br></p>.
@@ -606,6 +675,10 @@ export function rtfToHtml(rtfString: string): string {
 
 		if (trimmed === '<hr>') {
 			rendered.push('<hr>');
+			continue;
+		}
+		if (trimmed.startsWith('<table')) {
+			rendered.push(trimmed);
 			continue;
 		}
 		const sizeMatch = trimmed.match(/font-size:\s*([\d.]+)pt/);
