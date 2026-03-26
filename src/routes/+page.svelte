@@ -2,6 +2,7 @@
 	import { rtfToHtml } from '$lib/rtf-parser.js';
 	import { htmlToRtf } from '$lib/rtf-writer.js';
 	import { InkEditor } from '$lib/index.js';
+	import patientOrganWeights3 from '../../test-files/patient_organ_weights3.rtf?raw';
 
 	// ── Editor section ────────────────────────────────────────────────────────
 	let editorRef: { getRTF: () => string; importRtf: () => void } | null = $state(null);
@@ -29,8 +30,8 @@
 			rtf: String.raw`{\rtf1\ansi\deff0 {\colortbl;\red255\green0\blue0;\red0\green128\blue0;\red0\green0\blue255;}Normal, \cf1 red\cf0 , \cf2 green\cf0 , \cf3 blue\cf0 .}`
 		},
 		{
-			label: 'Table',
-			rtf: String.raw`{\rtf1\ansi\deff0 {\fonttbl{\f0 Helvetica;}}{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}{\pard \ql \f0 \sa180 \li0 \fi0 \b \fs28 Organ Weights\par}{\trowd \trgaph120 \clbrdrb\brdrs\cellx2160\clbrdrb\brdrs\cellx4320\clbrdrb\brdrs\cellx6480\clbrdrb\brdrs\cellx8640 \trkeep\intbl {{{\pard\intbl \f0 \sa0 \li0 \fi0 Organ\par}\cell}{{\pard\intbl \f0 \sa0 \li0 \fi0 Weight\par}\cell}{{\pard\intbl \f0 \sa0 \li0 \fi0 Reference\par}\cell}{{\pard\intbl \f0 \sa0 \li0 \fi0 Flag\par}\cell}}\intbl\row}{\trowd \trgaph120 \cellx2160\cellx4320\cellx6480\cellx8640 \trkeep\intbl {{{\pard\intbl \f0 \sa0 \li0 \fi0 Heart\par}\cell}{{\pard\intbl \f0 \sa0 \li0 \fi0 620 g\par}\cell}{{\pard\intbl \f0 \sa0 \li0 \fi0 350\u8211-400 g\par}\cell}{{\pard\intbl \f0 \sa0 \li0 \fi0 {\b H}\par}\cell}}\intbl\row}{\trowd \trgaph120 \cellx2160\cellx4320\cellx6480\cellx8640 \trkeep\intbl {{{\pard\intbl \f0 \sa0 \li0 \fi0 Brain\par}\cell}{{\pard\intbl \f0 \sa0 \li0 \fi0 1430 g\par}\cell}{{\pard\intbl \f0 \sa0 \li0 \fi0 1200\u8211-1400 g\par}\cell}{{\pard\intbl \f0 \sa0 \li0 \fi0 {\b H}\par}\cell}}\intbl\row}{\pard \ql \f0 \sa180 \li0 \fi0 After table.\par}}`
+			label: 'Patient organ weights (alignment, color, unicode)',
+			rtf: patientOrganWeights3
 		},
 		// ── Bug reproductions ──────────────────────────────────────────────────
 		// Add entries here to visually inspect failing RTF.

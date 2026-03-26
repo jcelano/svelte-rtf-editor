@@ -270,15 +270,21 @@ export function rtfToHtml(rtfString: string): string {
 	let fontTable = new Map<number, string>();
 	let currentParagraph = '';
 	let paragraphs: string[] = [];
+	let paragraphAligns: string[] = [];
 	let paragraphHasText = false;
 	let paragraphHasListMarker = false;
 
+	// Paragraph alignment (reset by \pard, affects cells and paragraphs)
+	let currentAlign = 'left';
+
 	// Table state
-	let tableRows: Array<{ cells: string[]; isHeader: boolean; cellRights: number[] }> = [];
+	let tableRows: Array<{ cells: string[]; isHeader: boolean; cellRights: number[]; cellAligns: string[] }> = [];
 	let currentRowCells: string[] = [];
 	let currentRowIsHeader = false;
 	let currentRowCellRights: number[] = [];
+	let currentRowCellAligns: string[] = [];
 	let inTableCell = false;
+	let pendingBottomBorder = false; // set by \clbrdrb, confirmed by a real border type
 
 	// First pass: extract color table and font table from the root group
 	const rootGroup = tree.children[0]?.type === 'group' ? (tree.children[0] as RtfGroup) : tree;
@@ -394,15 +400,18 @@ export function rtfToHtml(rtfString: string): string {
 				const right = row.cellRights[ci] ?? total;
 				const pct = ((right - prevRight) / total * 100).toFixed(1);
 				prevRight = right;
+				const align = row.cellAligns[ci] ?? 'left';
+				const alignStyle = align !== 'left' ? `;text-align:${align}` : '';
 				const style = row.isHeader
-					? `border-bottom:1px solid;padding:2px 6px;text-align:left;width:${pct}%`
-					: `padding:2px 6px;width:${pct}%`;
+					? `border-bottom:1px solid;padding:2px 6px;text-align:${align};width:${pct}%`
+					: `padding:2px 6px;width:${pct}%${alignStyle}`;
 				html += `<${tag} style="${style}">${row.cells[ci] || ''}</${tag}>`;
 			}
 			html += '</tr>';
 		}
 		html += '</table>';
 		paragraphs.push(html);
+		paragraphAligns.push('left');
 		tableRows = [];
 	}
 
@@ -412,13 +421,16 @@ export function rtfToHtml(rtfString: string): string {
 		if (!trimmed) {
 			if (!paragraphHasListMarker) {
 				paragraphs.push(currentParagraph);
+				paragraphAligns.push(currentAlign);
 			}
 		} else {
 			paragraphs.push(currentParagraph);
+			paragraphAligns.push(currentAlign);
 		}
 		currentParagraph = '';
 		paragraphHasText = false;
 		paragraphHasListMarker = false;
+		currentAlign = 'left';
 	}
 
 	let pendingUnicodeSkip = 0;
@@ -498,6 +510,18 @@ export function rtfToHtml(rtfString: string): string {
 					case 'f':
 						if (p != null) state.fontIndex = p;
 						break;
+					case 'ql':
+						currentAlign = 'left';
+						break;
+					case 'qr':
+						currentAlign = 'right';
+						break;
+					case 'qc':
+						currentAlign = 'center';
+						break;
+					case 'qj':
+						currentAlign = 'justify';
+						break;
 					case 'par':
 						if (!inTableCell) flushParagraph();
 						break;
@@ -505,19 +529,31 @@ export function rtfToHtml(rtfString: string): string {
 						currentRowCells = [];
 						currentRowIsHeader = false;
 						currentRowCellRights = [];
+						pendingBottomBorder = false;
 						break;
 					case 'trgaph':
 					case 'trkeep':
 					case 'trleft':
 					case 'trhdr':
-					case 'brdrs':
-					case 'brdrnil':
 					case 'clbrdrr':
 					case 'clbrdrl':
 					case 'clbrdrt':
+						pendingBottomBorder = false;
 						break; // table formatting, ignored
 					case 'clbrdrb':
-						currentRowIsHeader = true;
+						pendingBottomBorder = true;
+						break;
+					case 'brdrnone':
+					case 'brdrnil':
+						pendingBottomBorder = false;
+						break;
+					case 'brdrs':
+					case 'brdrdb':
+					case 'brdrth':
+					case 'brdrdot':
+					case 'brdrdash':
+						if (pendingBottomBorder) currentRowIsHeader = true;
+						pendingBottomBorder = false;
 						break;
 					case 'cellx':
 						if (p != null) currentRowCellRights.push(p);
@@ -527,14 +563,17 @@ export function rtfToHtml(rtfString: string): string {
 						break;
 					case 'cell':
 						currentRowCells.push(currentParagraph.trim());
+						currentRowCellAligns.push(currentAlign);
 						currentParagraph = '';
 						paragraphHasText = false;
+						currentAlign = 'left';
 						break;
 					case 'row':
-						tableRows.push({ cells: currentRowCells, isHeader: currentRowIsHeader, cellRights: currentRowCellRights });
+						tableRows.push({ cells: currentRowCells, isHeader: currentRowIsHeader, cellRights: currentRowCellRights, cellAligns: currentRowCellAligns });
 						currentRowCells = [];
 						currentRowIsHeader = false;
 						currentRowCellRights = [];
+						currentRowCellAligns = [];
 						inTableCell = false;
 						break;
 					case 'pard':
@@ -542,6 +581,7 @@ export function rtfToHtml(rtfString: string): string {
 						state.italic = false;
 						state.underline = false;
 						state.strike = false;
+						currentAlign = 'left';
 						break;
 					case 'line':
 						currentParagraph += '<br>';
@@ -586,6 +626,7 @@ export function rtfToHtml(rtfString: string): string {
 					case 'page':
 						flushParagraph();
 						paragraphs.push('<hr>');
+						paragraphAligns.push('left');
 						break;
 					case 'emspace':
 					case 'enspace':
@@ -658,6 +699,7 @@ export function rtfToHtml(rtfString: string): string {
 
 	for (let i = 0; i < trimmedParagraphs.length; i++) {
 		const trimmed = trimmedParagraphs[i];
+		const align = paragraphAligns[i] ?? 'left';
 		const prev = i > 0 ? trimmedParagraphs[i - 1] : '';
 		const next = i + 1 < trimmedParagraphs.length ? trimmedParagraphs[i + 1] : '';
 
@@ -684,11 +726,13 @@ export function rtfToHtml(rtfString: string): string {
 		const sizeMatch = trimmed.match(/font-size:\s*([\d.]+)pt/);
 		if (sizeMatch) {
 			const pt = parseFloat(sizeMatch[1]);
-			if (pt >= 24) { rendered.push(`<h1>${stripSizeSpan(trimmed)}</h1>`); continue; }
-			if (pt >= 18) { rendered.push(`<h2>${stripSizeSpan(trimmed)}</h2>`); continue; }
-			if (pt >= 14) { rendered.push(`<h3>${stripSizeSpan(trimmed)}</h3>`); continue; }
+			const alignAttr = align !== 'left' ? ` style="text-align:${align}"` : '';
+			if (pt >= 24) { rendered.push(`<h1${alignAttr}>${stripSizeSpan(trimmed)}</h1>`); continue; }
+			if (pt >= 18) { rendered.push(`<h2${alignAttr}>${stripSizeSpan(trimmed)}</h2>`); continue; }
+			if (pt >= 14) { rendered.push(`<h3${alignAttr}>${stripSizeSpan(trimmed)}</h3>`); continue; }
 		}
-		rendered.push(`<p>${trimmed}</p>`);
+		const pStyle = align !== 'left' ? ` style="text-align:${align}"` : '';
+		rendered.push(`<p${pStyle}>${trimmed}</p>`);
 	}
 
 	const output = rendered.join('\n');
