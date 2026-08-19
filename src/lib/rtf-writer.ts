@@ -4,8 +4,8 @@
  * Walks a contenteditable DOM tree and produces a valid RTF 1.x string.
  * Supports: bold, italic, underline, strikethrough, font sizes (h1–h3),
  * foreground colors (\cf), paragraphs, bullet/numbered lists, blockquotes,
- * code blocks, hyperlinks, images (as alt-text placeholders), horizontal
- * rules, line breaks, and Unicode characters.
+ * code blocks, hyperlinks, images (embedded as \pict picture groups with
+ * their captions), horizontal rules, line breaks, and Unicode characters.
  *
  * Background color is intentionally not written — RTF highlight support
  * is inconsistent across viewers (TextEdit uses \AppleHighlight, not \highlight).
@@ -24,7 +24,17 @@ interface WalkContext {
 	inPre: boolean;
 	listCounter: number;
 	inTableCell: boolean;
+	/** The element htmlToRtf was called on — used to detect top-level images. */
+	root: Node | null;
 }
+
+interface PixelSize {
+	w: number;
+	h: number;
+}
+
+/** 1 px at 96 dpi = 15 twips (1 twip = 1/1440 in). */
+const TWIPS_PER_PX = 15;
 
 // ── Color helpers ──
 
@@ -74,10 +84,18 @@ function colorKey(c: RGB): string {
 // ── RTF text escaping ──
 
 function escapeRtf(text: string): string {
+	// RTF readers ignore raw CR/LF, so a newline inside text content rendered as
+	// nothing ("Hello\nworld" → "Helloworld") while still emitting bytes that a
+	// CR-terminated transport treats as a record separator. Collapsing a run to
+	// the single space a browser would have shown is both safer and more
+	// faithful. Text is never split on newlines after this point, so <pre>
+	// content must be divided into lines before it gets here.
+	const source = text.replace(/[\r\n]+/g, ' ');
+
 	let out = '';
-	for (let i = 0; i < text.length; i++) {
-		const ch = text[i];
-		const code = text.charCodeAt(i);
+	for (let i = 0; i < source.length; i++) {
+		const ch = source[i];
+		const code = source.charCodeAt(i);
 
 		if (ch === '\\') out += '\\\\';
 		else if (ch === '{') out += '\\{';
@@ -89,6 +107,253 @@ function escapeRtf(text: string): string {
 		}
 	}
 	return out;
+}
+
+// ── Image helpers ──
+
+const B64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+const B64_LOOKUP = (() => {
+	const table = new Int16Array(128).fill(-1);
+	for (let i = 0; i < B64_ALPHABET.length; i++) table[B64_ALPHABET.charCodeAt(i)] = i;
+	return table;
+})();
+
+// Uppercase: the RTF spec treats picture data as case-insensitive, but
+// downstream consumers (HL7 interface engines, for one) sometimes match the
+// leading PNG signature literally as 89504E470D0A1A0A.
+const HEX_BYTE: string[] = Array.from({ length: 256 }, (_, i) =>
+	i.toString(16).padStart(2, '0').toUpperCase()
+);
+
+/** Decode base64 to bytes without depending on atob/Buffer (works in any runtime). */
+function base64ToBytes(b64: string): Uint8Array | null {
+	let buffer = 0;
+	let bits = 0;
+	let out = 0;
+	const bytes = new Uint8Array(Math.ceil((b64.length * 3) / 4));
+
+	for (let i = 0; i < b64.length; i++) {
+		const code = b64.charCodeAt(i);
+		if (code === 61 /* = */) break;
+		const v = code < 128 ? B64_LOOKUP[code] : -1;
+		if (v < 0) {
+			// Whitespace inside a data URL is legal; anything else is not base64.
+			if (code === 32 || code === 9 || code === 10 || code === 13) continue;
+			return null;
+		}
+		buffer = (buffer << 6) | v;
+		bits += 6;
+		if (bits >= 8) {
+			bits -= 8;
+			bytes[out++] = (buffer >> bits) & 0xff;
+		}
+	}
+
+	return out > 0 ? bytes.subarray(0, out) : null;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+	const parts: string[] = new Array(bytes.length);
+	for (let i = 0; i < bytes.length; i++) parts[i] = HEX_BYTE[bytes[i]];
+	return parts.join('');
+}
+
+/**
+ * Picture format according to the bytes themselves, not the label they arrived
+ * with. A file named .png can hold WebP — operating systems assign the MIME
+ * type from the extension — and writing those bytes as \pngblip produces a
+ * picture no reader can decode.
+ */
+function sniffBytes(b: Uint8Array): 'png' | 'jpeg' | null {
+	if (
+		b.length >= 8 &&
+		b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 &&
+		b[4] === 0x0d && b[5] === 0x0a && b[6] === 0x1a && b[7] === 0x0a
+	) {
+		return 'png';
+	}
+	if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'jpeg';
+	return null;
+}
+
+/** Read the intrinsic size out of the PNG IHDR chunk. */
+function pngSize(b: Uint8Array): PixelSize | null {
+	if (b.length < 24) return null;
+	if (b[0] !== 0x89 || b[1] !== 0x50 || b[2] !== 0x4e || b[3] !== 0x47) return null;
+	const w = ((b[16] << 24) | (b[17] << 16) | (b[18] << 8) | b[19]) >>> 0;
+	const h = ((b[20] << 24) | (b[21] << 16) | (b[22] << 8) | b[23]) >>> 0;
+	return w && h ? { w, h } : null;
+}
+
+/** Read the intrinsic size out of the first JPEG start-of-frame marker. */
+function jpegSize(b: Uint8Array): PixelSize | null {
+	if (b.length < 4 || b[0] !== 0xff || b[1] !== 0xd8) return null;
+	let i = 2;
+	while (i + 9 < b.length) {
+		if (b[i] !== 0xff) { i++; continue; }
+		const marker = b[i + 1];
+		// Standalone markers carry no length field.
+		if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { i += 2; continue; }
+		const len = (b[i + 2] << 8) | b[i + 3];
+		// SOF0–SOF15, excluding DHT (c4), JPG (c8) and DAC (cc)
+		if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+			const h = (b[i + 5] << 8) | b[i + 6];
+			const w = (b[i + 7] << 8) | b[i + 8];
+			return w && h ? { w, h } : null;
+		}
+		if (len < 2) break;
+		i += 2 + len;
+	}
+	return null;
+}
+
+function parsePx(value: string | null | undefined): number {
+	if (!value) return 0;
+	const m = value.match(/^([\d.]+)px$/);
+	return m ? Math.round(parseFloat(m[1])) : 0;
+}
+
+/**
+ * Displayed size of an image in CSS pixels. Prefers the explicit width the
+ * editor writes when the user resizes, then the width/height attributes, then
+ * the intrinsic size decoded from the image bytes (naturalWidth is unavailable
+ * when the DOM is detached or server-side).
+ */
+function displaySize(el: HTMLElement, natural: PixelSize): PixelSize {
+	const img = el as HTMLImageElement;
+	const nw = natural.w || img.naturalWidth || 0;
+	const nh = natural.h || img.naturalHeight || 0;
+
+	const attrW = parseInt(el.getAttribute('width') || '', 10);
+	const attrH = parseInt(el.getAttribute('height') || '', 10);
+
+	const w = parsePx(el.style?.width) || (Number.isFinite(attrW) ? attrW : 0) || nw;
+	let h = parsePx(el.style?.height) || (Number.isFinite(attrH) ? attrH : 0);
+	if (!h) h = nw && nh ? Math.round((w * nh) / nw) : nh;
+
+	return { w, h };
+}
+
+/**
+ * Convert a data-URL <img> into an RTF \pict group. Returns '' for images the
+ * RTF format cannot carry (remote URLs, or formats other than PNG/JPEG), so
+ * the caller can fall back to a text placeholder.
+ */
+function pictureRtf(el: HTMLElement): string {
+	const src = el.getAttribute('src') || '';
+	// Accept any image data URL and let the bytes decide the format — the label
+	// is not trustworthy, and a correctly-labelled PNG is not the only way to
+	// arrive at PNG bytes.
+	const m = src.match(/^data:image\/[a-z0-9.+-]+;base64,([\s\S]+)$/i);
+	if (!m) return '';
+
+	const bytes = base64ToBytes(m[1]);
+	if (!bytes || bytes.length === 0) return '';
+
+	const format = sniffBytes(bytes);
+	// Neither PNG nor JPEG: RTF cannot carry it, so fall back to the placeholder
+	// rather than emitting a blip whose declared type contradicts its content.
+	if (!format) return '';
+	const isPng = format === 'png';
+
+	const natural = (isPng ? pngSize(bytes) : jpegSize(bytes)) ?? { w: 0, h: 0 };
+	const size = displaySize(el, natural);
+	if (!size.w || !size.h) return '';
+
+	const picw = natural.w || size.w;
+	const pich = natural.h || size.h;
+
+	// The space after \pichgoal is the control word's delimiter — without it the
+	// leading hex digits would be read as part of its numeric parameter.
+	return (
+		`{\\pict${isPng ? '\\pngblip' : '\\jpegblip'}` +
+		`\\picw${picw}\\pich${pich}` +
+		`\\picwgoal${Math.round(size.w * TWIPS_PER_PX)}\\pichgoal${Math.round(size.h * TWIPS_PER_PX)} ` +
+		`${bytesToHex(bytes)}}`
+	);
+}
+
+/** Picture group if the bytes are embeddable, otherwise an italic placeholder. */
+function imageBody(el: HTMLElement): string {
+	const pict = pictureRtf(el);
+	if (pict) return pict;
+	const label = el.getAttribute('alt') || el.getAttribute('src') || 'image';
+	return `\\i [Image: ${escapeRtf(label)}]\\i0 `;
+}
+
+/** \ql / \qc / \qr for a figure's text-align. */
+function alignControl(el: HTMLElement): string {
+	const align = (el.style?.textAlign || '').toLowerCase();
+	if (align === 'center') return '\\qc';
+	if (align === 'right') return '\\qr';
+	if (align === 'justify') return '\\qj';
+	return '\\ql';
+}
+
+/** Decoded byte length of a base64 payload, without decoding it. */
+function base64ByteLength(base64: string): number {
+	const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
+	return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
+}
+
+/** Bytes of RTF header, font table and colour table that precede the body. */
+const RTF_PREAMBLE_BYTES = 200;
+
+/** Control words wrapping one \pict group. */
+const PICTURE_OVERHEAD_BYTES = 80;
+
+/**
+ * Control-word bytes the writer wraps around each kind of element — the opening
+ * and closing runs measured from walkChildren. Anything not listed costs
+ * nothing of its own beyond the text it contains.
+ */
+const BLOCK_OVERHEAD_BYTES: Record<string, number> = {
+	p: 14,
+	div: 14,
+	h1: 32,
+	h2: 32,
+	h3: 32,
+	li: 35,
+	blockquote: 22,
+	pre: 27,
+	figure: 15,
+	figcaption: 29,
+	tr: 45,
+	td: 55,
+	th: 69 // a header cell also carries \clbrdrb\brdrs
+};
+
+/**
+ * Size htmlToRtf would produce, without doing the conversion.
+ *
+ * Useful for a live indicator — the exact figure requires hex-encoding every
+ * picture, which is too much work to repeat on each keystroke.
+ *
+ * Picture data, which dominates any document that has one, is counted exactly:
+ * two characters per byte. Everything else is approximated per element, which
+ * puts the error at a bounded number of bytes rather than a proportion — so it
+ * is negligible precisely when the number matters, and never more than a few
+ * hundred bytes even when it does not. The output is ASCII, so bytes and
+ * characters are the same number.
+ */
+export function estimateRtfBytes(editorEl: HTMLElement): number {
+	let total = RTF_PREAMBLE_BYTES;
+
+	for (const img of Array.from(editorEl.querySelectorAll('img'))) {
+		const src = img.getAttribute('src') || '';
+		const comma = src.indexOf(',');
+		// A picture that cannot be embedded costs only its placeholder text.
+		if (!src.startsWith('data:image/') || comma < 0) continue;
+		total += base64ByteLength(src.slice(comma + 1)) * 2 + PICTURE_OVERHEAD_BYTES;
+	}
+
+	total += (editorEl.textContent || '').length;
+	for (const el of Array.from(editorEl.querySelectorAll('*'))) {
+		total += BLOCK_OVERHEAD_BYTES[el.tagName.toLowerCase()] ?? 0;
+	}
+
+	return total;
 }
 
 // ── DOM walker / RTF generator ──
@@ -121,7 +386,13 @@ export function htmlToRtf(editorEl: HTMLElement): string {
 		'{\\f2\\fmodern\\fcharset0 Courier New;}' +
 		'}';
 
-	const body = walkChildren(editorEl, { colorIndex, inPre: false, listCounter: 0, inTableCell: false });
+	const body = walkChildren(editorEl, {
+		colorIndex,
+		inPre: false,
+		listCounter: 0,
+		inTableCell: false,
+		root: editorEl
+	});
 
 	const rtf =
 		'{\\rtf1\\ansi\\ansicpg1252\\deff0' +
@@ -132,7 +403,11 @@ export function htmlToRtf(editorEl: HTMLElement): string {
 		body +
 		'}';
 
-	return rtf;
+	// Backstop for the single-line guarantee. escapeRtf already collapses CR/LF
+	// out of every text path, so this should never have anything to do — but the
+	// document is worthless to a CR-terminated transport if one slips through,
+	// and no newline carries meaning in the output.
+	return rtf.replace(/[\r\n]+/g, ' ');
 }
 
 function addColor(colorStr: string | null | undefined, colorMap: Map<string, RGB>): void {
@@ -158,7 +433,10 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 		if (node.nodeType === Node.TEXT_NODE) {
 			const text = node.textContent || '';
 			if (ctx.inPre) {
-				rtf += escapeRtf(text).replace(/\n/g, '\\line\n');
+				// Split before escaping — escapeRtf collapses newlines, so the
+				// line structure a <pre> block depends on has to become \line
+				// first. Handles CR, LF and CRLF alike.
+				rtf += text.split(/\r\n|\r|\n/).map(escapeRtf).join('\\line ');
 			} else {
 				rtf += escapeRtf(text);
 			}
@@ -172,15 +450,15 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 
 		switch (tag) {
 			case 'h1':
-				rtf += `\\pard\\f1\\fs48\\b ${walkChildren(el, ctx)}\\b0\\f0\\fs24\\par\n`;
+				rtf += `\\pard\\f1\\fs48\\b ${walkChildren(el, ctx)}\\b0\\f0\\fs24\\par `;
 				break;
 
 			case 'h2':
-				rtf += `\\pard\\f1\\fs36\\b ${walkChildren(el, ctx)}\\b0\\f0\\fs24\\par\n`;
+				rtf += `\\pard\\f1\\fs36\\b ${walkChildren(el, ctx)}\\b0\\f0\\fs24\\par `;
 				break;
 
 			case 'h3':
-				rtf += `\\pard\\f0\\fs28\\b ${walkChildren(el, ctx)}\\b0\\fs24\\par\n`;
+				rtf += `\\pard\\f0\\fs28\\b ${walkChildren(el, ctx)}\\b0\\fs24\\par `;
 				break;
 
 			case 'p':
@@ -196,13 +474,13 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 					el.childNodes.length === 0 ||
 					(el.childNodes.length === 1 && el.childNodes[0].nodeName === 'BR');
 				if (isBlankLine) {
-					rtf += '\\par\n';
+					rtf += '\\par ';
 					break;
 				}
 				const inlineRtf = walkChildren(el, ctx);
 				const colorPrefix = getColorPrefix(el, ctx);
 				const colorSuffix = colorPrefix ? '\\cf0 ' : '';
-				rtf += `\\pard ${colorPrefix}${inlineRtf}${colorSuffix}\\par\n`;
+				rtf += `\\pard ${colorPrefix}${inlineRtf}${colorSuffix}\\par `;
 				break;
 			}
 
@@ -228,41 +506,41 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 					cellRights[cellRights.length - 1] = PAGE_WIDTH; // snap last edge to avoid rounding drift
 
 					// Row definition
-					let rowRtf = '{\n\\trowd \\trgaph120\n';
+					let rowRtf = '{\\trowd\\trgaph120';
 					for (let ci = 0; ci < cells.length; ci++) {
 						if (isHeader) rowRtf += `\\clbrdrb\\brdrs`;
 						rowRtf += `\\cellx${cellRights[ci]}`;
 					}
-					rowRtf += '\n\\trkeep\\intbl\n{';
+					rowRtf += '\\trkeep\\intbl{';
 
 					// Cell bodies
 					const cellCtx = { ...ctx, inTableCell: true };
 					for (const cell of cells) {
 						const content = walkChildren(cell as HTMLElement, cellCtx);
-						rowRtf += `{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 ${content}\\par}\n\\cell`;
+						rowRtf += `{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 ${content}\\par}\\cell`;
 					}
-					rowRtf += '}\n\\intbl\\row}\n';
+					rowRtf += '}\\intbl\\row}';
 					rtf += rowRtf;
 				}
 				break;
 			}
 
 			case 'blockquote':
-				rtf += `\\pard\\li720\\i ${walkChildren(el, ctx)}\\i0\\par\n`;
+				rtf += `\\pard\\li720\\i ${walkChildren(el, ctx)}\\i0\\par `;
 				break;
 
 			case 'pre':
-				rtf += `\\pard\\f2\\fs20 ${walkChildren(el, { ...ctx, inPre: true })}\\f0\\fs24\\par\n`;
+				rtf += `\\pard\\f2\\fs20 ${walkChildren(el, { ...ctx, inPre: true })}\\f0\\fs24\\par `;
 				break;
 
 			case 'hr':
-				rtf += `\\pard\\qc \\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\par\n`;
+				rtf += `\\pard\\qc \\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\par `;
 				break;
 
 			case 'ul': {
 				const items = el.querySelectorAll(':scope > li');
 				items.forEach((li) => {
-					rtf += `\\pard\\li720\\fi-360\\bullet\\tab ${walkChildren(li, ctx)}\\par\n`;
+					rtf += `\\pard\\li720\\fi-360\\bullet\\tab ${walkChildren(li, ctx)}\\par `;
 				});
 				break;
 			}
@@ -271,7 +549,7 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 				let counter = 1;
 				const items = el.querySelectorAll(':scope > li');
 				items.forEach((li) => {
-					rtf += `\\pard\\li720\\fi-360 ${counter}.\\tab ${walkChildren(li, ctx)}\\par\n`;
+					rtf += `\\pard\\li720\\fi-360 ${counter}.\\tab ${walkChildren(li, ctx)}\\par `;
 					counter++;
 				});
 				break;
@@ -328,16 +606,35 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 				break;
 			}
 
+			// <figure><img><figcaption>caption</figcaption></figure> — the shape the
+			// editor inserts. The caption is written as its own paragraph below the
+			// picture, tagged with an ignorable {\*\inkcap} destination so it can be
+			// re-attached to the figure on import. Other RTF readers skip the tag and
+			// simply show an italic line under the image.
+			case 'figure': {
+				const img = el.querySelector('img');
+				const caption = (el.querySelector('figcaption')?.textContent || '').trim();
+				const align = alignControl(el);
+
+				if (img) rtf += `\\pard${align} ${imageBody(img as HTMLElement)}\\par `;
+				else rtf += walkChildren(el, ctx);
+
+				if (caption) {
+					rtf += `{\\*\\inkcap}\\pard${align}\\i ${escapeRtf(caption)}\\i0\\par `;
+				}
+				break;
+			}
+
 			case 'img': {
-				const alt = el.getAttribute('alt') || '';
-				const src = el.getAttribute('src') || '';
-				const label = alt || src || '[image]';
-				rtf += `\\pard\\i [Image: ${escapeRtf(label)}]\\i0\\par\n`;
+				// A picture directly under the editor root has no paragraph of its
+				// own; anywhere else it is inline content of the enclosing block.
+				const standalone = el.parentNode === ctx.root;
+				rtf += standalone ? `\\pard ${imageBody(el)}\\par ` : imageBody(el);
 				break;
 			}
 
 			case 'br':
-				rtf += '\\line\n';
+				rtf += '\\line ';
 				break;
 
 			case 'span': {
