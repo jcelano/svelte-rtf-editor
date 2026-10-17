@@ -205,16 +205,16 @@ describe('reading back a document written at another size', () => {
 	const html =
 		'<h1>Title</h1><h2>Section</h2><h3>Sub</h3><p>Body text.</p><ul><li>item</li></ul><p>More body.</p>';
 
-	for (const fontSize of [10, 11, 12, 14]) {
-		it(`keeps headings and paragraphs apart at ${fontSize} pt`, () => {
-			const back = rtfToHtml(htmlToRtf(htmlEl(html), { fontSize }));
+	for (const fontSize of [9, 10, 11, 12, 14]) {
+		it(`keeps headings and paragraphs apart at ${fontSize} pt, read at that size`, () => {
+			const back = rtfToHtml(htmlToRtf(htmlEl(html), { fontSize }), { fontSize });
 			// The heading level is what matters; the parser keeps the bold and
 			// size wrapper inside a heading at every size, 12 pt included.
 			expect(back).toMatch(/<h1>[^\n]*Title[^\n]*<\/h1>/);
 			expect(back).toMatch(/<h2>[^\n]*Section[^\n]*<\/h2>/);
 			expect(back).toMatch(/<h3>[^\n]*Sub[^\n]*<\/h3>/);
-			expect(back).toMatch(/<p>[^\n]*Body text\.[^\n]*<\/p>/);
-			expect(back).toMatch(/<p>[^\n]*More body\.[^\n]*<\/p>/);
+			expect(back).toContain('<p>Body text.</p>');
+			expect(back).toContain('<p>More body.</p>');
 		});
 	}
 
@@ -226,15 +226,100 @@ describe('reading back a document written at another size', () => {
 		expect(back).toContain('<p><span style="font-size:9pt">Liver: 1500 g</span></p>');
 	});
 
-	it('shows 12 pt text without a size of its own, as before', () => {
+	it('reads a 12 pt line in a 9 pt document as a paragraph, not a heading', () => {
+		const rtf = String.raw`{\rtf1\ansi{\pard\fs18 Heart: 350 g\par}{\pard\fs24 Comment: see note\par}{\pard\fs22 Liver: 1500 g\par}}`;
+		const back = rtfToHtml(rtf);
+		expect(back).toContain('<p>Comment: see note</p>');
+		expect(back).toContain('<p><span style="font-size:11pt">Liver: 1500 g</span></p>');
+		expect(back).not.toMatch(/<h[1-3]>/);
+	});
+
+	it('keeps a size other than the screen\'s, when the screen is set to 10 pt', () => {
+		const rtf = String.raw`{\rtf1\ansi{\pard\fs20 Body.\par}{\pard\fs22 Eleven point note.\par}{\pard\fs24 Twelve point note.\par}}`;
+		const back = rtfToHtml(rtf, { fontSize: 10 });
+		expect(back).toContain('<p>Body.</p>');
+		expect(back).toContain('<p><span style="font-size:11pt">Eleven point note.</span></p>');
+		expect(back).toContain('<p><span style="font-size:12pt">Twelve point note.</span></p>');
+	});
+
+	it('leaves a plain 12 pt report as plain paragraphs in a 10 pt editor, save after save', () => {
+		const rtf = String.raw`{\rtf1\ansi\pard\plain\fs24 A. Left colon, sigmoid, resection:\par\pard\plain\fs24 - Invasive adenocarcinoma.\par\pard Margins negative.\par}`;
+		let saved = rtf;
+		for (let i = 0; i < 3; i++) saved = reload(saved, 10);
+		const back = rtfToHtml(saved, { fontSize: 10 });
+		expect(back).not.toMatch(/<h[1-3]>/);
+		expect(back).not.toContain('<strong>');
+		expect(saved).not.toContain('\\b ');
+		expect(back).toContain('<p><span style="font-size:12pt">A. Left colon, sigmoid, resection:</span></p>');
+	});
+
+	it('keeps an underlined blank, such as a signature line', () => {
+		expect(rtfToHtml(String.raw`{\rtf1\ansi\pard Signature:{\ul      }\par}`)).toContain('<p>Signature:<u>     </u></p>');
+		const saved = reload(htmlToRtf(htmlEl('<p>Signature: <u>          </u></p>')));
+		expect(rtfToHtml(saved)).toContain('<u>          </u>');
+	});
+
+	it('keeps a short heading a heading, whatever most of the text is set in', () => {
+		const back = rtfToHtml(htmlToRtf(htmlEl('<h3>Final diagnosis</h3><p>Benign.</p>')));
+		expect(back).toMatch(/<h3>[^\n]*Final diagnosis[^\n]*<\/h3>/);
+		expect(back).toContain('<p>Benign.</p>');
+	});
+
+	it('shows 12 pt text without a size of its own', () => {
 		const back = rtfToHtml(htmlToRtf(htmlEl('<p>Body text.</p>')));
 		expect(back).toContain('<p>Body text.</p>');
 	});
 
 	it('still marks text set larger than the body', () => {
 		const back = rtfToHtml(
-			htmlToRtf(htmlEl('<p>Body text here. <span style="font-size: 13pt">bigger</span></p>'), { fontSize: 10 })
+			htmlToRtf(htmlEl('<p>Body text here. <span style="font-size: 13pt">bigger</span></p>'), { fontSize: 10 }),
+			{ fontSize: 10 }
 		);
 		expect(back).toContain('font-size:13pt');
+	});
+});
+
+// ── Loading RTF into an editor and saving it again ────────────────────────────
+
+/** What an app does: rtfToHtml, then set it as the editor's HTML, then htmlToRtf. */
+function reload(rtf: string, fontSize?: number): string {
+	return htmlToRtf(htmlEl(rtfToHtml(rtf, { fontSize })), { fontSize });
+}
+
+describe('RTF loaded into an editor and saved again', () => {
+	it('adds no space at the start of a paragraph', () => {
+		const original = htmlToRtf(htmlEl('<p>Prostate, biopsy:</p><p>- Benign.</p><p>- Margins negative.</p>'));
+		const saved = reload(original);
+		expect(saved).not.toMatch(/\\par {2,}/);
+		expect(saved).toContain('\\pard - Benign.');
+		expect(saved).toContain('\\pard - Margins negative.');
+	});
+
+	it('ignores the whitespace between blocks but keeps the space between words', () => {
+		const rtf = htmlToRtf(htmlEl('<p>a</p>\n  <p><b>bold</b> <i>italic</i></p>\n'));
+		expect(rtf).toContain('\\par \\pard \\b bold\\b0  \\i italic\\i0 \\par ');
+		expect(rtf).not.toMatch(/\\par {2,}/);
+	});
+
+	for (const fontSize of [10, 12]) {
+		it(`is stable over repeated saves at ${fontSize} pt`, () => {
+			const html = '<h1>Title</h1><h3>Sub</h3><p>Body text.</p><ul><li>item</li></ul><p>More.</p>';
+			const first = htmlToRtf(htmlEl(html), { fontSize });
+			let rtf = first;
+			for (let i = 0; i < 4; i++) rtf = reload(rtf, fontSize);
+			const shown = rtfToHtml(rtf, { fontSize });
+			expect(shown).toMatch(/<h1>[^\n]*Title[^\n]*<\/h1>/);
+			expect(shown).toMatch(/<h3>[^\n]*Sub[^\n]*<\/h3>/);
+			expect(shown).toContain('<p>Body text.</p>');
+			expect(shown).not.toMatch(/<span[^>]*>\s*<\/span>/);
+			expect(rtf).toBe(reload(rtf, fontSize));
+		});
+	}
+});
+
+describe('non-breaking spaces', () => {
+	it('are kept beside blocks, unlike collapsible whitespace', () => {
+		const rtf = htmlToRtf(htmlEl('<p>a</p> <p>b</p><p> </p>'));
+		expect(rtf).toContain('\\par \\u160\\\'3f\\pard b\\par \\pard \\u160\\\'3f\\par ');
 	});
 });

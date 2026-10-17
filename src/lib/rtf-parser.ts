@@ -11,7 +11,7 @@
  * \cb (character background) is silently ignored on import.
  */
 
-import { HEADING_SCALE } from './rtf-writer.js';
+import { HEADING_SCALE, normalizeFontSize } from './rtf-writer.js';
 
 // ── Types ──
 
@@ -391,51 +391,21 @@ const destinationWords = new Set([
 	'title', 'subject', 'doccomm', 'company', 'category', 'keywords'
 ]);
 
-/** Default RTF font size: 12 pt, in half-points. */
-const DEFAULT_HALF_POINTS = 24;
-
-/**
- * The document's body text size, in half-points: the size most of its text is
- * set in. Headings are recognized relative to it, so a document written at
- * 10 or 14 pt keeps its paragraphs and headings apart instead of being judged
- * against a fixed 12 pt.
- */
-function bodyHalfPoints(root: RtfGroup): number {
-	const chars = new Map<number, number>();
-
-	function visit(nodes: RtfNode[], size: number): number {
-		for (const node of nodes) {
-			if (node.type === 'group') {
-				const first = node.children.find((n) => n.type === 'control') as RtfControl | undefined;
-				const starred = node.children[0]?.type === 'control' && (node.children[0] as RtfControl).word === '*';
-				if (starred || (first && (first.word === 'pict' || destinationWords.has(first.word)))) continue;
-				visit(node.children, size);
-			} else if (node.type === 'control') {
-				if (node.word === 'fs' && node.param != null && node.param > 0) size = node.param;
-				else if (node.word === 'plain') size = DEFAULT_HALF_POINTS;
-			} else {
-				const n = node.value.trim().length;
-				if (n) chars.set(size, (chars.get(size) ?? 0) + n);
-			}
-		}
-		return size;
-	}
-	visit(root.children, DEFAULT_HALF_POINTS);
-
-	let best = DEFAULT_HALF_POINTS;
-	let most = 0;
-	for (const [size, n] of chars) {
-		if (n > most) {
-			best = size;
-			most = n;
-		}
-	}
-	return best;
-}
-
 // ── Renderer ──
 
-export function rtfToHtml(rtfString: string): string {
+/** Options for rtfToHtml. */
+export interface RtfReadOptions {
+	/**
+	 * The body text size of the screen the HTML will be shown on, in points:
+	 * the editor's or viewer's fontSize. Text at this size carries no size of
+	 * its own, text at any other size keeps its font-size, and headings are
+	 * recognized by their ratio to it (HEADING_SCALE). Default: 12, which reads
+	 * a document exactly as 1.4.0 did.
+	 */
+	fontSize?: number;
+}
+
+export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): string {
 	const tokens = tokenize(rtfString);
 	const tree = buildTree(tokens);
 
@@ -483,10 +453,9 @@ export function rtfToHtml(rtfString: string): string {
 		}
 	}
 
-	// Headings are recognized by their ratio to the body size. Text keeps its
-	// own size, though: anything other than 12 pt carries a font-size, so a
-	// document written at 9 pt still shows at 9 pt.
-	const bodySize = bodyHalfPoints(rootGroup);
+	// The screen's body size, in half-points. It is given, not guessed from the
+	// document: guessing misread short documents and ones set below 12 pt.
+	const bodySize = normalizeFontSize(options.fontSize) * 2;
 
 	// State stack for nested groups
 	function defaultState(): RenderState {
@@ -516,7 +485,7 @@ export function rtfToHtml(rtfString: string): string {
 		return { ...currentState() };
 	}
 
-	function buildSpanOpen(state: RenderState): string {
+	function buildSpanOpen(state: RenderState, withSize = true): string {
 		const styles: string[] = [];
 
 		if (state.colorIndex > 0 && state.colorIndex < colorTable.length) {
@@ -531,7 +500,7 @@ export function rtfToHtml(rtfString: string): string {
 			if (bg) styles.push(`background-color:${bg}`);
 		}
 
-		if (state.fontSize && state.fontSize !== DEFAULT_HALF_POINTS) {
+		if (withSize && state.fontSize && state.fontSize !== bodySize) {
 			styles.push(`font-size:${state.fontSize / 2}pt`);
 		}
 
@@ -541,6 +510,10 @@ export function rtfToHtml(rtfString: string): string {
 
 	function wrapText(text: string, state: RenderState): string {
 		if (!text) return '';
+		// A size on spaces alone is not shown and would be read as the
+		// paragraph's size, so it is dropped. Underline, strikethrough and
+		// highlight are kept: an underlined blank is a signature line.
+		const onlySpaces = /^[ \t\r\n\f]*$/.test(text);
 
 		let result = text
 			.replace(/&/g, '&amp;')
@@ -548,7 +521,7 @@ export function rtfToHtml(rtfString: string): string {
 			.replace(/>/g, '&gt;');
 
 		// Apply span styles
-		const spanOpen = buildSpanOpen(state);
+		const spanOpen = buildSpanOpen(state, !onlySpaces);
 		if (spanOpen) {
 			result = `${spanOpen}${result}</span>`;
 		}
@@ -944,9 +917,13 @@ export function rtfToHtml(rtfString: string): string {
 			const halfPoints = Math.round(parseFloat(sizeMatch[1]) * 2);
 			const alignAttr = align !== 'left' ? ` style="text-align:${align}"` : '';
 			const atLeast = (scale: number) => halfPoints >= Math.round(bodySize * scale);
-			if (atLeast(HEADING_SCALE.h1)) { rendered.push(`<h1${alignAttr}>${stripSizeSpan(trimmed)}</h1>`); continue; }
-			if (atLeast(HEADING_SCALE.h2)) { rendered.push(`<h2${alignAttr}>${stripSizeSpan(trimmed)}</h2>`); continue; }
-			if (atLeast(HEADING_SCALE.h3)) { rendered.push(`<h3${alignAttr}>${stripSizeSpan(trimmed)}</h3>`); continue; }
+			// At the default 12 pt, size alone makes a heading, as it always has. At
+			// another screen size, ordinary 12 pt text can be a step above the body,
+			// so a heading must also be bold, as every heading the writer emits is.
+			const looksLikeHeading = bodySize === 24 || /^<strong>/.test(trimmed);
+			if (looksLikeHeading && atLeast(HEADING_SCALE.h1)) { rendered.push(`<h1${alignAttr}>${stripSizeSpan(trimmed)}</h1>`); continue; }
+			if (looksLikeHeading && atLeast(HEADING_SCALE.h2)) { rendered.push(`<h2${alignAttr}>${stripSizeSpan(trimmed)}</h2>`); continue; }
+			if (looksLikeHeading && atLeast(HEADING_SCALE.h3)) { rendered.push(`<h3${alignAttr}>${stripSizeSpan(trimmed)}</h3>`); continue; }
 		}
 		const pStyle = align !== 'left' ? ` style="text-align:${align}"` : '';
 		rendered.push(`<p${pStyle}>${trimmed}</p>`);
@@ -969,13 +946,13 @@ function stripWrappingEm(html: string): string {
 	return html.replace(/^<em>([\s\S]*)<\/em>$/, '$1');
 }
 
-export function readRtfFile(file: File): Promise<string> {
+export function readRtfFile(file: File, options: RtfReadOptions = {}): Promise<string> {
 	return new Promise((resolve, reject) => {
 		const reader = new FileReader();
 		reader.onload = () => {
 			try {
 				const text = reader.result as string;
-				const html = rtfToHtml(text);
+				const html = rtfToHtml(text, options);
 				resolve(html);
 			} catch (err) {
 				reject(new Error(`Failed to parse RTF: ${(err as Error).message}`));
