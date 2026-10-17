@@ -105,9 +105,11 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 
 ### `<RtfViewer>`
 
-| Prop      | Type     | Default | Description                              |
-|-----------|----------|---------|------------------------------------------|
-| `content` | `string` | —       | Raw RTF string to parse and display      |
+| Prop         | Type     | Default   | Description                              |
+|--------------|----------|-----------|------------------------------------------|
+| `content`    | `string` | —         | Raw RTF string to parse and display      |
+| `fontFamily` | `string` | `'Arial'` | Font the document is shown in            |
+| `fontSize`   | `number` | `12`      | Body text size in points                 |
 
 ---
 
@@ -128,6 +130,8 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 | `maxImageEdge`  | `number`   | `1600`                       | Longest edge (px) an inserted image is scaled down to; `0` keeps full size |
 | `maxImageBytes` | `number`   | `524288`                     | Encoded byte ceiling per image; oversized pictures are re-encoded until they fit. `0` disables |
 | `maxImageDisplayWidth` | `number` | `624`                 | Width (px) a newly inserted image is displayed at, unless the column is narrower — 6.5in of page. `0` fills the column |
+| `fontFamily`    | `string`   | `'Arial'`                    | Document font, on screen and in the RTF. See [Fonts](#fonts) |
+| `fontSize`      | `number`   | `12`                         | Body text size in points, on screen and in the RTF        |
 
 #### Callback props
 
@@ -158,18 +162,42 @@ editor.importRtf()        // → void    — open the file picker to import .rtf
 
 ```ts
 import {
-  rtfToHtml, htmlToRtf, estimateRtfBytes, readRtfFile, htmlToMarkdown, downloadFile
+  rtfToHtml, htmlToRtf, estimateRtfBytes, readRtfFile, htmlToMarkdown, downloadFile,
+  DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE
 } from 'svelte-rtf-editor';
 ```
 
 | Function                              | Description                                        |
 |---------------------------------------|----------------------------------------------------|
 | `rtfToHtml(rtf: string): string`      | Parse an RTF string and return an HTML string      |
-| `htmlToRtf(html: string): string`     | Convert an HTML string to RTF                      |
+| `htmlToRtf(el: HTMLElement, options?: { fontFamily?, fontSize? }): string` | Convert a DOM element's content to RTF, in Arial 12 pt unless told otherwise |
 | `estimateRtfBytes(el: HTMLElement): number` | Approximate RTF size of a DOM element without converting it |
 | `readRtfFile(file: File): Promise<string>` | Read a `.rtf` File object and return HTML     |
 | `htmlToMarkdown(el: HTMLElement): string` | Convert a DOM element's content to Markdown   |
 | `downloadFile(name, content, mime): void` | Trigger a file download in the browser        |
+
+---
+
+## Fonts
+
+The editor and the viewer show a document in the same font and size the RTF carries, so what you see on screen is what the receiving system gets. Both default to **Arial 12 pt**.
+
+```svelte
+<InkEditor fontFamily="Calibri" fontSize={11} bind:this={editor} />
+```
+
+```ts
+htmlToRtf(el, { fontFamily: 'Calibri', fontSize: 11 });
+```
+
+- `fontFamily` is used for the whole document: body text, headings, lists and tables. Code keeps Courier New.
+- `fontSize` is the body size in points. Headings scale from it: at 12 pt, `h1` is 24 pt, `h2` 18 pt and `h3` 14 pt.
+- If you call `htmlToRtf` yourself on the editor's content, pass the same options you gave the editor, or the two produce different RTF.
+- `fontFamily` names one font. Given a CSS list such as `'Arial, sans-serif'`, only the first family is used.
+- `fontSize` is rounded to the nearest half-point, which is what RTF measures in, and kept between 1 and 1638 pt.
+- `rtfToHtml` recognizes headings relative to the document's own body size, so a document written at any size reads back with the same headings.
+
+The font has to be installed on the machine that displays the document. The RTF names it, and a reader without it substitutes one of its own.
 
 ---
 

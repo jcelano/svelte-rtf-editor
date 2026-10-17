@@ -4,5 +4,11 @@ export { default as InkEditor } from './components/InkEditor.svelte';
 
 // RTF utilities
 export { rtfToHtml, readRtfFile }       from './rtf-parser.js';
-export { htmlToRtf, estimateRtfBytes }  from './rtf-writer.js';
+export {
+	htmlToRtf,
+	estimateRtfBytes,
+	DEFAULT_FONT_FAMILY,
+	DEFAULT_FONT_SIZE
+} from './rtf-writer.js';
+export type { RtfWriteOptions } from './rtf-writer.js';
 export { htmlToMarkdown, downloadFile } from './utils.js';

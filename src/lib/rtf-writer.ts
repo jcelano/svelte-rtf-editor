@@ -2,7 +2,8 @@
  * HTML to RTF converter
  *
  * Walks a contenteditable DOM tree and produces a valid RTF 1.x string.
- * Supports: bold, italic, underline, strikethrough, font sizes (h1–h3),
+ * Supports: a document font and body size (Arial 12 pt by default, set with
+ * RtfWriteOptions), bold, italic, underline, strikethrough, font sizes (h1–h3),
  * foreground colors (\cf), paragraphs, bullet/numbered lists, blockquotes,
  * code blocks, hyperlinks, images (embedded as \pict picture groups with
  * their captions), horizontal rules, line breaks, and Unicode characters.
@@ -19,8 +20,41 @@ interface RGB {
 	b: number;
 }
 
+/** Options for htmlToRtf. */
+export interface RtfWriteOptions {
+	/**
+	 * Font for the whole document: body text, headings, lists and tables.
+	 * Code keeps a monospace font. Default: Arial.
+	 */
+	fontFamily?: string;
+	/**
+	 * Body text size in points. Headings scale from it. Default: 12.
+	 */
+	fontSize?: number;
+}
+
+/** Font used when no fontFamily is given. */
+export const DEFAULT_FONT_FAMILY = 'Arial';
+
+/** Body text size, in points, used when no fontSize is given. */
+export const DEFAULT_FONT_SIZE = 12;
+
+/** Largest font size RTF readers accept (Word's limit), in points. */
+const MAX_FONT_SIZE = 1638;
+
+/**
+ * Heading sizes as a multiple of the body size: at 12 pt, h1 is 24 pt, h2 18 pt
+ * and h3 14 pt. The parser reads headings back with the same ratios.
+ */
+export const HEADING_SCALE = { h1: 2, h2: 1.5, h3: 7 / 6 } as const;
+
+/** Code blocks are set slightly smaller than the body: 10 pt at 12 pt. */
+const PRE_SCALE = 5 / 6;
+
 interface WalkContext {
 	colorIndex: Map<string, number>;
+	/** Body text size in RTF half-points (\fsN). */
+	bodySize: number;
 	inPre: boolean;
 	listCounter: number;
 	inTableCell: boolean;
@@ -297,8 +331,11 @@ function base64ByteLength(base64: string): number {
 	return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
 }
 
-/** Bytes of RTF header, font table and colour table that precede the body. */
-const RTF_PREAMBLE_BYTES = 200;
+/**
+ * Bytes of RTF header, font table and colour table that precede the body, with
+ * the default font. Another font name changes it by the difference in length.
+ */
+const RTF_PREAMBLE_BYTES = 165;
 
 /** Control words wrapping one \pict group. */
 const PICTURE_OVERHEAD_BYTES = 80;
@@ -311,9 +348,9 @@ const PICTURE_OVERHEAD_BYTES = 80;
 const BLOCK_OVERHEAD_BYTES: Record<string, number> = {
 	p: 14,
 	div: 14,
-	h1: 32,
-	h2: 32,
-	h3: 32,
+	h1: 29,
+	h2: 29,
+	h3: 29,
 	li: 35,
 	blockquote: 22,
 	pre: 27,
@@ -356,9 +393,67 @@ export function estimateRtfBytes(editorEl: HTMLElement): number {
 	return total;
 }
 
+// ── Font helpers ──
+
+/**
+ * A single font name, safe for the font table. A CSS list such as
+ * 'Arial, sans-serif' keeps only its first family, since RTF names one font.
+ * Anything that would break the table is removed: a name is terminated by ';'
+ * and cannot contain group delimiters or control words.
+ */
+function cleanFontName(name: string | undefined): string {
+	const first = (name ?? '').replace(/["']/g, '').split(',')[0];
+	const cleaned = first.replace(/[\\{};]/g, '').trim();
+	return cleaned || DEFAULT_FONT_FAMILY;
+}
+
+/** RTF font family class for a font name: \froman, \fmodern or \fswiss. */
+function fontFamilyClass(name: string): 'roman' | 'modern' | 'swiss' {
+	const n = name.toLowerCase();
+	if (/courier|mono|consolas|menlo|monaco|typewriter|lucida console/.test(n)) return 'modern';
+	if (
+		/times|georgia|garamond|cambria|palatino|antiqua|schoolbook|baskerville|didot|bodoni|serif/.test(n) &&
+		!/sans/.test(n)
+	) {
+		return 'roman';
+	}
+	return 'swiss';
+}
+
+/**
+ * CSS font-family value for a font name, with the generic fallback that
+ * matches it, e.g. "Arial", sans-serif.
+ */
+export function cssFontFamily(name: string | undefined): string {
+	const font = cleanFontName(name);
+	const generic = { roman: 'serif', modern: 'monospace', swiss: 'sans-serif' }[fontFamilyClass(font)];
+	return `"${font}", ${generic}`;
+}
+
+/**
+ * A body size in points, as the RTF will carry it: rounded to the half-point
+ * RTF measures in, kept within what readers accept, and the default for
+ * missing or nonsense input. The editor and viewer show this same size, so
+ * the screen and the RTF agree.
+ */
+export function normalizeFontSize(fontSize: number | undefined): number {
+	if (typeof fontSize !== 'number' || !Number.isFinite(fontSize) || fontSize <= 0) {
+		return DEFAULT_FONT_SIZE;
+	}
+	return Math.min(MAX_FONT_SIZE, Math.max(1, Math.round(fontSize * 2) / 2));
+}
+
+/** Body size in RTF half-points. */
+function bodyHalfPoints(fontSize: number | undefined): number {
+	return normalizeFontSize(fontSize) * 2;
+}
+
 // ── DOM walker / RTF generator ──
 
-export function htmlToRtf(editorEl: HTMLElement): string {
+export function htmlToRtf(editorEl: HTMLElement, options: RtfWriteOptions = {}): string {
+	const fontName = cleanFontName(options.fontFamily);
+	const bodySize = bodyHalfPoints(options.fontSize);
+
 	const colorMap = new Map<string, RGB>();
 	colorMap.set('0,0,0', { r: 0, g: 0, b: 0 });
 
@@ -379,15 +474,17 @@ export function htmlToRtf(editorEl: HTMLElement): string {
 	}
 	colorTable += '}';
 
+	// \f0 is the document font, used for everything except code; \f1 is the
+	// monospace font for code.
 	const fontTable =
 		'{\\fonttbl' +
-		'{\\f0\\fswiss\\fcharset0 Helvetica;}' +
-		'{\\f1\\froman\\fcharset0 Georgia;}' +
-		'{\\f2\\fmodern\\fcharset0 Courier New;}' +
+		`{\\f0\\f${fontFamilyClass(fontName)}\\fcharset0 ${escapeRtf(fontName)};}` +
+		'{\\f1\\fmodern\\fcharset0 Courier New;}' +
 		'}';
 
 	const body = walkChildren(editorEl, {
 		colorIndex,
+		bodySize,
 		inPre: false,
 		listCounter: 0,
 		inTableCell: false,
@@ -399,7 +496,7 @@ export function htmlToRtf(editorEl: HTMLElement): string {
 		fontTable +
 		colorTable +
 		'\\viewkind4\\uc1' +
-		'\\pard\\f0\\fs24 ' +
+		`\\pard\\f0\\fs${bodySize} ` +
 		body +
 		'}';
 
@@ -449,16 +546,17 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 		const tag = el.tagName.toLowerCase();
 
 		switch (tag) {
+			// Heading sizes keep their ratio to the body (HEADING_SCALE).
 			case 'h1':
-				rtf += `\\pard\\f1\\fs48\\b ${walkChildren(el, ctx)}\\b0\\f0\\fs24\\par `;
+				rtf += `\\pard\\f0\\fs${scaled(ctx, HEADING_SCALE.h1)}\\b ${walkChildren(el, ctx)}\\b0\\fs${ctx.bodySize}\\par `;
 				break;
 
 			case 'h2':
-				rtf += `\\pard\\f1\\fs36\\b ${walkChildren(el, ctx)}\\b0\\f0\\fs24\\par `;
+				rtf += `\\pard\\f0\\fs${scaled(ctx, HEADING_SCALE.h2)}\\b ${walkChildren(el, ctx)}\\b0\\fs${ctx.bodySize}\\par `;
 				break;
 
 			case 'h3':
-				rtf += `\\pard\\f0\\fs28\\b ${walkChildren(el, ctx)}\\b0\\fs24\\par `;
+				rtf += `\\pard\\f0\\fs${scaled(ctx, HEADING_SCALE.h3)}\\b ${walkChildren(el, ctx)}\\b0\\fs${ctx.bodySize}\\par `;
 				break;
 
 			case 'p':
@@ -530,7 +628,7 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 				break;
 
 			case 'pre':
-				rtf += `\\pard\\f2\\fs20 ${walkChildren(el, { ...ctx, inPre: true })}\\f0\\fs24\\par `;
+				rtf += `\\pard\\f1\\fs${scaled(ctx, PRE_SCALE)} ${walkChildren(el, { ...ctx, inPre: true })}\\f0\\fs${ctx.bodySize}\\par `;
 				break;
 
 			case 'hr':
@@ -589,7 +687,7 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 
 			case 'code':
 				if (!ctx.inPre) {
-					rtf += `\\f2 ${walkChildren(el, ctx)}\\f0 `;
+					rtf += `\\f1 ${walkChildren(el, ctx)}\\f0 `;
 				} else {
 					rtf += walkChildren(el, ctx);
 				}
@@ -640,7 +738,7 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 			case 'span': {
 				const colorPfx = getColorPrefix(el, ctx);
 				const sizePfx = getSizePrefix(el);
-				const sizesfx = sizePfx ? '\\fs24 ' : '';
+				const sizesfx = sizePfx ? `\\fs${ctx.bodySize} ` : '';
 				const colorSfx = colorPfx ? '\\cf0 ' : '';
 
 				rtf += `${colorPfx}${sizePfx}${walkChildren(el, ctx)}${sizesfx}${colorSfx}`;
@@ -662,6 +760,11 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 	}
 
 	return rtf;
+}
+
+/** Body size times a ratio, in half-points. */
+function scaled(ctx: WalkContext, ratio: number): number {
+	return Math.round(ctx.bodySize * ratio);
 }
 
 function getColorPrefix(el: HTMLElement, ctx: WalkContext): string {

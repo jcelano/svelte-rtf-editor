@@ -11,6 +11,8 @@
  * \cb (character background) is silently ignored on import.
  */
 
+import { HEADING_SCALE } from './rtf-writer.js';
+
 // ── Types ──
 
 interface RtfGroup {
@@ -375,6 +377,62 @@ function parseFontTable(group: RtfGroup): Map<number, string> {
 	return fonts;
 }
 
+// ── Body size ──
+
+/** Groups whose content is not document text. */
+const destinationWords = new Set([
+	'fonttbl', 'colortbl', 'stylesheet', 'info', 'header', 'footer',
+	'headerl', 'headerr', 'headerf', 'footerl', 'footerr', 'footerf',
+	// \nonshppict duplicates the picture already carried by \*\shppict
+	'nonshppict',
+	'object', 'fldinst', 'xmlnstbl', 'listtable', 'listoverridetable',
+	'rsidtbl', 'generator', 'datafield', 'themedata', 'colorschememapping',
+	'latentstyles', 'datastore', 'mmathPr', 'author', 'operator',
+	'title', 'subject', 'doccomm', 'company', 'category', 'keywords'
+]);
+
+/** Default RTF font size: 12 pt, in half-points. */
+const DEFAULT_HALF_POINTS = 24;
+
+/**
+ * The document's body text size, in half-points: the size most of its text is
+ * set in. Headings are recognized relative to it, so a document written at
+ * 10 or 14 pt keeps its paragraphs and headings apart instead of being judged
+ * against a fixed 12 pt.
+ */
+function bodyHalfPoints(root: RtfGroup): number {
+	const chars = new Map<number, number>();
+
+	function visit(nodes: RtfNode[], size: number): number {
+		for (const node of nodes) {
+			if (node.type === 'group') {
+				const first = node.children.find((n) => n.type === 'control') as RtfControl | undefined;
+				const starred = node.children[0]?.type === 'control' && (node.children[0] as RtfControl).word === '*';
+				if (starred || (first && (first.word === 'pict' || destinationWords.has(first.word)))) continue;
+				visit(node.children, size);
+			} else if (node.type === 'control') {
+				if (node.word === 'fs' && node.param != null && node.param > 0) size = node.param;
+				else if (node.word === 'plain') size = DEFAULT_HALF_POINTS;
+			} else {
+				const n = node.value.trim().length;
+				if (n) chars.set(size, (chars.get(size) ?? 0) + n);
+			}
+		}
+		return size;
+	}
+	visit(root.children, DEFAULT_HALF_POINTS);
+
+	let best = DEFAULT_HALF_POINTS;
+	let most = 0;
+	for (const [size, n] of chars) {
+		if (n > most) {
+			best = size;
+			most = n;
+		}
+	}
+	return best;
+}
+
 // ── Renderer ──
 
 export function rtfToHtml(rtfString: string): string {
@@ -425,6 +483,10 @@ export function rtfToHtml(rtfString: string): string {
 		}
 	}
 
+	// Sizes are shown relative to the body: body text carries no size of its
+	// own, and headings are recognized by their ratio to it.
+	const bodySize = bodyHalfPoints(rootGroup);
+
 	// State stack for nested groups
 	function defaultState(): RenderState {
 		return {
@@ -468,9 +530,8 @@ export function rtfToHtml(rtfString: string): string {
 			if (bg) styles.push(`background-color:${bg}`);
 		}
 
-		const ptSize = state.fontSize / 2;
-		if (ptSize && ptSize !== 12) {
-			styles.push(`font-size:${ptSize}pt`);
+		if (state.fontSize && state.fontSize !== bodySize) {
+			styles.push(`font-size:${state.fontSize / 2}pt`);
 		}
 
 		if (styles.length === 0) return '';
@@ -502,17 +563,6 @@ export function rtfToHtml(rtfString: string): string {
 	}
 
 	let skipDepth = 0;
-
-	const destinationWords = new Set([
-		'fonttbl', 'colortbl', 'stylesheet', 'info', 'header', 'footer',
-		'headerl', 'headerr', 'headerf', 'footerl', 'footerr', 'footerf',
-		// \nonshppict duplicates the picture already carried by \*\shppict
-		'nonshppict',
-		'object', 'fldinst', 'xmlnstbl', 'listtable', 'listoverridetable',
-		'rsidtbl', 'generator', 'datafield', 'themedata', 'colorschememapping',
-		'latentstyles', 'datastore', 'mmathPr', 'author', 'operator',
-		'title', 'subject', 'doccomm', 'company', 'category', 'keywords'
-	]);
 
 	function flushTable() {
 		if (tableRows.length === 0) return;
@@ -888,11 +938,14 @@ export function rtfToHtml(rtfString: string): string {
 		}
 		const sizeMatch = trimmed.match(/font-size:\s*([\d.]+)pt/);
 		if (sizeMatch) {
-			const pt = parseFloat(sizeMatch[1]);
+			// Compared in half-points, rounded the way the writer rounds them, so
+			// a heading written at any body size is read back as the same level.
+			const halfPoints = Math.round(parseFloat(sizeMatch[1]) * 2);
 			const alignAttr = align !== 'left' ? ` style="text-align:${align}"` : '';
-			if (pt >= 24) { rendered.push(`<h1${alignAttr}>${stripSizeSpan(trimmed)}</h1>`); continue; }
-			if (pt >= 18) { rendered.push(`<h2${alignAttr}>${stripSizeSpan(trimmed)}</h2>`); continue; }
-			if (pt >= 14) { rendered.push(`<h3${alignAttr}>${stripSizeSpan(trimmed)}</h3>`); continue; }
+			const atLeast = (scale: number) => halfPoints >= Math.round(bodySize * scale);
+			if (atLeast(HEADING_SCALE.h1)) { rendered.push(`<h1${alignAttr}>${stripSizeSpan(trimmed)}</h1>`); continue; }
+			if (atLeast(HEADING_SCALE.h2)) { rendered.push(`<h2${alignAttr}>${stripSizeSpan(trimmed)}</h2>`); continue; }
+			if (atLeast(HEADING_SCALE.h3)) { rendered.push(`<h3${alignAttr}>${stripSizeSpan(trimmed)}</h3>`); continue; }
 		}
 		const pStyle = align !== 'left' ? ` style="text-align:${align}"` : '';
 		rendered.push(`<p${pStyle}>${trimmed}</p>`);
