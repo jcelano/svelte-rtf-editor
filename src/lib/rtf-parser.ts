@@ -485,7 +485,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		return { ...currentState() };
 	}
 
-	function buildSpanOpen(state: RenderState): string {
+	function buildSpanOpen(state: RenderState, withSize = true): string {
 		const styles: string[] = [];
 
 		if (state.colorIndex > 0 && state.colorIndex < colorTable.length) {
@@ -500,7 +500,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			if (bg) styles.push(`background-color:${bg}`);
 		}
 
-		if (state.fontSize && state.fontSize !== bodySize) {
+		if (withSize && state.fontSize && state.fontSize !== bodySize) {
 			styles.push(`font-size:${state.fontSize / 2}pt`);
 		}
 
@@ -510,9 +510,10 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 
 	function wrapText(text: string, state: RenderState): string {
 		if (!text) return '';
-		// Whitespace carries no formatting worth keeping, and a sized span around
-		// a lone space would be read as the paragraph's size.
-		if (/^[ \t\r\n\f]*$/.test(text)) return text;
+		// A size on spaces alone is not shown and would be read as the
+		// paragraph's size, so it is dropped. Underline, strikethrough and
+		// highlight are kept: an underlined blank is a signature line.
+		const onlySpaces = /^[ \t\r\n\f]*$/.test(text);
 
 		let result = text
 			.replace(/&/g, '&amp;')
@@ -520,7 +521,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			.replace(/>/g, '&gt;');
 
 		// Apply span styles
-		const spanOpen = buildSpanOpen(state);
+		const spanOpen = buildSpanOpen(state, !onlySpaces);
 		if (spanOpen) {
 			result = `${spanOpen}${result}</span>`;
 		}
@@ -916,9 +917,13 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			const halfPoints = Math.round(parseFloat(sizeMatch[1]) * 2);
 			const alignAttr = align !== 'left' ? ` style="text-align:${align}"` : '';
 			const atLeast = (scale: number) => halfPoints >= Math.round(bodySize * scale);
-			if (atLeast(HEADING_SCALE.h1)) { rendered.push(`<h1${alignAttr}>${stripSizeSpan(trimmed)}</h1>`); continue; }
-			if (atLeast(HEADING_SCALE.h2)) { rendered.push(`<h2${alignAttr}>${stripSizeSpan(trimmed)}</h2>`); continue; }
-			if (atLeast(HEADING_SCALE.h3)) { rendered.push(`<h3${alignAttr}>${stripSizeSpan(trimmed)}</h3>`); continue; }
+			// At the default 12 pt, size alone makes a heading, as it always has. At
+			// another screen size, ordinary 12 pt text can be a step above the body,
+			// so a heading must also be bold, as every heading the writer emits is.
+			const looksLikeHeading = bodySize === 24 || /^<strong>/.test(trimmed);
+			if (looksLikeHeading && atLeast(HEADING_SCALE.h1)) { rendered.push(`<h1${alignAttr}>${stripSizeSpan(trimmed)}</h1>`); continue; }
+			if (looksLikeHeading && atLeast(HEADING_SCALE.h2)) { rendered.push(`<h2${alignAttr}>${stripSizeSpan(trimmed)}</h2>`); continue; }
+			if (looksLikeHeading && atLeast(HEADING_SCALE.h3)) { rendered.push(`<h3${alignAttr}>${stripSizeSpan(trimmed)}</h3>`); continue; }
 		}
 		const pStyle = align !== 'left' ? ` style="text-align:${align}"` : '';
 		rendered.push(`<p${pStyle}>${trimmed}</p>`);

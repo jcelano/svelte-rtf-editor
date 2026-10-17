@@ -195,7 +195,7 @@ htmlToRtf(el, { fontFamily: 'Calibri', fontSize: 11 });
 - If you call `htmlToRtf` yourself on the editor's content, pass the same options you gave the editor, or the two produce different RTF.
 - `fontFamily` names one font. Given a CSS list such as `'Arial, sans-serif'`, only the first family is used.
 - `fontSize` is rounded to the nearest half-point, which is what RTF measures in, and kept between 1 and 1638 pt.
-- If you show RTF in an editor or viewer set to another size, pass the same `fontSize` to `rtfToHtml`. Text at that size then carries no size of its own, text at any other size keeps it, and headings are recognized by the same ratios the writer uses. `InkEditor`'s RTF import and `RtfViewer` do this themselves. At the default, 12 pt, RTF reads exactly as it did in 1.4.0.
+- If you show RTF in an editor or viewer set to another size, pass the same `fontSize` to `rtfToHtml`. Text at that size then carries no size of its own, text at any other size keeps it, and headings are recognized by the same ratios the writer uses. `InkEditor`'s RTF import and `RtfViewer` do this themselves. At another size than 12 pt, a heading must also be bold, as every heading the writer emits is.
 
 The font has to be installed on the machine that displays the document. The RTF names it, and a reader without it substitutes one of its own.
 

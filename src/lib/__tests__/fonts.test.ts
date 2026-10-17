@@ -239,8 +239,24 @@ describe('reading back a document written at another size', () => {
 		const back = rtfToHtml(rtf, { fontSize: 10 });
 		expect(back).toContain('<p>Body.</p>');
 		expect(back).toContain('<p><span style="font-size:11pt">Eleven point note.</span></p>');
-		// 12 pt is above 7/6 of 10 pt, the size the writer gives an h3 at 10 pt.
-		expect(back).toMatch(/<h3>[^\n]*Twelve point note\.[^\n]*<\/h3>/);
+		expect(back).toContain('<p><span style="font-size:12pt">Twelve point note.</span></p>');
+	});
+
+	it('leaves a plain 12 pt report as plain paragraphs in a 10 pt editor, save after save', () => {
+		const rtf = String.raw`{\rtf1\ansi\pard\plain\fs24 A. Left colon, sigmoid, resection:\par\pard\plain\fs24 - Invasive adenocarcinoma.\par\pard Margins negative.\par}`;
+		let saved = rtf;
+		for (let i = 0; i < 3; i++) saved = reload(saved, 10);
+		const back = rtfToHtml(saved, { fontSize: 10 });
+		expect(back).not.toMatch(/<h[1-3]>/);
+		expect(back).not.toContain('<strong>');
+		expect(saved).not.toContain('\\b ');
+		expect(back).toContain('<p><span style="font-size:12pt">A. Left colon, sigmoid, resection:</span></p>');
+	});
+
+	it('keeps an underlined blank, such as a signature line', () => {
+		expect(rtfToHtml(String.raw`{\rtf1\ansi\pard Signature:{\ul      }\par}`)).toContain('<p>Signature:<u>     </u></p>');
+		const saved = reload(htmlToRtf(htmlEl('<p>Signature: <u>          </u></p>')));
+		expect(rtfToHtml(saved)).toContain('<u>          </u>');
 	});
 
 	it('keeps a short heading a heading, whatever most of the text is set in', () => {
