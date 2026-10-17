@@ -532,7 +532,7 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 			// Whitespace between two blocks (the newline in "</p>\n<p>") shows as
 			// nothing in a browser. Written out, it became a space at the start of
 			// the next paragraph.
-			if (!ctx.inPre && !text.trim() && besideBlock(node)) continue;
+			if (!ctx.inPre && COLLAPSIBLE_WHITESPACE.test(text) && besideBlock(node)) continue;
 			if (ctx.inPre) {
 				// Split before escaping — escapeRtf collapses newlines, so the
 				// line structure a <pre> block depends on has to become \line
@@ -770,6 +770,12 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 function scaled(ctx: WalkContext, ratio: number): number {
 	return Math.round(ctx.bodySize * ratio);
 }
+
+/**
+ * Whitespace a browser collapses: spaces, tabs and line breaks, but not a
+ * non-breaking space, which is there on purpose.
+ */
+const COLLAPSIBLE_WHITESPACE = /^[ \t\r\n\f]*$/;
 
 const BLOCK_TAGS = new Set([
 	'p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'table', 'thead',

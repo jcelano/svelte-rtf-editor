@@ -512,7 +512,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		if (!text) return '';
 		// Whitespace carries no formatting worth keeping, and a sized span around
 		// a lone space would be read as the paragraph's size.
-		if (!text.trim()) return text;
+		if (/^[ \t\r\n\f]*$/.test(text)) return text;
 
 		let result = text
 			.replace(/&/g, '&amp;')

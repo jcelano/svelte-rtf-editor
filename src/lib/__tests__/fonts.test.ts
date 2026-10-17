@@ -300,3 +300,10 @@ describe('RTF loaded into an editor and saved again', () => {
 		});
 	}
 });
+
+describe('non-breaking spaces', () => {
+	it('are kept beside blocks, unlike collapsible whitespace', () => {
+		const rtf = htmlToRtf(htmlEl('<p>a</p> <p>b</p><p> </p>'));
+		expect(rtf).toContain('\\par \\u160\\\'3f\\pard b\\par \\pard \\u160\\\'3f\\par ');
+	});
+});
