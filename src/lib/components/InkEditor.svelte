@@ -365,6 +365,7 @@
 		saveSelection();
 		linkUrl = '';
 		linkText = '';
+		linkError = '';
 		linkModalOpen = true;
 	}
 
@@ -885,7 +886,12 @@
 		placeholder="https://example.com"
 		bind:value={linkUrl}
 		onkeydown={(e) => e.key === 'Enter' && applyLink()}
+		aria-invalid={linkError ? 'true' : undefined}
+		aria-describedby={linkError ? 'ink-link-error' : undefined}
 	/>
+	{#if linkError}
+		<p class="ink-modal-error" id="ink-link-error" role="alert">{linkError}</p>
+	{/if}
 	{#snippet actions()}
 		<button class="ink-btn-ghost" onclick={() => (linkModalOpen = false)}>Cancel</button>
 		<button class="ink-btn-primary" onclick={applyLink}>Insert</button>
@@ -1186,6 +1192,12 @@
 		margin: 0 0 12px;
 		font-size: 12px;
 		color: var(--text-muted, #8a7e72);
+	}
+
+	.ink-modal-error {
+		margin: 0 0 12px;
+		font-size: 12px;
+		color: var(--danger, #b42318);
 	}
 
 	.ink-modal-or {
