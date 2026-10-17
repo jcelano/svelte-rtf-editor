@@ -529,6 +529,10 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 
 		if (node.nodeType === Node.TEXT_NODE) {
 			const text = node.textContent || '';
+			// Whitespace between two blocks (the newline in "</p>\n<p>") shows as
+			// nothing in a browser. Written out, it became a space at the start of
+			// the next paragraph.
+			if (!ctx.inPre && !text.trim() && besideBlock(node)) continue;
 			if (ctx.inPre) {
 				// Split before escaping — escapeRtf collapses newlines, so the
 				// line structure a <pre> block depends on has to become \line
@@ -765,6 +769,22 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 /** Body size times a ratio, in half-points. */
 function scaled(ctx: WalkContext, ratio: number): number {
 	return Math.round(ctx.bodySize * ratio);
+}
+
+const BLOCK_TAGS = new Set([
+	'p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'table', 'thead',
+	'tbody', 'tfoot', 'tr', 'td', 'th', 'blockquote', 'pre', 'hr', 'figure', 'figcaption'
+]);
+
+function isBlock(node: Node | null): boolean {
+	return node?.nodeType === Node.ELEMENT_NODE && BLOCK_TAGS.has((node as Element).tagName.toLowerCase());
+}
+
+/** A text node with a block element on either side, or at the edge of one. */
+function besideBlock(node: Node): boolean {
+	const prev = node.previousSibling;
+	const next = node.nextSibling;
+	return isBlock(prev) || isBlock(next) || (!prev && !next && isBlock(node.parentNode));
 }
 
 function getColorPrefix(el: HTMLElement, ctx: WalkContext): string {

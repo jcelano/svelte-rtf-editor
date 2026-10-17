@@ -11,4 +11,5 @@ export {
 	DEFAULT_FONT_SIZE
 } from './rtf-writer.js';
 export type { RtfWriteOptions } from './rtf-writer.js';
+export type { RtfReadOptions } from './rtf-parser.js';
 export { htmlToMarkdown, downloadFile } from './utils.js';

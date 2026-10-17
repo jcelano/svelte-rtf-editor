@@ -169,7 +169,7 @@ import {
 
 | Function                              | Description                                        |
 |---------------------------------------|----------------------------------------------------|
-| `rtfToHtml(rtf: string): string`      | Parse an RTF string and return an HTML string      |
+| `rtfToHtml(rtf: string, options?: { fontSize? }): string` | Parse an RTF string and return an HTML string. `fontSize` is the size of the screen it will be shown on (default 12) |
 | `htmlToRtf(el: HTMLElement, options?: { fontFamily?, fontSize? }): string` | Convert a DOM element's content to RTF, in Arial 12 pt unless told otherwise |
 | `estimateRtfBytes(el: HTMLElement): number` | Approximate RTF size of a DOM element without converting it |
 | `readRtfFile(file: File): Promise<string>` | Read a `.rtf` File object and return HTML     |
@@ -195,7 +195,7 @@ htmlToRtf(el, { fontFamily: 'Calibri', fontSize: 11 });
 - If you call `htmlToRtf` yourself on the editor's content, pass the same options you gave the editor, or the two produce different RTF.
 - `fontFamily` names one font. Given a CSS list such as `'Arial, sans-serif'`, only the first family is used.
 - `fontSize` is rounded to the nearest half-point, which is what RTF measures in, and kept between 1 and 1638 pt.
-- `rtfToHtml` recognizes headings relative to the document's own body size, so a document written at any size reads back with the same headings.
+- If you show RTF in an editor or viewer set to another size, pass the same `fontSize` to `rtfToHtml`. Text at that size then carries no size of its own, text at any other size keeps it, and headings are recognized by the same ratios the writer uses. `InkEditor`'s RTF import and `RtfViewer` do this themselves. At the default, 12 pt, RTF reads exactly as it did in 1.4.0.
 
 The font has to be installed on the machine that displays the document. The RTF names it, and a reader without it substitutes one of its own.
 

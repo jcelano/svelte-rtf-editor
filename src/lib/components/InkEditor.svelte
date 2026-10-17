@@ -694,7 +694,7 @@
 		importing = true;
 
 		try {
-			const html = await readRtfFile(file);
+			const html = await readRtfFile(file, { fontSize });
 			if (editorEl) {
 				selectedImage = null;
 				editorEl.innerHTML = html;

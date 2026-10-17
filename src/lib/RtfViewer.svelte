@@ -19,7 +19,7 @@
     const screenFontFamily = $derived(cssFontFamily(fontFamily));
     const screenFontSize = $derived(normalizeFontSize(fontSize));
 
-    const htmlContent = $derived(rtfToHtml(content));
+    const htmlContent = $derived(rtfToHtml(content, { fontSize }));
 
     let copied = $state(false);
 
