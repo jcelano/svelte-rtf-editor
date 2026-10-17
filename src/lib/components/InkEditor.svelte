@@ -23,6 +23,10 @@
 	 *                   which is what bounds the RTF payload — it costs two hex
 	 *                   characters per byte. 0 disables. Default: 524288 (512 KB,
 	 *                   about 1 MB of document per image).
+	 *   fontFamily    — Font for the document, both on screen and in the RTF.
+	 *                   Default: 'Arial'.
+	 *   fontSize      — Body text size in points, both on screen and in the RTF.
+	 *                   Headings scale from it. Default: 12.
 	 *
 	 * Events (callback props):
 	 *   onchange      — Fires on content change with
@@ -49,7 +53,13 @@
 	import ImageOverlay from './ImageOverlay.svelte';
 	import { htmlToMarkdown, downloadFile } from '../utils.js';
 	import { readRtfFile } from '../rtf-parser.js';
-	import { htmlToRtf, estimateRtfBytes } from '../rtf-writer.js';
+	import {
+		htmlToRtf,
+		estimateRtfBytes,
+		cssFontFamily,
+		DEFAULT_FONT_FAMILY,
+		DEFAULT_FONT_SIZE
+	} from '../rtf-writer.js';
 	import {
 		fileToImageSrc,
 		urlToImageSrc,
@@ -85,6 +95,8 @@
 		maxImageEdge?: number;
 		maxImageBytes?: number;
 		maxImageDisplayWidth?: number;
+		fontFamily?: string;
+		fontSize?: number;
 		onchange?: (payload: ChangePayload) => void;
 		onsave?: (payload: { html: string }) => void;
 		onimport?: (payload: { html: string }) => void;
@@ -103,10 +115,20 @@
 		maxImageEdge = DEFAULT_MAX_IMAGE_EDGE,
 		maxImageBytes = DEFAULT_MAX_IMAGE_BYTES,
 		maxImageDisplayWidth = DEFAULT_MAX_IMAGE_DISPLAY_WIDTH,
+		fontFamily = DEFAULT_FONT_FAMILY,
+		fontSize = DEFAULT_FONT_SIZE,
 		onchange,
 		onsave,
 		onimport
 	}: Props = $props();
+
+	// The same font and size go to the screen and to the RTF, so the editor
+	// shows what the receiving system will show.
+	const rtfOptions = $derived({ fontFamily, fontSize });
+	const screenFontFamily = $derived(cssFontFamily(fontFamily));
+	const screenFontSize = $derived(
+		Number.isFinite(fontSize) && fontSize > 0 ? fontSize : DEFAULT_FONT_SIZE
+	);
 
 	// ── Internal state ──
 	let editorEl: HTMLDivElement | null = $state(null);
@@ -170,7 +192,7 @@
 
 	export function getRTF(): string {
 		if (!editorEl) return '';
-		return htmlToRtf(editorEl);
+		return htmlToRtf(editorEl, rtfOptions);
 	}
 
 	/**
@@ -182,7 +204,7 @@
 	 */
 	export function getRtfSize(): number {
 		if (!editorEl) return 0;
-		return htmlToRtf(editorEl).length;
+		return htmlToRtf(editorEl, rtfOptions).length;
 	}
 
 	export function clear(): void {
@@ -215,7 +237,7 @@
 				break;
 			}
 			case 'rtf': {
-				const rtf = htmlToRtf(editorEl);
+				const rtf = htmlToRtf(editorEl, rtfOptions);
 				downloadFile('document.rtf', rtf, 'application/rtf');
 				break;
 			}
@@ -788,7 +810,12 @@
 	onchange={handleImageFilesChosen}
 />
 
-<div class="ink-editor" style="--ink-min-height: {minHeight};">
+<div
+	class="ink-editor"
+	style:--ink-min-height={minHeight}
+	style:--ink-font-family={screenFontFamily}
+	style:--ink-font-size="{screenFontSize}pt"
+>
 	{#if showToolbar && !readonly}
 		<Toolbar
 			{formatState}
@@ -930,8 +957,8 @@
 		border-radius: var(--radius, 8px);
 		box-shadow: var(--shadow-md, 0 4px 12px rgba(44, 37, 32, 0.08));
 		outline: none;
-		font-family: 'DM Sans', sans-serif;
-		font-size: 16px;
+		font-family: var(--ink-font-family, Arial, sans-serif);
+		font-size: var(--ink-font-size, 12pt);
 		line-height: 1.75;
 		color: var(--text, #2c2520);
 		caret-color: var(--accent, #d4622b);
@@ -951,9 +978,10 @@
 	}
 
 	/* ── Typography inside editor ── */
+	/* Headings use the document font and keep the same ratio to the body text
+	   as the RTF writer gives them, so the screen matches the RTF. */
 	.ink-content :global(h1) {
-		font-family: 'Instrument Serif', serif;
-		font-size: 38px;
+		font-size: 2em;
 		line-height: 1.2;
 		color: var(--ink, #1a1714);
 		margin-bottom: 16px;
@@ -961,8 +989,7 @@
 	}
 
 	.ink-content :global(h2) {
-		font-family: 'Instrument Serif', serif;
-		font-size: 28px;
+		font-size: 1.5em;
 		line-height: 1.3;
 		color: var(--ink, #1a1714);
 		margin-bottom: 12px;
@@ -970,8 +997,7 @@
 	}
 
 	.ink-content :global(h3) {
-		font-family: 'DM Sans', sans-serif;
-		font-size: 20px;
+		font-size: calc(7em / 6);
 		font-weight: 600;
 		line-height: 1.4;
 		color: var(--ink, #1a1714);
@@ -1222,12 +1248,6 @@
 	@media (max-width: 700px) {
 		.ink-content {
 			padding: 28px 24px;
-		}
-		.ink-content :global(h1) {
-			font-size: 28px;
-		}
-		.ink-content :global(h2) {
-			font-size: 22px;
 		}
 	}
 </style>

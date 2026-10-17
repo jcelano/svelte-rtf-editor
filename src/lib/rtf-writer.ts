@@ -2,7 +2,8 @@
  * HTML to RTF converter
  *
  * Walks a contenteditable DOM tree and produces a valid RTF 1.x string.
- * Supports: bold, italic, underline, strikethrough, font sizes (h1–h3),
+ * Supports: a document font and body size (Arial 12 pt by default, set with
+ * RtfWriteOptions), bold, italic, underline, strikethrough, font sizes (h1–h3),
  * foreground colors (\cf), paragraphs, bullet/numbered lists, blockquotes,
  * code blocks, hyperlinks, images (embedded as \pict picture groups with
  * their captions), horizontal rules, line breaks, and Unicode characters.
@@ -19,8 +20,29 @@ interface RGB {
 	b: number;
 }
 
+/** Options for htmlToRtf. */
+export interface RtfWriteOptions {
+	/**
+	 * Font for the whole document: body text, headings, lists and tables.
+	 * Code keeps a monospace font. Default: Arial.
+	 */
+	fontFamily?: string;
+	/**
+	 * Body text size in points. Headings scale from it. Default: 12.
+	 */
+	fontSize?: number;
+}
+
+/** Font used when no fontFamily is given. */
+export const DEFAULT_FONT_FAMILY = 'Arial';
+
+/** Body text size, in points, used when no fontSize is given. */
+export const DEFAULT_FONT_SIZE = 12;
+
 interface WalkContext {
 	colorIndex: Map<string, number>;
+	/** Body text size in RTF half-points (\fsN). */
+	bodySize: number;
 	inPre: boolean;
 	listCounter: number;
 	inTableCell: boolean;
@@ -356,9 +378,49 @@ export function estimateRtfBytes(editorEl: HTMLElement): number {
 	return total;
 }
 
+// ── Font helpers ──
+
+/**
+ * Font name with anything that would break the font table removed. A name is
+ * terminated by ';' and cannot contain group delimiters or control words.
+ */
+function cleanFontName(name: string | undefined): string {
+	const cleaned = (name ?? '').replace(/[\\{};]/g, '').replace(/["']/g, '').trim();
+	return cleaned || DEFAULT_FONT_FAMILY;
+}
+
+/** RTF font family class for a font name: \froman, \fmodern or \fswiss. */
+function fontFamilyClass(name: string): 'roman' | 'modern' | 'swiss' {
+	const n = name.toLowerCase();
+	if (/courier|mono|consolas|menlo|lucida console/.test(n)) return 'modern';
+	if (/times|georgia|garamond|cambria|palatino|antiqua|serif/.test(n) && !/sans/.test(n)) return 'roman';
+	return 'swiss';
+}
+
+/**
+ * CSS font-family value for a font name, with the generic fallback that
+ * matches it, e.g. "Arial", sans-serif.
+ */
+export function cssFontFamily(name: string | undefined): string {
+	const font = cleanFontName(name);
+	const generic = { roman: 'serif', modern: 'monospace', swiss: 'sans-serif' }[fontFamilyClass(font)];
+	return `"${font}", ${generic}`;
+}
+
+/** Body size in RTF half-points, falling back to the default for nonsense input. */
+function bodyHalfPoints(fontSize: number | undefined): number {
+	const pt = typeof fontSize === 'number' && Number.isFinite(fontSize) && fontSize > 0
+		? fontSize
+		: DEFAULT_FONT_SIZE;
+	return Math.max(2, Math.round(pt * 2));
+}
+
 // ── DOM walker / RTF generator ──
 
-export function htmlToRtf(editorEl: HTMLElement): string {
+export function htmlToRtf(editorEl: HTMLElement, options: RtfWriteOptions = {}): string {
+	const fontName = cleanFontName(options.fontFamily);
+	const bodySize = bodyHalfPoints(options.fontSize);
+
 	const colorMap = new Map<string, RGB>();
 	colorMap.set('0,0,0', { r: 0, g: 0, b: 0 });
 
@@ -379,15 +441,17 @@ export function htmlToRtf(editorEl: HTMLElement): string {
 	}
 	colorTable += '}';
 
+	// \f0 is the document font, used for everything except code; \f1 is the
+	// monospace font for code.
 	const fontTable =
 		'{\\fonttbl' +
-		'{\\f0\\fswiss\\fcharset0 Helvetica;}' +
-		'{\\f1\\froman\\fcharset0 Georgia;}' +
-		'{\\f2\\fmodern\\fcharset0 Courier New;}' +
+		`{\\f0\\f${fontFamilyClass(fontName)}\\fcharset0 ${escapeRtf(fontName)};}` +
+		'{\\f1\\fmodern\\fcharset0 Courier New;}' +
 		'}';
 
 	const body = walkChildren(editorEl, {
 		colorIndex,
+		bodySize,
 		inPre: false,
 		listCounter: 0,
 		inTableCell: false,
@@ -399,7 +463,7 @@ export function htmlToRtf(editorEl: HTMLElement): string {
 		fontTable +
 		colorTable +
 		'\\viewkind4\\uc1' +
-		'\\pard\\f0\\fs24 ' +
+		`\\pard\\f0\\fs${bodySize} ` +
 		body +
 		'}';
 
@@ -449,16 +513,18 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 		const tag = el.tagName.toLowerCase();
 
 		switch (tag) {
+			// Heading sizes keep their ratio to the body: at 12 pt, h1 is 24 pt,
+			// h2 18 pt and h3 14 pt.
 			case 'h1':
-				rtf += `\\pard\\f1\\fs48\\b ${walkChildren(el, ctx)}\\b0\\f0\\fs24\\par `;
+				rtf += `\\pard\\f0\\fs${scaled(ctx, 2)}\\b ${walkChildren(el, ctx)}\\b0\\fs${ctx.bodySize}\\par `;
 				break;
 
 			case 'h2':
-				rtf += `\\pard\\f1\\fs36\\b ${walkChildren(el, ctx)}\\b0\\f0\\fs24\\par `;
+				rtf += `\\pard\\f0\\fs${scaled(ctx, 1.5)}\\b ${walkChildren(el, ctx)}\\b0\\fs${ctx.bodySize}\\par `;
 				break;
 
 			case 'h3':
-				rtf += `\\pard\\f0\\fs28\\b ${walkChildren(el, ctx)}\\b0\\fs24\\par `;
+				rtf += `\\pard\\f0\\fs${scaled(ctx, 7 / 6)}\\b ${walkChildren(el, ctx)}\\b0\\fs${ctx.bodySize}\\par `;
 				break;
 
 			case 'p':
@@ -530,7 +596,7 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 				break;
 
 			case 'pre':
-				rtf += `\\pard\\f2\\fs20 ${walkChildren(el, { ...ctx, inPre: true })}\\f0\\fs24\\par `;
+				rtf += `\\pard\\f1\\fs${scaled(ctx, 5 / 6)} ${walkChildren(el, { ...ctx, inPre: true })}\\f0\\fs${ctx.bodySize}\\par `;
 				break;
 
 			case 'hr':
@@ -589,7 +655,7 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 
 			case 'code':
 				if (!ctx.inPre) {
-					rtf += `\\f2 ${walkChildren(el, ctx)}\\f0 `;
+					rtf += `\\f1 ${walkChildren(el, ctx)}\\f0 `;
 				} else {
 					rtf += walkChildren(el, ctx);
 				}
@@ -640,7 +706,7 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 			case 'span': {
 				const colorPfx = getColorPrefix(el, ctx);
 				const sizePfx = getSizePrefix(el);
-				const sizesfx = sizePfx ? '\\fs24 ' : '';
+				const sizesfx = sizePfx ? `\\fs${ctx.bodySize} ` : '';
 				const colorSfx = colorPfx ? '\\cf0 ' : '';
 
 				rtf += `${colorPfx}${sizePfx}${walkChildren(el, ctx)}${sizesfx}${colorSfx}`;
@@ -662,6 +728,11 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 	}
 
 	return rtf;
+}
+
+/** Body size times a ratio, in half-points. */
+function scaled(ctx: WalkContext, ratio: number): number {
+	return Math.round(ctx.bodySize * ratio);
 }
 
 function getColorPrefix(el: HTMLElement, ctx: WalkContext): string {

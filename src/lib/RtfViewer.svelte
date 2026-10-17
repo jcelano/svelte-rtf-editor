@@ -1,7 +1,20 @@
 <script lang="ts">
     import { rtfToHtml } from "./rtf-parser.js";
+    import { cssFontFamily, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE } from "./rtf-writer.js";
 
-    let { content }: { content: string } = $props();
+    // fontFamily and fontSize (points) set how the document is shown, and
+    // default to the font the editor writes, so a document reads the same in
+    // the viewer as in the editor.
+    let {
+        content,
+        fontFamily = DEFAULT_FONT_FAMILY,
+        fontSize = DEFAULT_FONT_SIZE
+    }: { content: string; fontFamily?: string; fontSize?: number } = $props();
+
+    const screenFontFamily = $derived(cssFontFamily(fontFamily));
+    const screenFontSize = $derived(
+        Number.isFinite(fontSize) && fontSize > 0 ? fontSize : DEFAULT_FONT_SIZE
+    );
 
     const htmlContent = $derived(rtfToHtml(content));
 
@@ -24,7 +37,11 @@
             Copy RTF
         {/if}
     </button>
-    <div class="rtf-viewer">
+    <div
+        class="rtf-viewer"
+        style:font-family={screenFontFamily}
+        style:font-size="{screenFontSize}pt"
+    >
         {@html htmlContent}
     </div>
 </div>
