@@ -39,6 +39,18 @@ export const DEFAULT_FONT_FAMILY = 'Arial';
 /** Body text size, in points, used when no fontSize is given. */
 export const DEFAULT_FONT_SIZE = 12;
 
+/** Largest font size RTF readers accept (Word's limit), in points. */
+const MAX_FONT_SIZE = 1638;
+
+/**
+ * Heading sizes as a multiple of the body size: at 12 pt, h1 is 24 pt, h2 18 pt
+ * and h3 14 pt. The parser reads headings back with the same ratios.
+ */
+export const HEADING_SCALE = { h1: 2, h2: 1.5, h3: 7 / 6 } as const;
+
+/** Code blocks are set slightly smaller than the body: 10 pt at 12 pt. */
+const PRE_SCALE = 5 / 6;
+
 interface WalkContext {
 	colorIndex: Map<string, number>;
 	/** Body text size in RTF half-points (\fsN). */
@@ -319,8 +331,11 @@ function base64ByteLength(base64: string): number {
 	return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
 }
 
-/** Bytes of RTF header, font table and colour table that precede the body. */
-const RTF_PREAMBLE_BYTES = 200;
+/**
+ * Bytes of RTF header, font table and colour table that precede the body, with
+ * the default font. Another font name changes it by the difference in length.
+ */
+const RTF_PREAMBLE_BYTES = 165;
 
 /** Control words wrapping one \pict group. */
 const PICTURE_OVERHEAD_BYTES = 80;
@@ -333,9 +348,9 @@ const PICTURE_OVERHEAD_BYTES = 80;
 const BLOCK_OVERHEAD_BYTES: Record<string, number> = {
 	p: 14,
 	div: 14,
-	h1: 32,
-	h2: 32,
-	h3: 32,
+	h1: 29,
+	h2: 29,
+	h3: 29,
 	li: 35,
 	blockquote: 22,
 	pre: 27,
@@ -381,19 +396,27 @@ export function estimateRtfBytes(editorEl: HTMLElement): number {
 // ── Font helpers ──
 
 /**
- * Font name with anything that would break the font table removed. A name is
- * terminated by ';' and cannot contain group delimiters or control words.
+ * A single font name, safe for the font table. A CSS list such as
+ * 'Arial, sans-serif' keeps only its first family, since RTF names one font.
+ * Anything that would break the table is removed: a name is terminated by ';'
+ * and cannot contain group delimiters or control words.
  */
 function cleanFontName(name: string | undefined): string {
-	const cleaned = (name ?? '').replace(/[\\{};]/g, '').replace(/["']/g, '').trim();
+	const first = (name ?? '').replace(/["']/g, '').split(',')[0];
+	const cleaned = first.replace(/[\\{};]/g, '').trim();
 	return cleaned || DEFAULT_FONT_FAMILY;
 }
 
 /** RTF font family class for a font name: \froman, \fmodern or \fswiss. */
 function fontFamilyClass(name: string): 'roman' | 'modern' | 'swiss' {
 	const n = name.toLowerCase();
-	if (/courier|mono|consolas|menlo|lucida console/.test(n)) return 'modern';
-	if (/times|georgia|garamond|cambria|palatino|antiqua|serif/.test(n) && !/sans/.test(n)) return 'roman';
+	if (/courier|mono|consolas|menlo|monaco|typewriter|lucida console/.test(n)) return 'modern';
+	if (
+		/times|georgia|garamond|cambria|palatino|antiqua|schoolbook|baskerville|didot|bodoni|serif/.test(n) &&
+		!/sans/.test(n)
+	) {
+		return 'roman';
+	}
 	return 'swiss';
 }
 
@@ -407,12 +430,22 @@ export function cssFontFamily(name: string | undefined): string {
 	return `"${font}", ${generic}`;
 }
 
-/** Body size in RTF half-points, falling back to the default for nonsense input. */
+/**
+ * A body size in points, as the RTF will carry it: rounded to the half-point
+ * RTF measures in, kept within what readers accept, and the default for
+ * missing or nonsense input. The editor and viewer show this same size, so
+ * the screen and the RTF agree.
+ */
+export function normalizeFontSize(fontSize: number | undefined): number {
+	if (typeof fontSize !== 'number' || !Number.isFinite(fontSize) || fontSize <= 0) {
+		return DEFAULT_FONT_SIZE;
+	}
+	return Math.min(MAX_FONT_SIZE, Math.max(1, Math.round(fontSize * 2) / 2));
+}
+
+/** Body size in RTF half-points. */
 function bodyHalfPoints(fontSize: number | undefined): number {
-	const pt = typeof fontSize === 'number' && Number.isFinite(fontSize) && fontSize > 0
-		? fontSize
-		: DEFAULT_FONT_SIZE;
-	return Math.max(2, Math.round(pt * 2));
+	return normalizeFontSize(fontSize) * 2;
 }
 
 // ── DOM walker / RTF generator ──
@@ -513,18 +546,17 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 		const tag = el.tagName.toLowerCase();
 
 		switch (tag) {
-			// Heading sizes keep their ratio to the body: at 12 pt, h1 is 24 pt,
-			// h2 18 pt and h3 14 pt.
+			// Heading sizes keep their ratio to the body (HEADING_SCALE).
 			case 'h1':
-				rtf += `\\pard\\f0\\fs${scaled(ctx, 2)}\\b ${walkChildren(el, ctx)}\\b0\\fs${ctx.bodySize}\\par `;
+				rtf += `\\pard\\f0\\fs${scaled(ctx, HEADING_SCALE.h1)}\\b ${walkChildren(el, ctx)}\\b0\\fs${ctx.bodySize}\\par `;
 				break;
 
 			case 'h2':
-				rtf += `\\pard\\f0\\fs${scaled(ctx, 1.5)}\\b ${walkChildren(el, ctx)}\\b0\\fs${ctx.bodySize}\\par `;
+				rtf += `\\pard\\f0\\fs${scaled(ctx, HEADING_SCALE.h2)}\\b ${walkChildren(el, ctx)}\\b0\\fs${ctx.bodySize}\\par `;
 				break;
 
 			case 'h3':
-				rtf += `\\pard\\f0\\fs${scaled(ctx, 7 / 6)}\\b ${walkChildren(el, ctx)}\\b0\\fs${ctx.bodySize}\\par `;
+				rtf += `\\pard\\f0\\fs${scaled(ctx, HEADING_SCALE.h3)}\\b ${walkChildren(el, ctx)}\\b0\\fs${ctx.bodySize}\\par `;
 				break;
 
 			case 'p':
@@ -596,7 +628,7 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 				break;
 
 			case 'pre':
-				rtf += `\\pard\\f1\\fs${scaled(ctx, 5 / 6)} ${walkChildren(el, { ...ctx, inPre: true })}\\f0\\fs${ctx.bodySize}\\par `;
+				rtf += `\\pard\\f1\\fs${scaled(ctx, PRE_SCALE)} ${walkChildren(el, { ...ctx, inPre: true })}\\f0\\fs${ctx.bodySize}\\par `;
 				break;
 
 			case 'hr':

@@ -57,6 +57,7 @@
 		htmlToRtf,
 		estimateRtfBytes,
 		cssFontFamily,
+		normalizeFontSize,
 		DEFAULT_FONT_FAMILY,
 		DEFAULT_FONT_SIZE
 	} from '../rtf-writer.js';
@@ -126,9 +127,7 @@
 	// shows what the receiving system will show.
 	const rtfOptions = $derived({ fontFamily, fontSize });
 	const screenFontFamily = $derived(cssFontFamily(fontFamily));
-	const screenFontSize = $derived(
-		Number.isFinite(fontSize) && fontSize > 0 ? fontSize : DEFAULT_FONT_SIZE
-	);
+	const screenFontSize = $derived(normalizeFontSize(fontSize));
 
 	// ── Internal state ──
 	let editorEl: HTMLDivElement | null = $state(null);
@@ -1024,16 +1023,17 @@
 		color: #e8e2da;
 		padding: 20px 24px;
 		border-radius: var(--radius, 8px);
-		font-family: 'JetBrains Mono', monospace;
-		font-size: 14px;
+		/* Same font and ratio to the body as the RTF writes code blocks in. */
+		font-family: 'Courier New', monospace;
+		font-size: calc(5em / 6);
 		line-height: 1.6;
 		margin: 16px 0;
 		overflow-x: auto;
 	}
 
 	.ink-content :global(code) {
-		font-family: 'JetBrains Mono', monospace;
-		font-size: 14px;
+		font-family: 'Courier New', monospace;
+		font-size: 1em;
 		background: var(--surface, #f2f0ec);
 		padding: 2px 6px;
 		border-radius: 3px;
@@ -1082,7 +1082,8 @@
 
 	.ink-content :global(figcaption) {
 		margin-top: 8px;
-		font-size: 13px;
+		/* Body size, as the RTF writes captions. */
+		font-size: 1em;
 		line-height: 1.5;
 		font-style: italic;
 		color: var(--text-muted, #8a7e72);

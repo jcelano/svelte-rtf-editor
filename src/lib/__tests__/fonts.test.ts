@@ -2,7 +2,14 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { mount, unmount, flushSync } from 'svelte';
 import InkEditor from '../components/InkEditor.svelte';
 import RtfViewer from '../RtfViewer.svelte';
-import { htmlToRtf, cssFontFamily, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE } from '../rtf-writer.js';
+import {
+	htmlToRtf,
+	cssFontFamily,
+	normalizeFontSize,
+	DEFAULT_FONT_FAMILY,
+	DEFAULT_FONT_SIZE
+} from '../rtf-writer.js';
+import { rtfToHtml } from '../rtf-parser.js';
 
 /**
  * The document font and body size: what the RTF declares, and what the editor
@@ -168,5 +175,53 @@ describe('RtfViewer font', () => {
 		const viewer = host!.querySelector('.rtf-viewer') as HTMLElement;
 		expect(viewer.style.fontFamily).toContain('Georgia');
 		expect(viewer.style.fontSize).toBe('14pt');
+	});
+});
+
+// ── Review follow-ups ─────────────────────────────────────────────────────────
+
+describe('font names given as a CSS list', () => {
+	it('keeps only the first family', () => {
+		const rtf = htmlToRtf(htmlEl('<p>Text</p>'), { fontFamily: '"Times New Roman", serif' });
+		expect(fontTable(rtf)).toContain('{\\f0\\froman\\fcharset0 Times New Roman;}');
+		expect(cssFontFamily('Arial, sans-serif')).toBe('"Arial", sans-serif');
+	});
+});
+
+describe('normalizeFontSize', () => {
+	it('rounds to the half-point the RTF carries, so screen and RTF agree', () => {
+		expect(normalizeFontSize(10.25)).toBe(10.5);
+		expect(htmlToRtf(htmlEl('<p>Text</p>'), { fontSize: 10.25 })).toContain('\\pard\\f0\\fs21 ');
+	});
+
+	it('keeps sizes within what readers accept', () => {
+		expect(normalizeFontSize(5000)).toBe(1638);
+		expect(normalizeFontSize(0.1)).toBe(1);
+		expect(normalizeFontSize(undefined)).toBe(DEFAULT_FONT_SIZE);
+	});
+});
+
+describe('reading back a document written at another size', () => {
+	const html =
+		'<h1>Title</h1><h2>Section</h2><h3>Sub</h3><p>Body text.</p><ul><li>item</li></ul><p>More body.</p>';
+
+	for (const fontSize of [10, 11, 12, 14]) {
+		it(`keeps headings and paragraphs apart at ${fontSize} pt`, () => {
+			const back = rtfToHtml(htmlToRtf(htmlEl(html), { fontSize }));
+			// The heading level is what matters; the parser keeps the bold and
+			// size wrapper inside a heading at every size, 12 pt included.
+			expect(back).toMatch(/<h1>[^\n]*Title[^\n]*<\/h1>/);
+			expect(back).toMatch(/<h2>[^\n]*Section[^\n]*<\/h2>/);
+			expect(back).toMatch(/<h3>[^\n]*Sub[^\n]*<\/h3>/);
+			expect(back).toContain('<p>Body text.</p>');
+			expect(back).toContain('<p>More body.</p>');
+		});
+	}
+
+	it('still marks text set larger than the body', () => {
+		const back = rtfToHtml(
+			htmlToRtf(htmlEl('<p>Body text here. <span style="font-size: 13pt">bigger</span></p>'), { fontSize: 10 })
+		);
+		expect(back).toContain('font-size:13pt');
 	});
 });

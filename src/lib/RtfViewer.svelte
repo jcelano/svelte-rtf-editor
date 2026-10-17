@@ -1,6 +1,11 @@
 <script lang="ts">
     import { rtfToHtml } from "./rtf-parser.js";
-    import { cssFontFamily, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE } from "./rtf-writer.js";
+    import {
+        cssFontFamily,
+        normalizeFontSize,
+        DEFAULT_FONT_FAMILY,
+        DEFAULT_FONT_SIZE
+    } from "./rtf-writer.js";
 
     // fontFamily and fontSize (points) set how the document is shown, and
     // default to the font the editor writes, so a document reads the same in
@@ -12,9 +17,7 @@
     }: { content: string; fontFamily?: string; fontSize?: number } = $props();
 
     const screenFontFamily = $derived(cssFontFamily(fontFamily));
-    const screenFontSize = $derived(
-        Number.isFinite(fontSize) && fontSize > 0 ? fontSize : DEFAULT_FONT_SIZE
-    );
+    const screenFontSize = $derived(normalizeFontSize(fontSize));
 
     const htmlContent = $derived(rtfToHtml(content));
 

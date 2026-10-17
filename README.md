@@ -193,6 +193,9 @@ htmlToRtf(el, { fontFamily: 'Calibri', fontSize: 11 });
 - `fontFamily` is used for the whole document: body text, headings, lists and tables. Code keeps Courier New.
 - `fontSize` is the body size in points. Headings scale from it: at 12 pt, `h1` is 24 pt, `h2` 18 pt and `h3` 14 pt.
 - If you call `htmlToRtf` yourself on the editor's content, pass the same options you gave the editor, or the two produce different RTF.
+- `fontFamily` names one font. Given a CSS list such as `'Arial, sans-serif'`, only the first family is used.
+- `fontSize` is rounded to the nearest half-point, which is what RTF measures in, and kept between 1 and 1638 pt.
+- `rtfToHtml` recognizes headings relative to the document's own body size, so a document written at any size reads back with the same headings.
 
 The font has to be installed on the machine that displays the document. The RTF names it, and a reader without it substitutes one of its own.
 
