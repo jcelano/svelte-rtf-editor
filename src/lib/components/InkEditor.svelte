@@ -56,6 +56,7 @@
 	import {
 		htmlToRtf,
 		estimateRtfBytes,
+		isSafeLinkUrl,
 		cssFontFamily,
 		normalizeFontSize,
 		DEFAULT_FONT_FAMILY,
@@ -368,6 +369,9 @@
 
 	function applyLink(): void {
 		if (!linkUrl) { linkModalOpen = false; return; }
+		// Only a web, mail or phone address becomes a link; a javascript: address would
+		// run when clicked in the editor and in any viewer of the stored HTML.
+		if (!isSafeLinkUrl(linkUrl)) { linkModalOpen = false; return; }
 		restoreSelection();
 		editorEl?.focus();
 

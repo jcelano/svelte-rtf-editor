@@ -60,6 +60,20 @@ interface WalkContext {
 	inTableCell: boolean;
 	/** The element htmlToRtf was called on — used to detect top-level images. */
 	root: Node | null;
+	/*
+	 * The character formatting in effect where the walker is. A closing tag restores
+	 * this, the ENCLOSING state, rather than a fixed default: an inner </b> must not
+	 * end an outer <b>, and a sized word inside a heading returns to the heading's
+	 * size, not the body's.
+	 */
+	bold: boolean;
+	italic: boolean;
+	underline: boolean;
+	strike: boolean;
+	/** Current size in half-points (\fsN). */
+	size: number;
+	/** Current color-table index (\cfN); 0 is the reader's automatic color. */
+	color: number;
 }
 
 interface PixelSize {
@@ -135,7 +149,10 @@ function escapeRtf(text: string): string {
 		else if (ch === '{') out += '\\{';
 		else if (ch === '}') out += '\\}';
 		else if (code > 127) {
-			out += `\\u${code}\\'3f`;
+			// RTF's \uN is a SIGNED 16-bit number: from U+8000 up, and for each half of
+			// an emoji's surrogate pair, it is written as N - 65536. Written unsigned,
+			// Word and Epic read it as a different character.
+			out += `\\u${code > 32767 ? code - 65536 : code}\\'3f`;
 		} else {
 			out += ch;
 		}
@@ -358,8 +375,27 @@ const BLOCK_OVERHEAD_BYTES: Record<string, number> = {
 	figcaption: 29,
 	tr: 45,
 	td: 55,
-	th: 69 // a header cell also carries \clbrdrb\brdrs
+	th: 69, // a header cell also carries \clbrdrb\brdrs
+	// Inline formatting: the control words on either side of the text.
+	b: 7, // "\b " + "\b0 "
+	strong: 7,
+	i: 7,
+	em: 7,
+	u: 12, // "\ul " + "\ulnone "
+	s: 17, // "\strike " + "\strike0 "
+	strike: 17,
+	del: 17,
+	sup: 19, // "\super " + "\nosupersub "
+	sub: 17,
+	code: 8, // "\f1 " + "\f0 "
+	br: 6, // "\line "
+	hr: 154, // "\pard\qc " + 20 x "\emdash" + "\par "
+	ul: 0,
+	ol: 0
 };
+
+/** The field wrapper around a link, apart from its address. */
+const LINK_OVERHEAD_BYTES = '{\\field{\\*\\fldinst HYPERLINK ""}{\\fldrslt\\ul\\cf1 \\cf0\\ulnone }}'.length;
 
 /**
  * Size htmlToRtf would produce, without doing the conversion.
@@ -380,17 +416,50 @@ export function estimateRtfBytes(editorEl: HTMLElement): number {
 	for (const img of Array.from(editorEl.querySelectorAll('img'))) {
 		const src = img.getAttribute('src') || '';
 		const comma = src.indexOf(',');
-		// A picture that cannot be embedded costs only its placeholder text.
-		if (!src.startsWith('data:image/') || comma < 0) continue;
+		if (!src.startsWith('data:image/') || comma < 0) {
+			// A picture that cannot be embedded costs its placeholder text.
+			total += `\\i [Image: ]\\i0 `.length + escapeRtf(img.getAttribute('alt') || src || 'image').length;
+			continue;
+		}
 		total += base64ByteLength(src.slice(comma + 1)) * 2 + PICTURE_OVERHEAD_BYTES;
 	}
 
-	total += (editorEl.textContent || '').length;
-	for (const el of Array.from(editorEl.querySelectorAll('*'))) {
-		total += BLOCK_OVERHEAD_BYTES[el.tagName.toLowerCase()] ?? 0;
+	// Text at its escaped length: a character outside ASCII costs its \uN\'3f escape,
+	// six to nine bytes rather than one.
+	total += escapeRtf(editorEl.textContent || '').length;
+	for (const el of Array.from(editorEl.querySelectorAll<HTMLElement>('*'))) {
+		const tag = el.tagName.toLowerCase();
+		total += BLOCK_OVERHEAD_BYTES[tag] ?? 0;
+		if (tag === 'a') {
+			const href = el.getAttribute('href') || '';
+			if (href && isSafeLinkUrl(href)) total += LINK_OVERHEAD_BYTES + escapeRtf(href).length;
+		}
+		// A color costs "\cfN " on and off and, the first time, its color-table entry (at most
+		// 22 bytes, "\red255\green255\blue255;"); a size costs "\fsNN " on and off.
+		if (el.style?.color || (tag === 'font' && el.hasAttribute('color'))) total += 10 + 22;
+		if (el.style?.fontSize) total += 12;
 	}
 
 	return total;
+}
+
+// ── Link helpers ──
+
+/**
+ * Whether a link address is one a reader can safely follow: web, mail or phone. A
+ * javascript:, data:, file: or vbscript: address is refused, as image addresses are.
+ * Relative addresses resolve against the page, so they count as web addresses.
+ */
+export function isSafeLinkUrl(url: string): boolean {
+	const value = url.trim();
+	if (!value) return false;
+	try {
+		const base = typeof window !== 'undefined' ? window.location.href : 'http://localhost/';
+		const protocol = new URL(value, base).protocol;
+		return protocol === 'http:' || protocol === 'https:' || protocol === 'mailto:' || protocol === 'tel:';
+	} catch {
+		return false;
+	}
 }
 
 // ── Font helpers ──
@@ -488,7 +557,13 @@ export function htmlToRtf(editorEl: HTMLElement, options: RtfWriteOptions = {}):
 		inPre: false,
 		listCounter: 0,
 		inTableCell: false,
-		root: editorEl
+		root: editorEl,
+		bold: false,
+		italic: false,
+		underline: false,
+		strike: false,
+		size: bodySize,
+		color: 0
 	});
 
 	const rtf =
@@ -551,23 +626,37 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 
 		switch (tag) {
 			// Heading sizes keep their ratio to the body (HEADING_SCALE).
-			case 'h1':
-				rtf += `\\pard\\f0\\fs${scaled(ctx, HEADING_SCALE.h1)}\\b ${walkChildren(el, ctx)}\\b0\\fs${ctx.bodySize}\\par `;
+			case 'h1': {
+				const size = scaled(ctx, HEADING_SCALE.h1);
+				rtf += `\\pard${inCell(ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}\\b0\\fs${ctx.size}\\par `;
 				break;
+			}
 
-			case 'h2':
-				rtf += `\\pard\\f0\\fs${scaled(ctx, HEADING_SCALE.h2)}\\b ${walkChildren(el, ctx)}\\b0\\fs${ctx.bodySize}\\par `;
+			case 'h2': {
+				const size = scaled(ctx, HEADING_SCALE.h2);
+				rtf += `\\pard${inCell(ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}\\b0\\fs${ctx.size}\\par `;
 				break;
+			}
 
-			case 'h3':
-				rtf += `\\pard\\f0\\fs${scaled(ctx, HEADING_SCALE.h3)}\\b ${walkChildren(el, ctx)}\\b0\\fs${ctx.bodySize}\\par `;
+			case 'h3': {
+				const size = scaled(ctx, HEADING_SCALE.h3);
+				rtf += `\\pard${inCell(ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}\\b0\\fs${ctx.size}\\par `;
 				break;
+			}
 
 			case 'p':
 			case 'div': {
-				// Inside a table cell \pard is already declared; just emit inline content.
+				// Inside a table cell the cell has already declared \pard\intbl. Each paragraph
+				// ends with \par, so two paragraphs in one cell stay two (the cell drops the last
+				// one's); one that follows a list or heading in the cell restates \pard\intbl,
+				// so it does not inherit that block's indent.
 				if (ctx.inTableCell) {
-					rtf += walkChildren(el, ctx);
+					const restate = el.previousElementSibling ? '\\pard\\intbl ' : '';
+					const colorIdx = colorIndexOf(el, ctx);
+					const inner = walkChildren(el, colorIdx != null ? { ...ctx, color: colorIdx } : ctx);
+					rtf += colorIdx != null
+						? `${restate}\\cf${colorIdx} ${inner}\\cf${ctx.color} \\par `
+						: `${restate}${inner}\\par `;
 					break;
 				}
 				// A <p> with no children or only a single <br> is a blank line —
@@ -579,9 +668,10 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 					rtf += '\\par ';
 					break;
 				}
-				const inlineRtf = walkChildren(el, ctx);
-				const colorPrefix = getColorPrefix(el, ctx);
-				const colorSuffix = colorPrefix ? '\\cf0 ' : '';
+				const colorIdx = colorIndexOf(el, ctx);
+				const inlineRtf = walkChildren(el, colorIdx != null ? { ...ctx, color: colorIdx } : ctx);
+				const colorPrefix = colorIdx != null ? `\\cf${colorIdx} ` : '';
+				const colorSuffix = colorIdx != null ? `\\cf${ctx.color} ` : '';
 				rtf += `\\pard ${colorPrefix}${inlineRtf}${colorSuffix}\\par `;
 				break;
 			}
@@ -618,7 +708,7 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 					// Cell bodies
 					const cellCtx = { ...ctx, inTableCell: true };
 					for (const cell of cells) {
-						const content = walkChildren(cell as HTMLElement, cellCtx);
+						const content = walkChildren(cell as HTMLElement, cellCtx).replace(/\\par $/, '');
 						rowRtf += `{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 ${content}\\par}\\cell`;
 					}
 					rowRtf += '}\\intbl\\row}';
@@ -628,21 +718,23 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 			}
 
 			case 'blockquote':
-				rtf += `\\pard\\li720\\i ${walkChildren(el, ctx)}\\i0\\par `;
+				rtf += `\\pard${inCell(ctx)}\\li720\\i ${walkChildren(el, { ...ctx, italic: true })}${ctx.italic ? '' : '\\i0'}\\par `;
 				break;
 
-			case 'pre':
-				rtf += `\\pard\\f1\\fs${scaled(ctx, PRE_SCALE)} ${walkChildren(el, { ...ctx, inPre: true })}\\f0\\fs${ctx.bodySize}\\par `;
+			case 'pre': {
+				const size = scaled(ctx, PRE_SCALE);
+				rtf += `\\pard${inCell(ctx)}\\f1\\fs${size} ${walkChildren(el, { ...ctx, inPre: true, size })}\\f0\\fs${ctx.size}\\par `;
 				break;
+			}
 
 			case 'hr':
-				rtf += `\\pard\\qc \\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\par `;
+				rtf += `\\pard${inCell(ctx)}\\qc \\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\par `;
 				break;
 
 			case 'ul': {
 				const items = el.querySelectorAll(':scope > li');
 				items.forEach((li) => {
-					rtf += `\\pard\\li720\\fi-360\\bullet\\tab ${walkChildren(li, ctx)}\\par `;
+					rtf += `\\pard${inCell(ctx)}\\li720\\fi-360\\bullet\\tab ${walkChildren(li, ctx)}\\par `;
 				});
 				break;
 			}
@@ -651,7 +743,7 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 				let counter = 1;
 				const items = el.querySelectorAll(':scope > li');
 				items.forEach((li) => {
-					rtf += `\\pard\\li720\\fi-360 ${counter}.\\tab ${walkChildren(li, ctx)}\\par `;
+					rtf += `\\pard${inCell(ctx)}\\li720\\fi-360 ${counter}.\\tab ${walkChildren(li, ctx)}\\par `;
 					counter++;
 				});
 				break;
@@ -663,22 +755,22 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 
 			case 'strong':
 			case 'b':
-				rtf += `\\b ${walkChildren(el, ctx)}\\b0 `;
+				rtf += ctx.bold ? walkChildren(el, ctx) : `\\b ${walkChildren(el, { ...ctx, bold: true })}\\b0 `;
 				break;
 
 			case 'em':
 			case 'i':
-				rtf += `\\i ${walkChildren(el, ctx)}\\i0 `;
+				rtf += ctx.italic ? walkChildren(el, ctx) : `\\i ${walkChildren(el, { ...ctx, italic: true })}\\i0 `;
 				break;
 
 			case 'u':
-				rtf += `\\ul ${walkChildren(el, ctx)}\\ulnone `;
+				rtf += ctx.underline ? walkChildren(el, ctx) : `\\ul ${walkChildren(el, { ...ctx, underline: true })}\\ulnone `;
 				break;
 
 			case 's':
 			case 'strike':
 			case 'del':
-				rtf += `\\strike ${walkChildren(el, ctx)}\\strike0 `;
+				rtf += ctx.strike ? walkChildren(el, ctx) : `\\strike ${walkChildren(el, { ...ctx, strike: true })}\\strike0 `;
 				break;
 
 			case 'sup':
@@ -699,11 +791,14 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 
 			case 'a': {
 				const href = el.getAttribute('href') || '';
-				const inner = walkChildren(el, ctx);
-				if (href) {
-					rtf += `{\\field{\\*\\fldinst HYPERLINK "${escapeRtf(href)}"}{\\fldrslt\\ul\\cf1 ${inner}\\cf0\\ulnone }}`;
+				// A link the receiving system could act on only if it is a web, mail or phone
+				// address. Anything else (javascript:, data:, file:) is written as its text alone.
+				if (href && isSafeLinkUrl(href)) {
+					const inner = walkChildren(el, { ...ctx, underline: true, color: 1 });
+					const underlineOff = ctx.underline ? '' : '\\ulnone';
+					rtf += `{\\field{\\*\\fldinst HYPERLINK "${escapeRtf(href)}"}{\\fldrslt\\ul\\cf1 ${inner}\\cf${ctx.color}${underlineOff} }}`;
 				} else {
-					rtf += inner;
+					rtf += walkChildren(el, ctx);
 				}
 				break;
 			}
@@ -718,11 +813,11 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 				const caption = (el.querySelector('figcaption')?.textContent || '').trim();
 				const align = alignControl(el);
 
-				if (img) rtf += `\\pard${align} ${imageBody(img as HTMLElement)}\\par `;
+				if (img) rtf += `\\pard${inCell(ctx)}${align} ${imageBody(img as HTMLElement)}\\par `;
 				else rtf += walkChildren(el, ctx);
 
 				if (caption) {
-					rtf += `{\\*\\inkcap}\\pard${align}\\i ${escapeRtf(caption)}\\i0\\par `;
+					rtf += `{\\*\\inkcap}\\pard${inCell(ctx)}${align}\\i ${escapeRtf(caption)}${ctx.italic ? '' : '\\i0'}\\par `;
 				}
 				break;
 			}
@@ -740,20 +835,24 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 				break;
 
 			case 'span': {
-				const colorPfx = getColorPrefix(el, ctx);
-				const sizePfx = getSizePrefix(el);
-				const sizesfx = sizePfx ? `\\fs${ctx.bodySize} ` : '';
-				const colorSfx = colorPfx ? '\\cf0 ' : '';
+				const colorIdx = colorIndexOf(el, ctx);
+				const size = sizeOf(el);
+				const colorPfx = colorIdx != null ? `\\cf${colorIdx} ` : '';
+				const sizePfx = size != null ? `\\fs${size} ` : '';
+				const sizeSfx = size != null ? `\\fs${ctx.size} ` : '';
+				const colorSfx = colorIdx != null ? `\\cf${ctx.color} ` : '';
+				const inner = walkChildren(el, { ...ctx, color: colorIdx ?? ctx.color, size: size ?? ctx.size });
 
-				rtf += `${colorPfx}${sizePfx}${walkChildren(el, ctx)}${sizesfx}${colorSfx}`;
+				rtf += `${colorPfx}${sizePfx}${inner}${sizeSfx}${colorSfx}`;
 				break;
 			}
 
 			// <font color="..."> is produced by execCommand('foreColor') in contenteditable
 			case 'font': {
-				const colorPfx = getColorPrefix(el, ctx);
-				const colorSfx = colorPfx ? '\\cf0 ' : '';
-				rtf += `${colorPfx}${walkChildren(el, ctx)}${colorSfx}`;
+				const colorIdx = colorIndexOf(el, ctx);
+				const colorPfx = colorIdx != null ? `\\cf${colorIdx} ` : '';
+				const colorSfx = colorIdx != null ? `\\cf${ctx.color} ` : '';
+				rtf += `${colorPfx}${walkChildren(el, { ...ctx, color: colorIdx ?? ctx.color })}${colorSfx}`;
 				break;
 			}
 
@@ -793,30 +892,29 @@ function besideBlock(node: Node): boolean {
 	return isBlock(prev) || isBlock(next) || (!prev && !next && isBlock(node.parentNode));
 }
 
-function getColorPrefix(el: HTMLElement, ctx: WalkContext): string {
+/** \\intbl for a paragraph a block writes inside a table cell, so it stays in the cell. */
+function inCell(ctx: WalkContext): string {
+	return ctx.inTableCell ? '\\intbl' : '';
+}
+
+/** Color-table index of the element's own color, or null when it sets none. */
+function colorIndexOf(el: HTMLElement, ctx: WalkContext): number | null {
 	// Support both inline style.color (spans) and the color attribute (<font>)
 	const color = el.style?.color ||
 		(el.tagName.toLowerCase() === 'font' ? (el.getAttribute('color') ?? '') : '');
-	if (!color) return '';
+	if (!color) return null;
 	const c = parseColor(color);
-	if (!c) return '';
-	const idx = ctx.colorIndex.get(colorKey(c));
-	if (idx != null) return `\\cf${idx} `;
-	return '';
+	if (!c) return null;
+	return ctx.colorIndex.get(colorKey(c)) ?? null;
 }
 
-function getSizePrefix(el: HTMLElement): string {
+/** The element's own font size in half-points, or null when it sets none. */
+function sizeOf(el: HTMLElement): number | null {
 	const fs = el.style?.fontSize;
-	if (!fs) return '';
+	if (!fs) return null;
 	const ptMatch = fs.match(/([\d.]+)\s*pt/);
-	if (ptMatch) {
-		const halfPoints = Math.round(parseFloat(ptMatch[1]) * 2);
-		return `\\fs${halfPoints} `;
-	}
+	if (ptMatch) return Math.round(parseFloat(ptMatch[1]) * 2);
 	const pxMatch = fs.match(/([\d.]+)\s*px/);
-	if (pxMatch) {
-		const halfPoints = Math.round(parseFloat(pxMatch[1]) * 0.75 * 2);
-		return `\\fs${halfPoints} `;
-	}
-	return '';
+	if (pxMatch) return Math.round(parseFloat(pxMatch[1]) * 0.75 * 2);
+	return null;
 }
