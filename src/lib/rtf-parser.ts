@@ -483,8 +483,9 @@ export function rtfToHtml(rtfString: string): string {
 		}
 	}
 
-	// Sizes are shown relative to the body: body text carries no size of its
-	// own, and headings are recognized by their ratio to it.
+	// Headings are recognized by their ratio to the body size. Text keeps its
+	// own size, though: anything other than 12 pt carries a font-size, so a
+	// document written at 9 pt still shows at 9 pt.
 	const bodySize = bodyHalfPoints(rootGroup);
 
 	// State stack for nested groups
@@ -530,7 +531,7 @@ export function rtfToHtml(rtfString: string): string {
 			if (bg) styles.push(`background-color:${bg}`);
 		}
 
-		if (state.fontSize && state.fontSize !== bodySize) {
+		if (state.fontSize && state.fontSize !== DEFAULT_HALF_POINTS) {
 			styles.push(`font-size:${state.fontSize / 2}pt`);
 		}
 
