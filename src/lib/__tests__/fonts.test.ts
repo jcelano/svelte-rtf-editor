@@ -213,10 +213,23 @@ describe('reading back a document written at another size', () => {
 			expect(back).toMatch(/<h1>[^\n]*Title[^\n]*<\/h1>/);
 			expect(back).toMatch(/<h2>[^\n]*Section[^\n]*<\/h2>/);
 			expect(back).toMatch(/<h3>[^\n]*Sub[^\n]*<\/h3>/);
-			expect(back).toContain('<p>Body text.</p>');
-			expect(back).toContain('<p>More body.</p>');
+			expect(back).toMatch(/<p>[^\n]*Body text\.[^\n]*<\/p>/);
+			expect(back).toMatch(/<p>[^\n]*More body\.[^\n]*<\/p>/);
 		});
 	}
+
+	it('keeps the size text is written at, so a 9 pt document still shows at 9 pt', () => {
+		// A report written entirely at 9 pt, the way ORCA writes its normal-range report.
+		const rtf = String.raw`{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}}{\pard \ql \f0 \fs18 Heart: 350 g\par}{\pard \ql \f0 \fs18 Liver: 1500 g\par}}`;
+		const back = rtfToHtml(rtf);
+		expect(back).toContain('<p><span style="font-size:9pt">Heart: 350 g</span></p>');
+		expect(back).toContain('<p><span style="font-size:9pt">Liver: 1500 g</span></p>');
+	});
+
+	it('shows 12 pt text without a size of its own, as before', () => {
+		const back = rtfToHtml(htmlToRtf(htmlEl('<p>Body text.</p>')));
+		expect(back).toContain('<p>Body text.</p>');
+	});
 
 	it('still marks text set larger than the body', () => {
 		const back = rtfToHtml(

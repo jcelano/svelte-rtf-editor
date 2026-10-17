@@ -1,5 +1,11 @@
 # svelte-rtf-editor
 
+## 1.5.1
+
+### Patch Changes
+
+- `rtfToHtml` keeps the size text is written at again. In 1.5.0, text at the document's body size lost its size, so a report written entirely at 9 pt showed at the viewer's 12 pt, larger than the RTF it came from. Text at any size other than 12 pt now carries its `font-size`, as it did in 1.4.0. Headings are still recognized relative to the body size, which is the 1.5.0 fix: a 14 pt document no longer reads back as all headings.
+
 ## 1.5.0
 
 ### Minor Changes
