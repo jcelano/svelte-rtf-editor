@@ -149,6 +149,7 @@
 	let linkModalOpen: boolean = $state(false);
 	let imageModalOpen: boolean = $state(false);
 	let linkUrl: string = $state('');
+	let linkError: string = $state('');
 	let linkText: string = $state('');
 	let imageUrl: string = $state('');
 	let imageAlt: string = $state('');
@@ -370,8 +371,13 @@
 	function applyLink(): void {
 		if (!linkUrl) { linkModalOpen = false; return; }
 		// Only a web, mail or phone address becomes a link; a javascript: address would
-		// run when clicked in the editor and in any viewer of the stored HTML.
-		if (!isSafeLinkUrl(linkUrl)) { linkModalOpen = false; return; }
+		// run when clicked in the editor and in any viewer of the stored HTML. The dialog
+		// stays open and says why, rather than closing as if the link had been added.
+		if (!isSafeLinkUrl(linkUrl)) {
+			linkError = 'Enter a web address (https://…), an email address (mailto:…) or a phone number (tel:…).';
+			return;
+		}
+		linkError = '';
 		restoreSelection();
 		editorEl?.focus();
 

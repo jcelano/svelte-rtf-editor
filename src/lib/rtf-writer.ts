@@ -74,6 +74,10 @@ interface WalkContext {
 	size: number;
 	/** Current color-table index (\cfN); 0 is the reader's automatic color. */
 	color: number;
+	/** Superscript or subscript in effect, if any. */
+	script: 'super' | 'sub' | null;
+	/** Inside inline code, which already set the monospace font. */
+	mono: boolean;
 }
 
 interface PixelSize {
@@ -394,6 +398,9 @@ const BLOCK_OVERHEAD_BYTES: Record<string, number> = {
 	ol: 0
 };
 
+/** Elements that write a paragraph of their own, which inside a table cell carries \intbl. */
+const CELL_PARAGRAPH_TAGS = new Set(['p', 'div', 'h1', 'h2', 'h3', 'li', 'blockquote', 'pre', 'hr', 'figure', 'figcaption']);
+
 /** The field wrapper around a link, apart from its address. */
 const LINK_OVERHEAD_BYTES = '{\\field{\\*\\fldinst HYPERLINK ""}{\\fldrslt\\ul\\cf1 \\cf0\\ulnone }}'.length;
 
@@ -431,13 +438,22 @@ export function estimateRtfBytes(editorEl: HTMLElement): number {
 		const tag = el.tagName.toLowerCase();
 		total += BLOCK_OVERHEAD_BYTES[tag] ?? 0;
 		if (tag === 'a') {
-			const href = el.getAttribute('href') || '';
-			if (href && isSafeLinkUrl(href)) total += LINK_OVERHEAD_BYTES + escapeRtf(href).length;
+			const target = linkTarget(el.getAttribute('href') || '');
+			if (target) total += LINK_OVERHEAD_BYTES + escapeRtf(target).length;
 		}
+		// Each line break in a code block is written as "\line " (6) and counted as 1.
+		if (tag === 'pre') total += ((el.textContent || '').match(/\r\n|\r|\n/g)?.length ?? 0) * 5;
+		// A paragraph a block writes inside a table cell also carries \intbl (6). A list
+		// writes one paragraph per item, so the item is counted, not the list.
+		if (CELL_PARAGRAPH_TAGS.has(tag) && el.closest('td, th')) total += 6;
+		// Every cell in a row with a header cell carries \clbrdrb\brdrs.
+		if (tag === 'td' && el.parentElement?.querySelector(':scope > th')) total += 14;
+		// A figure with a caption and no picture writes its caption twice.
+		if (tag === 'figure' && !el.querySelector('img')) total += escapeRtf(el.textContent || '').length;
 		// A color costs "\cfN " on and off and, the first time, its color-table entry (at most
 		// 22 bytes, "\red255\green255\blue255;"); a size costs "\fsNN " on and off.
 		if (el.style?.color || (tag === 'font' && el.hasAttribute('color'))) total += 10 + 22;
-		if (el.style?.fontSize) total += 12;
+		if (el.style?.fontSize) total += 14; // "\fsNNN " on and off, for sizes up to 499 pt
 	}
 
 	return total;
@@ -446,20 +462,30 @@ export function estimateRtfBytes(editorEl: HTMLElement): number {
 // ── Link helpers ──
 
 /**
- * Whether a link address is one a reader can safely follow: web, mail or phone. A
- * javascript:, data:, file: or vbscript: address is refused, as image addresses are.
- * Relative addresses resolve against the page, so they count as web addresses.
+ * The address a link should carry in the RTF, or null if it should not be a link.
+ *
+ * Only an absolute web, mail or phone address qualifies. A relative path, a UNC path
+ * (\\server\share) or a javascript:, data:, file: or vbscript: address is refused: the
+ * receiving system opens a link in its own context, where a relative or UNC path names
+ * a file on the reader's network. The address returned is the parsed one, which
+ * percent-encodes characters such as a quote that would otherwise end the field's
+ * address and add switches of its own.
  */
-export function isSafeLinkUrl(url: string): boolean {
+export function linkTarget(url: string): string | null {
 	const value = url.trim();
-	if (!value) return false;
+	if (!/^(https?:\/\/|mailto:|tel:)/i.test(value) || value.includes('\\')) return null;
 	try {
-		const base = typeof window !== 'undefined' ? window.location.href : 'http://localhost/';
-		const protocol = new URL(value, base).protocol;
-		return protocol === 'http:' || protocol === 'https:' || protocol === 'mailto:' || protocol === 'tel:';
+		const parsed = new URL(value);
+		if (!['http:', 'https:', 'mailto:', 'tel:'].includes(parsed.protocol)) return null;
+		return parsed.href.replace(/"/g, '%22');
 	} catch {
-		return false;
+		return null;
 	}
+}
+
+/** Whether a link address is an absolute web, mail or phone address (see linkTarget). */
+export function isSafeLinkUrl(url: string): boolean {
+	return linkTarget(url) !== null;
 }
 
 // ── Font helpers ──
@@ -563,7 +589,9 @@ export function htmlToRtf(editorEl: HTMLElement, options: RtfWriteOptions = {}):
 		underline: false,
 		strike: false,
 		size: bodySize,
-		color: 0
+		color: 0,
+		script: null,
+		mono: false
 	});
 
 	const rtf =
@@ -628,19 +656,19 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 			// Heading sizes keep their ratio to the body (HEADING_SCALE).
 			case 'h1': {
 				const size = scaled(ctx, HEADING_SCALE.h1);
-				rtf += `\\pard${inCell(ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}\\b0\\fs${ctx.size}\\par `;
+				rtf += `\\pard${inCell(ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
 				break;
 			}
 
 			case 'h2': {
 				const size = scaled(ctx, HEADING_SCALE.h2);
-				rtf += `\\pard${inCell(ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}\\b0\\fs${ctx.size}\\par `;
+				rtf += `\\pard${inCell(ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
 				break;
 			}
 
 			case 'h3': {
 				const size = scaled(ctx, HEADING_SCALE.h3);
-				rtf += `\\pard${inCell(ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}\\b0\\fs${ctx.size}\\par `;
+				rtf += `\\pard${inCell(ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
 				break;
 			}
 
@@ -650,8 +678,18 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 				// ends with \par, so two paragraphs in one cell stay two (the cell drops the last
 				// one's); one that follows a list or heading in the cell restates \pard\intbl,
 				// so it does not inherit that block's indent.
+				// Text typed straight into the parent before this block ("abc<div>def</div>",
+				// the shape Chrome makes on Enter) has no paragraph of its own: end it here, or
+				// the two lines run together.
+				const afterLooseText = followsInlineContent(el);
 				if (ctx.inTableCell) {
-					const restate = el.previousElementSibling ? '\\pard\\intbl ' : '';
+					const restate = afterLooseText
+						? '\\par \\pard\\intbl '
+						: el.previousElementSibling ? '\\pard\\intbl ' : '';
+					if (isBlankLine(el)) {
+						rtf += `${restate}\\par `;
+						break;
+					}
 					const colorIdx = colorIndexOf(el, ctx);
 					const inner = walkChildren(el, colorIdx != null ? { ...ctx, color: colorIdx } : ctx);
 					rtf += colorIdx != null
@@ -661,18 +699,15 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 				}
 				// A <p> with no children or only a single <br> is a blank line —
 				// emit a bare \par rather than \pard \line\par, which adds an extra line.
-				const isBlankLine =
-					el.childNodes.length === 0 ||
-					(el.childNodes.length === 1 && el.childNodes[0].nodeName === 'BR');
-				if (isBlankLine) {
-					rtf += '\\par ';
+				if (isBlankLine(el)) {
+					rtf += afterLooseText ? '\\par \\par ' : '\\par ';
 					break;
 				}
 				const colorIdx = colorIndexOf(el, ctx);
 				const inlineRtf = walkChildren(el, colorIdx != null ? { ...ctx, color: colorIdx } : ctx);
 				const colorPrefix = colorIdx != null ? `\\cf${colorIdx} ` : '';
 				const colorSuffix = colorIdx != null ? `\\cf${ctx.color} ` : '';
-				rtf += `\\pard ${colorPrefix}${inlineRtf}${colorSuffix}\\par `;
+				rtf += `${afterLooseText ? '\\par ' : ''}\\pard ${colorPrefix}${inlineRtf}${colorSuffix}\\par `;
 				break;
 			}
 
@@ -708,7 +743,7 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 					// Cell bodies
 					const cellCtx = { ...ctx, inTableCell: true };
 					for (const cell of cells) {
-						const content = walkChildren(cell as HTMLElement, cellCtx).replace(/\\par $/, '');
+						const content = withoutTrailingPar(walkChildren(cell as HTMLElement, cellCtx));
 						rowRtf += `{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 ${content}\\par}\\cell`;
 					}
 					rowRtf += '}\\intbl\\row}';
@@ -774,29 +809,33 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 				break;
 
 			case 'sup':
-				rtf += `\\super ${walkChildren(el, ctx)}\\nosupersub `;
+			case 'sub': {
+				const script = tag === 'sup' ? 'super' : 'sub';
+				if (ctx.script === script) {
+					rtf += walkChildren(el, ctx);
+					break;
+				}
+				const restore = ctx.script ? `\\${ctx.script} ` : '\\nosupersub ';
+				rtf += `\\${script} ${walkChildren(el, { ...ctx, script })}${restore}`;
 				break;
-
-			case 'sub':
-				rtf += `\\sub ${walkChildren(el, ctx)}\\nosupersub `;
-				break;
+			}
 
 			case 'code':
-				if (!ctx.inPre) {
-					rtf += `\\f1 ${walkChildren(el, ctx)}\\f0 `;
+				if (!ctx.inPre && !ctx.mono) {
+					rtf += `\\f1 ${walkChildren(el, { ...ctx, mono: true })}\\f0 `;
 				} else {
 					rtf += walkChildren(el, ctx);
 				}
 				break;
 
 			case 'a': {
-				const href = el.getAttribute('href') || '';
-				// A link the receiving system could act on only if it is a web, mail or phone
-				// address. Anything else (javascript:, data:, file:) is written as its text alone.
-				if (href && isSafeLinkUrl(href)) {
+				// A link is written only for an absolute web, mail or phone address; anything
+				// else (a relative or UNC path, javascript:, data:, file:) as its text alone.
+				const target = linkTarget(el.getAttribute('href') || '');
+				if (target) {
 					const inner = walkChildren(el, { ...ctx, underline: true, color: 1 });
 					const underlineOff = ctx.underline ? '' : '\\ulnone';
-					rtf += `{\\field{\\*\\fldinst HYPERLINK "${escapeRtf(href)}"}{\\fldrslt\\ul\\cf1 ${inner}\\cf${ctx.color}${underlineOff} }}`;
+					rtf += `{\\field{\\*\\fldinst HYPERLINK "${escapeRtf(target)}"}{\\fldrslt\\ul\\cf1 ${inner}\\cf${ctx.color}${underlineOff} }}`;
 				} else {
 					rtf += walkChildren(el, ctx);
 				}
@@ -892,7 +931,37 @@ function besideBlock(node: Node): boolean {
 	return isBlock(prev) || isBlock(next) || (!prev && !next && isBlock(node.parentNode));
 }
 
-/** \\intbl for a paragraph a block writes inside a table cell, so it stays in the cell. */
+/** A <p> or <div> with no content, or only a <br>: a blank line. */
+function isBlankLine(el: HTMLElement): boolean {
+	return el.childNodes.length === 0 || (el.childNodes.length === 1 && el.childNodes[0].nodeName === 'BR');
+}
+
+/**
+ * Whether the nearest sibling before this element, skipping collapsible whitespace, is
+ * text or an inline element: content with no paragraph of its own.
+ */
+function followsInlineContent(el: HTMLElement): boolean {
+	let prev = el.previousSibling;
+	while (prev && prev.nodeType === Node.TEXT_NODE && COLLAPSIBLE_WHITESPACE.test(prev.textContent || '')) {
+		prev = prev.previousSibling;
+	}
+	if (!prev) return false;
+	if (prev.nodeType === Node.TEXT_NODE) return true;
+	return prev.nodeType === Node.ELEMENT_NODE && !isBlock(prev);
+}
+
+/**
+ * The cell's own \par ends its last paragraph, so that paragraph's mark is dropped. Only a
+ * real control word: "\par " preceded by an odd run of backslashes is escaped text.
+ */
+function withoutTrailingPar(content: string): string {
+	if (!content.endsWith('\\par ')) return content;
+	let slashes = 0;
+	for (let i = content.length - 6; i >= 0 && content[i] === '\\'; i--) slashes++;
+	return slashes % 2 === 0 ? content.slice(0, -5) : content;
+}
+
+/** \intbl for a paragraph a block writes inside a table cell, so it stays in the cell. */
 function inCell(ctx: WalkContext): string {
 	return ctx.inTableCell ? '\\intbl' : '';
 }

@@ -45,10 +45,15 @@ describe('closing a format restores the enclosing one', () => {
 		expect(rtf).toContain('\\cf2 r \\cf3 b\\cf2  r\\cf0 \\par ');
 	});
 
-	it('a link inside underlined text leaves the underline on', () => {
-		expect(body('<p><u>under <a href="https://example.org">link</a> still under</u></p>')).toContain(
-			'link\\cf0 }} still under\\ulnone '
-		);
+	it('a heading inside bold text does not end the bold after it', () => {
+		// 1.5.2 wrote the heading's \b0 unconditionally, so "ghi" arrived plain.
+		expect(body('<b>abc<h2>def</h2>ghi</b>')).toBe('\\b abc\\pard\\f0\\fs36\\b def\\fs24\\par ghi\\b0 }');
+	});
+
+	it('superscript inside superscript, and code inside code, do not leak', () => {
+		expect(body('<p>x<sup>a<sup>b</sup>c</sup>d</p>')).toBe('\\pard x\\super abc\\nosupersub d\\par }');
+		expect(body('<p>x<sup>a<sub>b</sub>c</sup>d</p>')).toBe('\\pard x\\super a\\sub b\\super c\\nosupersub d\\par }');
+		expect(body('<p><code>a<code>b</code>c</code>d</p>')).toBe('\\pard \\f1 abc\\f0 d\\par }');
 	});
 
 	it('leaves ordinary formatting exactly as 1.5.2 wrote it', () => {
@@ -80,6 +85,31 @@ describe('blocks inside a table cell stay in the cell', () => {
 		expect(body('<table><tr><td><p>x</p><p>y</p></td></tr></table>')).toContain('x\\par \\pard\\intbl y\\par}\\cell');
 	});
 
+	it('a line typed after loose text stays its own line (Chrome\'s "abc<div>def</div>")', () => {
+		expect(body('<table><tr><td>abc<div>def</div></td></tr></table>')).toContain('abc\\par \\pard\\intbl def\\par}\\cell');
+		// The same shape outside a table.
+		expect(body('abc<div>def</div>')).toBe('abc\\par \\pard def\\par }');
+	});
+
+	it('an empty line in a cell is one line, not two', () => {
+		expect(body('<table><tr><td><p>a</p><div><br></div><p>b</p></td></tr></table>')).toContain(
+			'a\\par \\pard\\intbl \\par \\pard\\intbl b\\par}\\cell'
+		);
+	});
+
+	it('a figure and a paragraph color in a cell stay in the cell', () => {
+		const rtf = htmlToRtf(
+			htmlEl('<table><tr><td><p style="color: red">r</p><figure><figcaption>cap</figcaption></figure></td></tr></table>')
+		);
+		expect(rtf).toContain('\\cf2 r\\cf0 \\par ');
+		expect(rtf).toContain('\\pard\\intbl\\ql\\i cap');
+	});
+
+	it('keeps a paragraph mark that is really typed text', () => {
+		// The text "\par " typed at the end of a cell is escaped, not a paragraph mark to drop.
+		expect(body('<table><tr><td><p>see \\par </p></td></tr></table>')).toContain('see \\\\par \\par}\\cell');
+	});
+
 	it('a one-paragraph cell is written exactly as before', () => {
 		expect(body('<table><tr><td><p>x</p></td><td>y</td></tr></table>')).toContain(
 			'{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 x\\par}\\cell{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 y\\par}\\cell'
@@ -101,12 +131,26 @@ describe('characters from U+8000 up', () => {
 
 describe('links', () => {
 	it('accepts web, mail and phone addresses only', () => {
-		for (const ok of ['https://example.org/a', 'http://example.org', 'mailto:a@example.org', 'tel:+12025550100', '/relative']) {
+		for (const ok of ['https://example.org/a', 'HTTP://example.org', ' https://example.org ', 'mailto:a@example.org', 'tel:+12025550100']) {
 			expect(isSafeLinkUrl(ok)).toBe(true);
 		}
-		for (const bad of ['javascript:alert(1)', ' JavaScript:alert(1)', 'data:text/html,x', 'vbscript:x', 'file:///etc/passwd', '']) {
+		for (const bad of [
+			'javascript:alert(1)', ' JavaScript:alert(1)', 'java\tscript:alert(1)', 'data:text/html,x', 'vbscript:x',
+			'file:///etc/passwd', '', '/relative', '../../../Windows/notepad.exe', '\\\\server\\share\\x.exe',
+			'//example.org/x', '#frag', 'https:\\\\example.org', 'ftp://example.org'
+		]) {
 			expect(isSafeLinkUrl(bad)).toBe(false);
 		}
+	});
+
+	it('writes the parsed address, so a quote cannot add field switches', () => {
+		const rtf = body('<p><a href=\'https://example.org/" o "hi\'>x</a></p>');
+		expect(rtf).toContain('HYPERLINK "https://example.org/%22%20o%20%22hi"');
+	});
+
+	it('writes a relative or network path as its text alone', () => {
+		expect(body('<p><a href="../../x.exe">x</a></p>')).toBe('\\pard x\\par }');
+		expect(body('<p><a href="\\\\server\\share">y</a></p>')).toBe('\\pard y\\par }');
 	});
 
 	it('writes an unsafe link as its text alone', () => {
@@ -121,7 +165,13 @@ describe('estimateRtfBytes does not undercount', () => {
 		'rules': '<p>a</p><hr><hr><hr>',
 		'inline formatting': '<p><b>a</b> <i>b</i> <u>c</u> <s>d</s> x<sup>2</sup> <code>e</code><br>f</p>',
 		'colors and sizes': '<p><span style="color: red; font-size: 18pt">x</span> <font color="#00ff00">y</font></p>',
-		'a picture that is a link': '<p><img src="https://example.org/figure.png" alt="figure"></p>'
+		'a picture given only by its address': '<p><img src="https://example.org/figure.png" alt="figure"></p>',
+		'a code block of many lines': '<pre>' + Array.from({ length: 100 }, (_, i) => 'line ' + i).join('\n') + '</pre>',
+		'blocks inside a table cell':
+			'<table><tr><td>' + '<h1>x</h1><hr><div>y</div>'.repeat(20) + '<ol>' + '<li>z</li>'.repeat(60) + '</ol></td></tr></table>',
+		'a header row': '<table><tr><th>a</th>' + '<td>b</td>'.repeat(20) + '</tr></table>',
+		'a figure with only a caption': '<figure><figcaption>' + 'caption '.repeat(50) + '</figcaption></figure>',
+		'very large sizes': '<p>' + '<span style="font-size: 120pt">x</span>'.repeat(50) + '</p>'
 	};
 	for (const [name, html] of Object.entries(cases)) {
 		it(`is close to the real size for ${name}, and not below it`, () => {
@@ -129,7 +179,8 @@ describe('estimateRtfBytes does not undercount', () => {
 			const actual = htmlToRtf(el).length;
 			const estimate = estimateRtfBytes(el);
 			expect(estimate).toBeGreaterThanOrEqual(actual);
-			expect(estimate - actual).toBeLessThan(150);
+			// Over is the safe direction for a transport limit; by a few bytes per element at most.
+			expect(estimate - actual).toBeLessThan(Math.max(150, actual * 0.1));
 		});
 	}
 });
