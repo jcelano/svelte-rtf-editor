@@ -163,7 +163,7 @@ editor.importRtf()        // → void    — open the file picker to import .rtf
 ```ts
 import {
   rtfToHtml, htmlToRtf, estimateRtfBytes, readRtfFile, htmlToMarkdown, downloadFile,
-  DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE
+  DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE, isSafeLinkUrl
 } from 'svelte-rtf-editor';
 ```
 
@@ -172,6 +172,7 @@ import {
 | `rtfToHtml(rtf: string, options?: { fontSize? }): string` | Parse an RTF string and return an HTML string. `fontSize` is the size of the screen it will be shown on (default 12) |
 | `htmlToRtf(el: HTMLElement, options?: { fontFamily?, fontSize? }): string` | Convert a DOM element's content to RTF, in Arial 12 pt unless told otherwise |
 | `estimateRtfBytes(el: HTMLElement): number` | Approximate RTF size of a DOM element without converting it |
+| `isSafeLinkUrl(url: string): boolean` | Whether a link address is a web, mail or phone address; `htmlToRtf` writes any other link as its text alone |
 | `readRtfFile(file: File): Promise<string>` | Read a `.rtf` File object and return HTML     |
 | `htmlToMarkdown(el: HTMLElement): string` | Convert a DOM element's content to Markdown   |
 | `downloadFile(name, content, mime): void` | Trigger a file download in the browser        |

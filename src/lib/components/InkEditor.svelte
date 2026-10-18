@@ -56,6 +56,7 @@
 	import {
 		htmlToRtf,
 		estimateRtfBytes,
+		isSafeLinkUrl,
 		cssFontFamily,
 		normalizeFontSize,
 		DEFAULT_FONT_FAMILY,
@@ -148,6 +149,7 @@
 	let linkModalOpen: boolean = $state(false);
 	let imageModalOpen: boolean = $state(false);
 	let linkUrl: string = $state('');
+	let linkError: string = $state('');
 	let linkText: string = $state('');
 	let imageUrl: string = $state('');
 	let imageAlt: string = $state('');
@@ -363,11 +365,20 @@
 		saveSelection();
 		linkUrl = '';
 		linkText = '';
+		linkError = '';
 		linkModalOpen = true;
 	}
 
 	function applyLink(): void {
 		if (!linkUrl) { linkModalOpen = false; return; }
+		// Only a web, mail or phone address becomes a link; a javascript: address would
+		// run when clicked in the editor and in any viewer of the stored HTML. The dialog
+		// stays open and says why, rather than closing as if the link had been added.
+		if (!isSafeLinkUrl(linkUrl)) {
+			linkError = 'Enter a web address (https://…), an email address (mailto:…) or a phone number (tel:…).';
+			return;
+		}
+		linkError = '';
 		restoreSelection();
 		editorEl?.focus();
 
@@ -875,7 +886,12 @@
 		placeholder="https://example.com"
 		bind:value={linkUrl}
 		onkeydown={(e) => e.key === 'Enter' && applyLink()}
+		aria-invalid={linkError ? 'true' : undefined}
+		aria-describedby={linkError ? 'ink-link-error' : undefined}
 	/>
+	{#if linkError}
+		<p class="ink-modal-error" id="ink-link-error" role="alert">{linkError}</p>
+	{/if}
 	{#snippet actions()}
 		<button class="ink-btn-ghost" onclick={() => (linkModalOpen = false)}>Cancel</button>
 		<button class="ink-btn-primary" onclick={applyLink}>Insert</button>
@@ -1176,6 +1192,12 @@
 		margin: 0 0 12px;
 		font-size: 12px;
 		color: var(--text-muted, #8a7e72);
+	}
+
+	.ink-modal-error {
+		margin: 0 0 12px;
+		font-size: 12px;
+		color: var(--danger, #b42318);
 	}
 
 	.ink-modal-or {
