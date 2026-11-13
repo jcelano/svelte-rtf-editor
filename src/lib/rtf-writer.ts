@@ -468,6 +468,16 @@ export function estimateRtfBytes(editorEl: HTMLElement): number {
 	for (const block of Array.from(editorEl.querySelectorAll<HTMLElement>('p, div, li, h1, h2, h3, h4, h5, h6, pre, blockquote'))) {
 		if (block.closest('[style*="margin"], [style*="text-align"], [align]')) total += 12;
 	}
+	// Each paragraph's formatting, worked out once: a blank line looks at the one before it.
+	const formatCache = new Map<Element, string>();
+	const ownFormat = (el: HTMLElement): string => {
+		let format = formatCache.get(el);
+		if (format === undefined) {
+			format = `${alignOf(el)}${paragraphControls(el, leftMarginTwips(el))}`;
+			formatCache.set(el, format);
+		}
+		return format;
+	};
 	for (const el of Array.from(editorEl.querySelectorAll<HTMLElement>('*'))) {
 		const tag = el.tagName.toLowerCase();
 		total += BLOCK_OVERHEAD_BYTES[tag] ?? 0;
@@ -480,6 +490,14 @@ export function estimateRtfBytes(editorEl: HTMLElement): number {
 		// A paragraph a block writes inside a table cell also carries \intbl (6). A list
 		// writes one paragraph per item, so the item is counted, not the list.
 		if (CELL_PARAGRAPH_TAGS.has(tag) && el.closest('td, th')) total += 6;
+		// A paragraph's own formatting costs its controls, and a blank line after one restates
+		// \pard (5); counting both on every such paragraph can only overestimate. The indent of
+		// the blocks around it is counted above.
+		if ((tag === 'p' || tag === 'div') && !el.closest('td, th')) {
+			const para = ownFormat(el);
+			const prev = el.previousElementSibling;
+			if (para || (prev && formatCache.get(prev))) total += para.length + 6;
+		}
 		// Every cell in a row with a header cell carries \clbrdrb\brdrs.
 		if (tag === 'td' && el.parentElement?.querySelector(':scope > th')) total += 14;
 		// A figure with a caption and no picture writes its caption twice.
@@ -738,17 +756,38 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 						: `${restate}${inner}\\par `;
 					break;
 				}
+				// A <div> that holds blocks (pasted content wraps paragraphs in one) is not a
+				// paragraph itself: each block inside writes its own \\pard, which would drop the
+				// div's indent, and the div's own \\par would add a blank line. Its left margin is
+				// carried into the blocks instead, and loose text in it gets a paragraph.
+				if (tag === 'div' && Array.from(el.children).some(isBlock)) {
+					const indent = ctx.indent + leftMarginTwips(el);
+					const colorIdx = colorIndexOf(el, ctx);
+					const inner = { ...ctx, indent, color: colorIdx ?? ctx.color };
+					const lead = startsWithInline(el) ? `\\pard${liControl(indent)} ` : '';
+					const tail = endsWithInline(el) ? '\\par ' : '';
+					const colorPrefix = colorIdx != null ? `\\cf${colorIdx} ` : '';
+					const colorSuffix = colorIdx != null ? `\\cf${ctx.color} ` : '';
+					rtf += `${afterLooseText ? '\\par ' : ''}${lead}${colorPrefix}${walkChildren(el, inner)}${colorSuffix}${tail}`;
+					break;
+				}
+				// The paragraph's alignment, indents, spacing, keep-with-next and tab stops, if it
+				// sets any.
+				const para = paragraphFormat(el, ctx);
 				// A <p> with no children or only a single <br> is a blank line —
 				// emit a bare \par rather than \pard \line\par, which adds an extra line.
+				// A bare \par keeps the formatting of the paragraph before it, so a blank line after a
+				// formatted paragraph, or with formatting of its own, restates \pard.
 				if (isBlankLine(el)) {
-					rtf += afterLooseText ? '\\par \\par ' : '\\par ';
+					const reset = para || followsFormattedParagraph(el, ctx) ? `\\pard${para} ` : '';
+					rtf += `${afterLooseText ? '\\par ' : ''}${reset}\\par `;
 					break;
 				}
 				const colorIdx = colorIndexOf(el, ctx);
 				const inlineRtf = walkChildren(el, colorIdx != null ? { ...ctx, color: colorIdx } : ctx);
 				const colorPrefix = colorIdx != null ? `\\cf${colorIdx} ` : '';
 				const colorSuffix = colorIdx != null ? `\\cf${ctx.color} ` : '';
-				rtf += `${afterLooseText ? '\\par ' : ''}\\pard${paragraphLayout(el, ctx)} ${colorPrefix}${inlineRtf}${colorSuffix}\\par `;
+				rtf += `${afterLooseText ? '\\par ' : ''}\\pard${para} ${colorPrefix}${inlineRtf}${colorSuffix}\\par `;
 				break;
 			}
 
@@ -1025,7 +1064,8 @@ function restateAfterBlock(node: Node, ctx: WalkContext): string {
 	const tag = block.tagName.toLowerCase();
 	const formatted =
 		FORMATTED_BLOCK_TAGS.has(tag) ||
-		(['p', 'div', 'h1', 'h2', 'h3'].includes(tag) && paragraphLayout(block, ctx) !== '') ||
+		(['p', 'div'].includes(tag) && (ctx.inTableCell ? paragraphLayout(block, ctx) : paragraphFormat(block, ctx)) !== '') ||
+		(['h1', 'h2', 'h3'].includes(tag) && paragraphLayout(block, ctx) !== '') ||
 		(tag === 'pre' && ctx.indent + leftMarginTwips(block) > 0);
 	return formatted ? `\\pard${inCell(ctx)}${liControl(ctx.indent)} ` : '';
 }
@@ -1041,17 +1081,29 @@ function withoutTrailingPar(content: string): string {
 	return slashes % 2 === 0 ? content.slice(0, -5) : content;
 }
 
+// ── Paragraph formatting ──
+
+const TWIPS_PER_UNIT: Record<string, number> = { in: 1440, pt: 20, cm: 1440 / 2.54, mm: 144 / 2.54, px: TWIPS_PER_PX };
+
+/**
+ * A CSS length in whole twips, or null when it cannot be read: a unit other than in, pt, cm, mm or
+ * px, a percentage, a keyword, or a negative value where one is not allowed.
+ */
+function lengthTwips(value: string | null | undefined, allowNegative = false): number | null {
+	const m = (value ?? '').trim().toLowerCase().match(/^(-?\d+(?:\.\d+)?|-?\.\d+)(in|pt|cm|mm|px)$/);
+	if (!m) return null;
+	const twips = Math.round(parseFloat(m[1]) * TWIPS_PER_UNIT[m[2]]);
+	if (twips < 0 && !allowNegative) return null;
+	return twips;
+}
+
 /**
  * An element's own left margin in twips, from its inline style: what the browser's Indent sets
  * (Firefox puts margin-left on the paragraph; Chromium and WebKit on a wrapping blockquote).
  * Units a reader cannot pin to a length (%, em) count as none.
  */
 function leftMarginTwips(el: HTMLElement): number {
-	const value = (el.style?.marginLeft || '').trim().toLowerCase();
-	const m = /^(-?\d*\.?\d+)(px|pt|in|cm|mm)$/.exec(value);
-	if (!m) return 0;
-	const perUnit: Record<string, number> = { px: TWIPS_PER_PX, pt: 20, in: 1440, cm: 1440 / 2.54, mm: 144 / 2.54 };
-	return Math.max(0, Math.round(parseFloat(m[1]) * perUnit[m[2]]));
+	return lengthTwips(el.style?.marginLeft) ?? 0;
 }
 
 /**
@@ -1067,13 +1119,70 @@ function liControl(twips: number): string {
 	return twips > 0 ? `\\li${twips}` : '';
 }
 
+/** \qc, \qr or \qj; left is the default and is not written. */
+function alignOf(el: HTMLElement): string {
+	const align = alignControl(el);
+	return align === '\\ql' ? '' : align;
+}
+
 /**
- * A paragraph's alignment and left indent: \qc, \qr or \qj (left is the default and is not
- * written), and \liN for the indent of the blocks around it plus its own margin.
+ * A heading's, or a paragraph's inside a table cell: its alignment, and \liN for the indent of
+ * the blocks around it plus its own margin.
  */
 function paragraphLayout(el: HTMLElement, ctx: WalkContext): string {
-	const align = alignControl(el);
-	return `${align === '\\ql' ? '' : align}${liControl(ctx.indent + leftMarginTwips(el))}`;
+	return `${alignOf(el)}${liControl(ctx.indent + leftMarginTwips(el))}`;
+}
+
+/**
+ * A <p> or <div>'s formatting outside a table cell: its alignment, then paragraphControls with the
+ * indent of the blocks around it plus its own margin.
+ */
+function paragraphFormat(el: HTMLElement, ctx: WalkContext): string {
+	return `${alignOf(el)}${paragraphControls(el, ctx.indent + leftMarginTwips(el))}`;
+}
+
+/**
+ * The RTF paragraph controls for a <p> or <div>'s own formatting, or '' when it sets none:
+ *
+ * | HTML                                             | RTF               |
+ * |--------------------------------------------------|-------------------|
+ * | data-rtf-tab-stops="1.75in" (comma-separated)    | \tx2520           |
+ * | margin-left: 1.75in (the left indent, given)     | \li2520           |
+ * | text-indent: -1.75in                             | \fi-2520          |
+ * | margin-top: 5pt / margin-bottom: 5pt             | \sb100 / \sa100   |
+ * | break-after: avoid, or page-break-after: avoid   | \keepn            |
+ *
+ * CSS has no absolute tab stop, hence the data- attribute. A value that cannot be read writes
+ * nothing, and so does zero, which is what \pard already sets. Not written inside a table cell,
+ * where the cell declares its own paragraph.
+ */
+function paragraphControls(el: HTMLElement, leftTwips: number): string {
+	let out = '';
+	const stops = (el.getAttribute('data-rtf-tab-stops') ?? '')
+		.split(',')
+		.map((v) => lengthTwips(v))
+		.filter((t): t is number => t != null && t > 0);
+	for (const t of Array.from(new Set(stops)).sort((a, b) => a - b)) out += `\\tx${t}`;
+	out += liControl(leftTwips);
+	const style = el.style;
+	if (!style) return out;
+	const fi = lengthTwips(style.textIndent, true);
+	if (fi) out += `\\fi${fi}`;
+	const sb = lengthTwips(style.marginTop);
+	if (sb) out += `\\sb${sb}`;
+	const sa = lengthTwips(style.marginBottom);
+	if (sa) out += `\\sa${sa}`;
+	const keep = (prop: string) => style.getPropertyValue(prop).trim() === 'avoid';
+	if (keep('break-after') || keep('page-break-after')) out += '\\keepn';
+	return out;
+}
+
+/** Whether the nearest element before this one is a <p> or <div> with formatting of its own. */
+function followsFormattedParagraph(el: HTMLElement, ctx: WalkContext): boolean {
+	const prev = el.previousElementSibling as HTMLElement | null;
+	if (!prev) return false;
+	const tag = prev.tagName.toLowerCase();
+	return (tag === 'p' || tag === 'div') && paragraphFormat(prev, ctx) !== '';
 }
 
 /** Whether a container's first (or last) content is loose text or an inline element, not a block. */
