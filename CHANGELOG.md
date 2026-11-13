@@ -1,5 +1,26 @@
 # svelte-rtf-editor
 
+## 1.7.0
+
+### Minor Changes
+
+- f3b473b: Increase and Decrease indent: toolbar buttons, `Ctrl+]` / `Ctrl+[` (`Cmd` on a Mac), and Tab or
+  Shift+Tab over several selected lines. Each step moves the paragraphs 0.5 in, written to RTF as
+  `\li720`; lists move as a whole. Paragraph alignment now reaches the RTF (`\qc`, `\qr`, `\qj`):
+  through 1.6.0 a centered or right-aligned paragraph was written left-aligned. Indented blocks
+  pasted from Chromium (a blockquote with `border: none`) or Firefox (margin-left) are read as indents, not
+  as italic quotations.
+
+  A Quote block or a picture moves as a whole, an indent pasted from Chromium can be decreased, and
+  Undo also takes back the paragraph a loose line was given. Text after a centered or indented block
+  no longer inherits that layout in the RTF.
+
+- 734c5b3: `htmlToRtf` writes a paragraph's own formatting: `margin-left` as `\li`, `text-indent` as `\fi`,
+  `margin-top` and `margin-bottom` as `\sb` and `\sa`, `break-after: avoid` as `\keepn`, and the stops
+  in `data-rtf-tab-stops` as `\tx`. A paragraph without them writes exactly as before. A blank line
+  after a formatted paragraph now restates `\pard`, so it does not take on that paragraph's indent. A `<div>` that wraps paragraphs passes its left indent to them and no longer adds a blank line after
+  them.
+
 ## 1.6.0
 
 ### Minor Changes
