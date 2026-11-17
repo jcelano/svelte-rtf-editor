@@ -528,6 +528,12 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 	let currentRowCellAligns: string[] = [];
 	let inTableCell = false;
 	let pendingBottomBorder = false; // set by \clbrdrb, confirmed by a real border type
+	/**
+	 * A \trowd came after this row's cells. Word states the row again just before \row, so the
+	 * cells are kept; but if another \cell follows instead, that \trowd began a new row and the
+	 * cells before it, with their alignments, were an abandoned one.
+	 */
+	let rowRestated = false;
 
 	// First pass: extract color table and font table from the root group
 	const rootGroup = tree.children[0]?.type === 'group' ? (tree.children[0] as RtfGroup) : tree;
@@ -797,7 +803,12 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 						if (!inTableCell) flushParagraph();
 						break;
 					case 'trowd':
-						currentRowCells = [];
+						if (currentRowCells.length > 0) {
+							rowRestated = true;
+						} else {
+							currentRowCells = [];
+							currentRowCellAligns = [];
+						}
 						currentRowIsHeader = false;
 						currentRowCellRights = [];
 						pendingBottomBorder = false;
@@ -833,6 +844,11 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 						inTableCell = true;
 						break;
 					case 'cell':
+						if (rowRestated) {
+							currentRowCells = [];
+							currentRowCellAligns = [];
+							rowRestated = false;
+						}
 						currentRowCells.push(currentParagraph.trim());
 						currentRowCellAligns.push(currentAlign);
 						currentParagraph = '';
@@ -845,6 +861,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 						currentRowIsHeader = false;
 						currentRowCellRights = [];
 						currentRowCellAligns = [];
+						rowRestated = false;
 						inTableCell = false;
 						// The cell's indents end with the table, in whichever group set them:
 						// \row may sit in a group of its own ({\row}).

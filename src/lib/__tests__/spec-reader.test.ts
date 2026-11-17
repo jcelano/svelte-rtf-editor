@@ -237,11 +237,32 @@ describe('tables', () => {
 		expect(html).toContain('<p>more</p>');
 	});
 
-	it.fails('#3.10: a row that is started again does not keep the abandoned row\'s cell alignment', () => {
+	it('#3.10: a row that is started again does not keep the abandoned row\'s cell alignment', () => {
 		const html = read(R`\trowd\cellx4320 \pard\intbl\qc lost\cell \trowd\cellx4320\cellx8640 \pard\intbl a\cell b\cell\row`);
 		const first = dom(html).querySelector('td') as HTMLElement;
 		expect(first.textContent).toBe('a');
 		expect(first.style.textAlign).toBe('');
+	});
+
+	it('a Word table, which states each row again just before \\row, keeps its cells', () => {
+		const html = read(
+			R`\trowd\irow0\trgaph108\cellx4320\cellx8640\pard\plain\intbl\qr 1.5\cell\pard\intbl b\cell` +
+				R`\pard\plain\intbl{\trowd\irow0\trgaph108\cellx4320\cellx8640\row}` +
+				R`\trowd\irow1\trgaph108\cellx4320\cellx8640\pard\plain\intbl c\cell\pard\intbl d\cell` +
+				R`\pard\plain\intbl{\trowd\irow1\trgaph108\cellx4320\cellx8640\row}\pard after\par`
+		);
+		expect(cells(html)).toEqual([['1.5', 'b'], ['c', 'd']]);
+		const first = dom(html).querySelector('td') as HTMLElement;
+		expect([first.style.textAlign, first.style.width]).toEqual(['right', '50.0%']);
+		expect(html.endsWith('</table>\n<p>after</p>')).toBe(true);
+	});
+
+	it('a row stated again with a header border is a header row', () => {
+		const html = read(
+			R`\trowd\cellx4320\cellx8640\intbl H1\cell H2\cell{\trowd\clbrdrb\brdrs\cellx4320\clbrdrb\brdrs\cellx8640\row}` +
+				R`\trowd\cellx4320\cellx8640\intbl a\cell b\cell\row`
+		);
+		expect(dom(html).querySelectorAll('th').length).toBe(2);
 	});
 
 	it.fails('#2: \\clvmgf and \\clvmrg read back as one cell with rowspan', () => {
