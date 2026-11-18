@@ -160,16 +160,27 @@ export interface Kept {
  */
 export function keptMarks(options: KeepOptions | undefined): Kept {
 	const attributes = new Set<string>();
-	for (const name of options?.keepAttributes ?? []) {
-		const lower = String(name).trim().toLowerCase();
+	for (const name of namesIn(options?.keepAttributes)) {
+		const lower = name.toLowerCase();
 		if (/^data-[a-z0-9_.-]+$/.test(lower)) attributes.add(lower);
 	}
-	const classes = new Set<string>();
-	for (const name of options?.keepClasses ?? []) {
-		const token = String(name).trim();
-		if (/^-?[A-Za-z_][A-Za-z0-9_-]*$/.test(token)) classes.add(token);
-	}
+	// Every class name given is taken as it is. A rule for what a name may look like refused
+	// `md:flex`, `w-1/2` and `résumé` without saying so, and kept nothing out: a name is only
+	// ever compared with the classes an element has, and one with a space in it is none of them.
+	const classes = new Set(namesIn(options?.keepClasses));
 	return { attributes, classes };
+}
+
+/**
+ * The names in one of the two settings. A caller without types can pass one name where a list
+ * is meant (`keepClasses="summary"`): read as a list it is its letters, which kept classes named
+ * "s" and "u" and not "summary". It is taken as a list of that one name. What is not a list is
+ * no names, and what is not text is not a name, so a `null` in a list keeps no class "null".
+ */
+function namesIn(given: unknown): string[] {
+	// Array.from gives no items for what is neither a list nor like one (a number, an object).
+	const list: unknown[] = typeof given === 'string' ? [given] : given == null ? [] : Array.from(given as Iterable<unknown>);
+	return list.filter((name): name is string => typeof name === 'string').map((name) => name.trim());
 }
 
 /** Attributes only some elements may keep. */

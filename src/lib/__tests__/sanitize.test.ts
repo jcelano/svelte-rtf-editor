@@ -398,6 +398,41 @@ describe('keepAttributes: an application\'s own marks stay on its documents', ()
 		expect(editor.querySelector('p')!.hasAttribute('class')).toBe(false);
 	});
 
+	it('any class name a document can hold can be named, not only plain words', () => {
+		// The names a stylesheet tool writes (md:flex, w-1/2), one that starts with a digit, and
+		// one in another alphabet were left out of the setting without a word.
+		const html = '<p class="md:flex w-1/2 2col résumé other">Invented text.</p>';
+		const out = sanitizeHtml(html, { keepClasses: ['md:flex', 'w-1/2', '2col', 'résumé'] });
+		expect(out).toContain('class="md:flex w-1/2 2col résumé"');
+		expect(out).not.toContain('other');
+		const editor = open({ content: html, keepClasses: ['md:flex', 'résumé'] });
+		expect(editor.querySelector('p')!.className).toBe('md:flex résumé');
+	});
+
+	it('one name given where a list is meant is that name, not its letters', () => {
+		const html = '<p class="summary s u" data-section="A" data-s="x">Invented text.</p>';
+		const asText = { keepClasses: 'summary', keepAttributes: 'data-section' } as unknown as { keepClasses: string[]; keepAttributes: string[] };
+		expect(sanitizeHtml(html, asText)).toBe('<p class="summary" data-section="A">Invented text.</p>');
+		const editor = open({ content: html, ...asText });
+		expect(editor.querySelector('p')!.className).toBe('summary');
+		expect(editor.querySelector('p')!.getAttribute('data-section')).toBe('A');
+		expect(editor.querySelector('p')!.hasAttribute('data-s')).toBe(false);
+	});
+
+	it('what is not a name keeps nothing, and what is not a list is no names', () => {
+		const html = '<p class="null 5 undefined summary" data-null="x" data-="y">Invented text.</p>';
+		const odd = [null, 5, undefined, ' summary '] as unknown as string[];
+		expect(sanitizeHtml(html, { keepClasses: odd, keepAttributes: [null, 'data-', 'data- x'] as unknown as string[] })).toBe(
+			'<p class="summary">Invented text.</p>'
+		);
+		for (const notAList of [5, true, {}, null]) {
+			const given = { keepClasses: notAList, keepAttributes: notAList } as unknown as { keepClasses: string[]; keepAttributes: string[] };
+			expect(sanitizeHtml(html, given)).toBe('<p>Invented text.</p>');
+		}
+		// A set of names is a list of them.
+		expect(sanitizeHtml(html, { keepClasses: new Set(['summary']) as unknown as string[] })).toBe('<p class="summary">Invented text.</p>');
+	});
+
 	it('the RTF is the same with the marks as without', () => {
 		const withMarks = document.createElement('div');
 		withMarks.innerHTML = sanitizeHtml(MARKED, { keepAttributes: ['data-section', 'data-case'] });

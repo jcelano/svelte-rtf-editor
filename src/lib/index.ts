@@ -15,3 +15,4 @@ export type { RtfWriteOptions } from './rtf-writer.js';
 export type { RtfReadOptions } from './rtf-parser.js';
 export { htmlToMarkdown, downloadFile } from './utils.js';
 export { sanitizeHtml } from './sanitize.js';
+export type { KeepOptions } from './sanitize.js';
