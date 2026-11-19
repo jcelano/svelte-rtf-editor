@@ -37,6 +37,12 @@
 	 *                   selected text. The body size is always among them. An empty
 	 *                   list takes the size list off the toolbar.
 	 *                   Default: 8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36.
+	 *   fonts         — The fonts the toolbar's font list offers for the selected text,
+	 *                   beside the document's own: names ('Calibri'), or CSS lists whose
+	 *                   first family is the name ('Calibri, Carlito, sans-serif'). Text
+	 *                   in one of them is written in it to the RTF and read back in it;
+	 *                   any other font is taken off HTML as it comes in, set or pasted.
+	 *                   Default: none, and there is no font list.
 	 *   keepAttributes — `data-` attributes the application's documents carry, which
 	 *                   the editor leaves on their elements: a mark on a paragraph that
 	 *                   the application reads back (`data-section="2"`). Every other
@@ -65,6 +71,8 @@
 	 *   exportFile(format) — Downloads as 'html', 'md', or 'rtf'.
 	 *   importRtf()    — Opens the file picker to import an RTF file.
 	 *   setFontSize(points) — Sets the size of the selected text, or of what is typed next.
+	 *   setFont(name)  — Sets the font of the selected text, or of what is typed next, to
+	 *                    one of `fonts`; '' or the document font's name sets it back.
 	 *   clearFormatting()   — Takes bold, italic, underline, strike, color, size and font off
 	 *                    the selected text. Headings, lists, links, alignment, indents and
 	 *                    the application's own marks stay.
@@ -82,6 +90,8 @@
 		estimateRtfBytes,
 		isSafeLinkUrl,
 		cssFontFamily,
+		fontChoices,
+		fontKey,
 		normalizeFontSize,
 		DEFAULT_FONT_FAMILY,
 		DEFAULT_FONT_SIZE
@@ -133,6 +143,8 @@
 		fontFamily?: string;
 		fontSize?: number;
 		fontSizes?: number[];
+		/** The fonts offered for text, beside the document's own; none unless given. */
+		fonts?: string[];
 		/** `data-` attributes of the application's own, kept on HTML that is set or pasted. */
 		keepAttributes?: string[];
 		/** Class names of the application's own, kept the same way. */
@@ -174,6 +186,7 @@
 		fontFamily = DEFAULT_FONT_FAMILY,
 		fontSize = DEFAULT_FONT_SIZE,
 		fontSizes = DEFAULT_FONT_SIZES,
+		fonts = NO_KEPT_ATTRIBUTES,
 		keepAttributes = NO_KEPT_ATTRIBUTES,
 		keepClasses = NO_KEPT_ATTRIBUTES,
 		onchange,
@@ -181,12 +194,15 @@
 		onimport
 	}: Props = $props();
 
-	const keptNames = $derived(keptMarks({ keepAttributes, keepClasses }));
+	const keptNames = $derived(keptMarks({ keepAttributes, keepClasses, fonts, fontFamily }));
 
 	// The same font and size go to the screen and to the RTF, so the editor
 	// shows what the receiving system will show.
-	const rtfOptions = $derived({ fontFamily, fontSize });
+	const rtfOptions = $derived({ fontFamily, fontSize, fonts });
 	const screenFontFamily = $derived(cssFontFamily(fontFamily));
+	/** The name the document font is looked up by, and the fonts offered beside it. */
+	const documentFontKey = $derived(fontKey(screenFontFamily));
+	const fontList = $derived(fontChoices(fonts).filter((choice) => choice.key !== documentFontKey));
 	const screenFontSize = $derived(normalizeFontSize(fontSize));
 
 	// ── Internal state ──
@@ -198,6 +214,8 @@
 	let currentBlock: string = $state('p');
 	/** The size of the text at the caret, in points, for the toolbar. */
 	let currentFontSize: number | null = $state(null);
+	/** The font at the selection, by its key: '' for the document font, null where it has more than one. */
+	let currentFont: string | null = $state('');
 
 	let formatState = $state({
 		bold: false,
@@ -757,6 +775,105 @@
 		return end && shownSize(end) === first ? first : null;
 	}
 
+	// ── Font ──
+	// The browser's own command does all of it: it writes <font face="…"> around the selected
+	// text, cuts a font that is there already in two rather than putting one inside another,
+	// and keeps the font for what is typed next at a caret. So a change of font is undone and
+	// redone with everything else. Which fonts there may be is the application's to say
+	// (`fonts`): the sanitizer takes any other off what comes in.
+
+	/** The font chosen at a caret and not yet typed in: the document has no element to show it by. */
+	let pendingFont: string | null = null;
+
+	/**
+	 * Set the font of the selected text; with nothing selected, of what is typed next. The name
+	 * is one of `fonts`; '' or the document font's own name sets the text back to the document
+	 * font. A font that is not offered is not set. Also what the toolbar's font list calls.
+	 */
+	export function setFont(name: string | null): void {
+		if (readonly || !editorEl) return;
+		const key = fontKey(name);
+		const choice = fontList.find((font) => font.key === key);
+		if (key !== '' && key !== documentFontKey && !choice) return;
+		restoreSelection();
+		editorEl.focus();
+		const selection = window.getSelection();
+		if (!selection || selection.rangeCount === 0 || !selectionInEditor()) return;
+		const wanted = choice?.key ?? '';
+		// Nothing to change: no step is made that would undo to the same thing.
+		if (fontAtSelection() === wanted) {
+			updateToolbarState();
+			return;
+		}
+		// (Given the document font as the screen has it, Chromium and Safari take the font off
+		// the text; Firefox writes it, which the writer and the font list read as no font.)
+		document.execCommand('fontName', false, choice ? choice.css : screenFontFamily);
+		// With text selected the font is on it now. At a caret it waits for the typing.
+		pendingFont = selection.isCollapsed ? wanted : null;
+		updateToolbarState();
+	}
+
+	/** The font an element's text is in, by its key: '' for the document font, or a font that is not offered. */
+	function fontOfElement(el: Element | null): string {
+		for (let at = el; at && at !== editorEl; at = at.parentElement) {
+			const key = fontKey((at as HTMLElement).style?.fontFamily || (at.tagName === 'FONT' ? at.getAttribute('face') : ''));
+			if (key) return fontList.some((font) => font.key === key) ? key : '';
+		}
+		return '';
+	}
+
+	/** The font of the text at the selection, for the toolbar: null where it starts and ends in different fonts. */
+	function fontAtSelection(): string | null {
+		if (pendingFont !== null) return pendingFont;
+		const selection = window.getSelection();
+		if (!editorEl || !selection || selection.rangeCount === 0) return '';
+		const range = selection.getRangeAt(0);
+		if (!editorEl.contains(range.startContainer)) return '';
+		if (range.collapsed) {
+			const at = range.startContainer;
+			return fontOfElement(at.nodeType === Node.ELEMENT_NODE ? (at as Element) : at.parentElement);
+		}
+		// The first text selected and the last. A selection often starts at the end of the text
+		// before it (Safari leaves it there after the command), which is in another font.
+		const first = textAtEdge(range, false);
+		const last = textAtEdge(range, true);
+		if (!first || !last) return '';
+		const font = fontOfElement(first.parentElement);
+		return fontOfElement(last.parentElement) === font ? font : null;
+	}
+
+	/** The first text a range has a character of, or the last. */
+	function textAtEdge(range: Range, last: boolean): Text | null {
+		if (!editorEl) return null;
+		const walker = document.createTreeWalker(editorEl, NodeFilter.SHOW_TEXT);
+		const node = last ? range.endContainer : range.startContainer;
+		const offset = last ? range.endOffset : range.startOffset;
+		const step = () => (last ? walker.previousNode() : walker.nextNode()) as Text | null;
+		let text: Text | null;
+		if (node.nodeType === Node.TEXT_NODE) {
+			walker.currentNode = node;
+			const inside = last ? offset > 0 : offset < (node as Text).data.length;
+			text = inside ? (node as Text) : step();
+		} else {
+			// From the point between two children: into the child on the range's side of it, or
+			// on from the element where it has none there.
+			const child = node.childNodes[last ? offset - 1 : offset];
+			if (child) {
+				let edge: Node = child;
+				if (last) while (edge.lastChild) edge = edge.lastChild;
+				walker.currentNode = edge;
+				text = edge.nodeType === Node.TEXT_NODE ? (edge as Text) : step();
+			} else {
+				let edge: Node = node;
+				if (!last) while (edge.lastChild) edge = edge.lastChild;
+				walker.currentNode = edge;
+				text = step();
+			}
+		}
+		while (text && text.data === '') text = step();
+		return text && range.intersectsNode(text) ? text : null;
+	}
+
 	/** The sizes the list offers: those asked for, and always the body size. */
 	const sizeChoices = $derived.by(() => {
 		const sizes = fontSizes.map((size) => normalizeFontSize(size));
@@ -934,6 +1051,7 @@
 		if (sel.isCollapsed) {
 			// At a caret there is nothing to clear but what was chosen for the words typed next.
 			pendingSize = null;
+			pendingFont = null;
 			document.execCommand('removeFormat');
 			updateToolbarState();
 			return;
@@ -1653,6 +1771,7 @@
 		// temporarily moved to a toolbar element (e.g. colour picker, select).
 		saveSelection();
 		currentFontSize = sizeAtSelection();
+		currentFont = fontList.length > 0 ? fontAtSelection() : '';
 
 		formatState = {
 			bold: document.queryCommandState('bold'),
@@ -1674,6 +1793,7 @@
 	 */
 	function caretMoved(): void {
 		pendingSize = null;
+		pendingFont = null;
 		updateToolbarState();
 	}
 
@@ -1700,7 +1820,7 @@
 		// every keystroke: with a few pictures in the document it took a tenth of a second. Each is
 		// worked out when the handler asks for it, once, and not at all if it never does.
 		const el = editorEl;
-		const options = { fontFamily, fontSize };
+		const options = { fontFamily, fontSize, fonts };
 		const once = <T,>(read: () => T): (() => T) => {
 			let value: { v: T } | null = null;
 			return () => (value ??= { v: read() }).v;
@@ -1807,6 +1927,7 @@
 			applyPendingSize();
 		}
 		pendingSize = null;
+		pendingFont = null;
 		updateToolbarState();
 		// Typing means the user is editing text, not the picture. Dropping the
 		// selection here keeps Backspace editing that text instead of deleting a
@@ -2231,7 +2352,7 @@
 		importing = true;
 
 		try {
-			const html = await readRtfFile(file, { fontSize, maxBytes: maxRtfBytes });
+			const html = await readRtfFile(file, { fontSize, fontFamily, fonts, maxBytes: maxRtfBytes });
 			if (editorEl) {
 				selectedImage = null;
 				documentReplaced();
@@ -2984,6 +3105,10 @@
 			fontSize={currentFontSize}
 			fontSizes={sizeChoices}
 			onfontsize={setFontSize}
+			font={currentFont}
+			fonts={fontList}
+			documentFont={fontChoices([fontFamily])[0]?.name ?? DEFAULT_FONT_FAMILY}
+			onfont={setFont}
 			copyingFormat={copyFormat !== 'off'}
 			oncopyformat={toggleCopyFormat}
 		/>

@@ -1,6 +1,14 @@
 import { test, expect, type Page } from '@playwright/test';
 
-type Editor = { getHTML(): string; getRTF(): string; getMarkdown(): string; setHTML(html: string): void; focus(): void; clearFormatting(): void };
+type Editor = {
+	getHTML(): string;
+	getRTF(): string;
+	getMarkdown(): string;
+	setHTML(html: string): void;
+	focus(): void;
+	clearFormatting(): void;
+	setFont(name: string | null): void;
+};
 declare global {
 	interface Window {
 		ed: Editor;
@@ -1143,5 +1151,147 @@ test.describe('Clear formatting', () => {
 		await selectChars(page);
 		await page.evaluate(() => window.ed.clearFormatting());
 		expect(await html(page)).toBe('<p>one bold</p><p>two</p>');
+	});
+});
+
+test.describe('Fonts', () => {
+	// The browser's own font command does the work, and each browser has its own: these run in
+	// all three. The fonts are set apart by "|" in the address, since a font may be a list.
+	const fonts = 'Georgia|Calibri, Carlito, sans-serif|Arial';
+	const MAC = process.platform === 'darwin';
+	const REDO = MAC ? 'Meta+Shift+z' : 'Control+Shift+z';
+	const list = 'select[title="Font"]';
+	const rtfBody = async (page: Page) => body(await page.evaluate(() => window.ed.getRTF()));
+
+	/** Select from the `from`th to the `to`th character of the document's text. */
+	async function selectChars(page: Page, from: number, to: number): Promise<void> {
+		await page.evaluate(
+			({ from, to }) => {
+				const ed = document.querySelector('.ink-content') as HTMLElement;
+				ed.focus();
+				const range = document.createRange();
+				const walker = document.createTreeWalker(ed, NodeFilter.SHOW_TEXT);
+				let at = 0;
+				for (let text = walker.nextNode() as Text | null; text; text = walker.nextNode() as Text | null) {
+					if (from >= at && from <= at + text.data.length) range.setStart(text, from - at);
+					if (to >= at && to <= at + text.data.length) {
+						range.setEnd(text, to - at);
+						break;
+					}
+					at += text.data.length;
+				}
+				getSelection()!.removeAllRanges();
+				getSelection()!.addRange(range);
+			},
+			{ from, to }
+		);
+	}
+	/** What the font list shows. (After a key, so that the toolbar has looked at the selection.) */
+	async function shown(page: Page): Promise<string> {
+		await page.keyboard.press('Shift');
+		return page.locator(list).evaluate((select: HTMLSelectElement) => select.selectedOptions[0]?.textContent ?? '');
+	}
+
+	test('there is no font list unless fonts are offered', async ({ page }) => {
+		await open(page, { content: '<p>one</p>' });
+		await expect(page.locator(list)).toHaveCount(0);
+		await open(page, { content: '<p>one</p>', fonts });
+		expect(await page.locator(`${list} option`).allTextContents()).toEqual(['Segoe UI', 'Georgia', 'Calibri', 'Arial']);
+	});
+
+	test('the list sets the font of the selected words, shows it, and the RTF and the viewer carry it', async ({ page }) => {
+		await open(page, { content: '<p>one two three four</p>', fonts });
+		await selectChars(page, 4, 13);
+		await page.selectOption(list, 'georgia');
+		expect(await html(page)).toBe('<p>one <font face="Georgia, serif">two three</font> four</p>');
+		expect(await shown(page)).toBe('Georgia');
+		// A second font on some of those words: beside the first, not inside it.
+		await selectChars(page, 8, 13);
+		await page.selectOption(list, 'calibri');
+		expect(await html(page)).toBe('<p>one <font face="Georgia, serif">two </font><font face="Calibri, Carlito, sans-serif">three</font> four</p>');
+		expect(await shown(page)).toBe('Calibri');
+		await selectChars(page, 5, 10);
+		expect(await shown(page)).toBe('');
+		await selectChars(page, 0, 2);
+		expect(await shown(page)).toBe('Segoe UI');
+
+		const rtf = await page.evaluate(() => window.ed.getRTF());
+		expect(rtf).toContain('{\\f2\\froman\\fcharset0 Georgia;}{\\f3\\fswiss\\fcharset0 Calibri;}}');
+		expect(body(rtf)).toBe('\\pard one \\f2 two \\f0 \\f3 three\\f0  four\\par }');
+		await page.evaluate((rtf) => window.setViewer(rtf), rtf);
+		await expect(page.locator('#viewer span[style*="Georgia"]')).toHaveText('two');
+		await expect(page.locator('#viewer span[style*="Calibri"]')).toHaveText('three');
+	});
+
+	test('Undo takes the font off again and Redo puts it back', async ({ page }) => {
+		await open(page, { content: '<p>one two three</p>', fonts });
+		const before = await html(page);
+		await selectChars(page, 4, 7);
+		await page.selectOption(list, 'arial');
+		const set = await html(page);
+		expect(set).toBe('<p>one <font face="Arial, sans-serif">two</font> three</p>');
+		await page.keyboard.press('ControlOrMeta+z');
+		await expect.poll(() => html(page)).toBe(before);
+		await page.keyboard.press(REDO);
+		await expect.poll(() => html(page)).toBe(set);
+	});
+
+	test('the document font, chosen from the list, sets words back to it', async ({ page }) => {
+		await open(page, { content: '<p>one <font face="Georgia, serif">two three</font> four</p>', fonts });
+		await selectChars(page, 4, 7);
+		await page.selectOption(list, '');
+		// (Chromium and Safari take the font off the words; Firefox names the document font on
+		// them. Either way they are in the document font: in the RTF, and in the list.)
+		expect(await rtfBody(page)).toBe('\\pard one two\\f2  three\\f0  four\\par }');
+		await selectChars(page, 4, 7);
+		expect(await shown(page)).toBe('Segoe UI');
+		expect(await page.locator(`${content} p`).textContent()).toBe('one two three four');
+	});
+
+	test('a font chosen at a caret is the font of what is typed next', async ({ page }) => {
+		await open(page, { content: '<p>one</p>', fonts });
+		await page.click(`${content} p`);
+		await page.keyboard.press(MAC ? 'Meta+ArrowRight' : 'End');
+		await page.selectOption(list, 'georgia');
+		expect(await page.locator(list).evaluate((select: HTMLSelectElement) => select.selectedOptions[0]?.textContent)).toBe('Georgia');
+		await page.keyboard.type('X');
+		expect(await html(page)).toBe('<p>one<font face="Georgia, serif">X</font></p>');
+		expect(await shown(page)).toBe('Georgia');
+	});
+
+	test('the application can set a font, and only one that is offered', async ({ page }) => {
+		await open(page, { content: '<p>one two</p>', fonts });
+		await selectChars(page, 0, 3);
+		await page.evaluate(() => window.ed.setFont('Papyrus'));
+		expect(await html(page)).toBe('<p>one two</p>');
+		await page.evaluate(() => window.ed.setFont('Calibri'));
+		expect(await html(page)).toBe('<p><font face="Calibri, Carlito, sans-serif">one</font> two</p>');
+	});
+
+	test('Clear formatting takes the font off', async ({ page }) => {
+		await open(page, { content: '<p>one <font face="Georgia, serif">two</font> <span style="font-family: Arial, sans-serif;">three</span></p>', fonts });
+		await selectChars(page, 0, 13);
+		await page.getByRole('button', { name: 'Clear formatting' }).click();
+		expect(await html(page)).toBe('<p>one two three</p>');
+	});
+
+	test('a document and a paste keep only the fonts that are offered', async ({ page, browserName }) => {
+		await open(page, { content: '<p style="font-family: Papyrus;">one <font face="GEORGIA">two</font> <font face="Comic Sans MS">three</font></p>', fonts });
+		expect(await html(page)).toBe('<p>one <font face="Georgia, serif">two</font> <font>three</font></p>');
+		// (Firefox and WebKit do not let a page put markup on the clipboard in a test.)
+		test.skip(browserName !== 'chromium', 'the paste is made through the clipboard, which only Chromium gives a test');
+		await page.evaluate(async () => {
+			const markup = '<span style="font-family: Papyrus; font-weight: bold;">papyrus</span><span style="font-family: arial;"> arial</span>';
+			await navigator.clipboard.write([new ClipboardItem({ 'text/html': new Blob([markup], { type: 'text/html' }) })]);
+		});
+		await page.click(`${content} p`);
+		await page.keyboard.press(MAC ? 'Meta+ArrowRight' : 'End');
+		const before = await html(page);
+		await page.keyboard.press('ControlOrMeta+v');
+		await expect.poll(() => html(page)).not.toBe(before);
+		const pasted = await html(page);
+		expect(pasted).not.toMatch(/papyrus,|Papyrus;|Comic/);
+		expect(pasted).toMatch(/font-family: Arial, sans-serif;[^>]*> arial/);
+		expect(await page.locator(`${content}`).textContent()).toContain('papyrus arial');
 	});
 });

@@ -9,7 +9,7 @@
 
 	let ed: ReturnType<typeof InkEditor> | null = $state(null);
 	let rtf = $state('');
-	let params = $state<{ autosave: boolean; content?: string; key?: string; onchange: boolean; keepAttributes: string[]; keepClasses: string[] } | null>(null);
+	let params = $state<{ autosave: boolean; content?: string; key?: string; onchange: boolean; keepAttributes: string[]; keepClasses: string[]; fonts: string[] } | null>(null);
 
 	onMount(() => {
 		const q = new URLSearchParams(location.search);
@@ -19,7 +19,9 @@
 			key: q.get('key') ?? undefined,
 			onchange: q.get('onchange') === '1',
 			keepAttributes: (q.get('keepAttributes') ?? '').split(',').filter(Boolean),
-			keepClasses: (q.get('keepClasses') ?? '').split(',').filter(Boolean)
+			keepClasses: (q.get('keepClasses') ?? '').split(',').filter(Boolean),
+			// (A font may be a list with commas of its own: the fonts are set apart by "|".)
+			fonts: (q.get('fonts') ?? '').split('|').filter(Boolean)
 		};
 		const w = window as unknown as Harness;
 		w.lib = lib;
@@ -41,8 +43,9 @@
 		storageKey={params.key}
 		keepAttributes={params.keepAttributes}
 		keepClasses={params.keepClasses}
+		fonts={params.fonts}
 		onchange={params.onchange ? () => { (window as unknown as Harness).changes!++; } : undefined}
 		onsave={({ html }) => { (window as unknown as Harness).saves!.push(html); }}
 	/>
-	<div id="viewer"><RtfViewer content={rtf} /></div>
+	<div id="viewer"><RtfViewer content={rtf} fonts={params.fonts} /></div>
 {/if}

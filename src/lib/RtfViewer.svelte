@@ -12,12 +12,16 @@
     // the viewer as in the editor. maxRtfBytes is the largest document it will
     // read (rtfToHtml's maxBytes): a picture costs two characters per byte, so
     // raise it where reports can carry large pictures, or pass 0 for no limit.
+    // fonts are the fonts text may be shown in beside the document's own, as the
+    // editor's `fonts`: text in any other font is shown in the document font.
+    const NO_FONTS: string[] = [];
     let {
         content,
         fontFamily = DEFAULT_FONT_FAMILY,
         fontSize = DEFAULT_FONT_SIZE,
-        maxRtfBytes = DEFAULT_MAX_RTF_BYTES
-    }: { content: string | null | undefined; fontFamily?: string; fontSize?: number; maxRtfBytes?: number } = $props();
+        maxRtfBytes = DEFAULT_MAX_RTF_BYTES,
+        fonts = NO_FONTS
+    }: { content: string | null | undefined; fontFamily?: string; fontSize?: number; maxRtfBytes?: number; fonts?: string[] } = $props();
 
     const screenFontFamily = $derived(cssFontFamily(fontFamily));
     const screenFontSize = $derived(normalizeFontSize(fontSize));
@@ -27,7 +31,7 @@
     const parsed = $derived.by(() => {
         try {
             // A report that has not loaded yet shows as an empty document.
-            return { html: rtfToHtml(content ?? '', { fontSize, maxBytes: maxRtfBytes }), error: '' };
+            return { html: rtfToHtml(content ?? '', { fontSize, fontFamily, fonts, maxBytes: maxRtfBytes }), error: '' };
         } catch (err) {
             // Only the size limit's message is meant for the reader; anything else is a fault in
             // the reader, not something the person looking at the report can act on.

@@ -35,6 +35,13 @@ export interface RtfWriteOptions {
 	 * Body text size in points. Headings scale from it. Default: 12.
 	 */
 	fontSize?: number;
+	/**
+	 * The fonts text may be set in, beside the document's own: the editor's `fonts`. Text in one
+	 * of them is written in it (a font of its own in the font table); a font that is not named
+	 * here is not written, and its text is in the document font. Each is a font name, or a CSS
+	 * list whose first family is the name. Default: none, and every font is the document's.
+	 */
+	fonts?: readonly string[];
 }
 
 /**
@@ -111,6 +118,10 @@ interface WalkContext {
 	script: 'super' | 'sub' | null;
 	/** Inside inline code, which already set the monospace font. */
 	mono: boolean;
+	/** Current font-table index (\fN): 0 is the document font. */
+	font: number;
+	/** The fonts text may be set in, and the index each one used so far has in the font table. */
+	fonts: FontsWritten;
 	/** Left indent of the enclosing indented blocks, in twips (\liN). */
 	indent: number;
 	/**
@@ -643,6 +654,8 @@ export function estimateRtfBytes(editorEl: HTMLElement, options: RtfWriteOptions
 	// heading's, twice the body.
 	const sizeDigits = Math.max(0, String(bodyHalfPoints(options.fontSize) * 2).length - 2);
 	let total = RTF_PREAMBLE_BYTES + fontName.length + fontClass + sizeDigits;
+	const offered = new Map(fontChoices(options.fonts).map((choice) => [choice.key, choice]));
+	const fontsCounted = new Set<string>();
 
 	for (const img of Array.from(editorEl.querySelectorAll('img'))) {
 		const src = img.getAttribute('src') || '';
@@ -721,6 +734,19 @@ export function estimateRtfBytes(editorEl: HTMLElement, options: RtfWriteOptions
 		if (tag === 'a') {
 			const target = linkTarget(el.getAttribute('href') || '');
 			if (target) total += LINK_OVERHEAD_BYTES + escapeRtf(target).length;
+		}
+		if (offered.size > 0) {
+			// Text in a font of its own turns it on and off again ("\f12 " twice), and the first
+			// text in a font adds the font to the table ("{\f12\fmodern\fcharset0 Name;}").
+			const key = fontKey(style?.fontFamily || (tag === 'font' ? el.getAttribute('face') : ''));
+			const choice = offered.get(key);
+			if (choice || (key && key === font.toLowerCase())) total += 12;
+			if (choice && !fontsCounted.has(key)) {
+				fontsCounted.add(key);
+				total += 28 + escapeRtf(choice.name).length;
+			}
+			// What puts the font back after code, a heading or a table cell may now have two digits.
+			if (tag === 'code' || tag === 'pre' || tag === 'td' || tag === 'th' || HEADING_TAGS.has(tag)) total += 2;
 		}
 		// Each line break in a code block is written as "\line " (6). It is counted as 1 with
 		// the text, or as nothing where it follows another: a run of them is counted there as
@@ -855,6 +881,102 @@ function cleanFontName(name: string | undefined): string {
 	return cleaned || DEFAULT_FONT_FAMILY;
 }
 
+/** A font an application offers for text (the editor's `fonts`). */
+export interface FontChoice {
+	/** Its name, as the toolbar and the RTF's font table give it: "Calibri". */
+	name: string;
+	/** What text set in it carries in the HTML: the name and what to show where it is missing. */
+	css: string;
+	/** The name as it is looked up by: without regard to capitals. */
+	key: string;
+}
+
+/** The generic families of CSS, which are written without quotes. */
+const GENERIC_FAMILY = new Set(['serif', 'sans-serif', 'monospace', 'cursive', 'fantasy', 'system-ui', 'ui-serif', 'ui-sans-serif', 'ui-monospace', 'ui-rounded', 'math', 'emoji', 'fangsong']);
+/** Words that mean something else to CSS where a family is named: such a name is quoted. */
+const CSS_WIDE = /^(inherit|initial|unset|revert|revert-layer|default)$/i;
+
+/** Whether two font values name the same families in the same order, however they are written. */
+export function sameFontList(a: unknown, b: unknown): boolean {
+	return familiesOf(a).join(',').toLowerCase() === familiesOf(b).join(',').toLowerCase();
+}
+
+/** The families of a CSS font list or a `face` attribute, without their quotes. */
+function familiesOf(value: unknown): string[] {
+	if (typeof value !== 'string') return [];
+	return value
+		.split(',')
+		.map((family) => family.replace(/["']/g, '').replace(/\s+/g, ' ').trim())
+		.filter((family) => family !== '');
+}
+
+/**
+ * The name a font value is looked up by: its first family, without quotes and without regard to
+ * capitals. '' where there is none.
+ */
+export function fontKey(value: unknown): string {
+	return (familiesOf(value)[0] ?? '').toLowerCase();
+}
+
+/** One family as CSS: quoted wherever a bare name could be read as something else. */
+function cssFamily(family: string): string {
+	if (GENERIC_FAMILY.has(family.toLowerCase())) return family.toLowerCase();
+	const words = family.split(' ');
+	const bare = words.every((word) => /^[A-Za-z][A-Za-z0-9-]*$/.test(word) && !CSS_WIDE.test(word) && !GENERIC_FAMILY.has(word.toLowerCase()));
+	return bare ? family : `"${family}"`;
+}
+
+/**
+ * The fonts an application offers, as the editor, the sanitizer, the writer and the reader use
+ * them. Each is given as a name ("Calibri") or as a CSS list whose first family is the name
+ * ("Calibri, Carlito, sans-serif"): the rest of the list is what a screen without that font
+ * shows the text in. A name alone is given the generic family that suits it, so that such a
+ * screen does not fall back to the browser's own font. A name that could not be written in a
+ * font table or a style (it has a brace, a semicolon, a bracket) is left out, and so is a
+ * generic family by itself and a name given twice.
+ */
+export function fontChoices(fonts: unknown): FontChoice[] {
+	const given: unknown[] = typeof fonts === 'string' ? [fonts] : fonts == null ? [] : Array.from(fonts as Iterable<unknown>);
+	const choices = new Map<string, FontChoice>();
+	for (const entry of given) {
+		const families = familiesOf(entry);
+		if (families.length === 0 || families.some((family) => !/^[\p{L}\p{N} ._-]+$/u.test(family) || family.length > 100)) continue;
+		const name = families[0];
+		const key = name.toLowerCase();
+		if (GENERIC_FAMILY.has(key) || choices.has(key)) continue;
+		const css = families.length > 1 ? families.map(cssFamily).join(', ') : `${cssFamily(name)}, ${genericFor(name)}`;
+		choices.set(key, { name, css, key });
+	}
+	return Array.from(choices.values());
+}
+
+/** The fonts a document being written may use, and the font-table index of each one used so far. */
+interface FontsWritten {
+	/** The document font's key: text set in it is text in \f0. */
+	document: string;
+	offered: Map<string, FontChoice>;
+	/** In the order they were first used: the first is \f2. */
+	used: Map<string, number>;
+}
+
+/**
+ * The font-table index of the font an element sets its text in: 0 for the document font, 2 and
+ * up for a font the application offers. Null where it names none, or one that is not offered.
+ */
+function fontOf(el: HTMLElement, fonts: FontsWritten): number | null {
+	if (fonts.offered.size === 0) return null;
+	const key = fontKey(el.style?.fontFamily || (el.tagName === 'FONT' ? el.getAttribute('face') : ''));
+	if (!key) return null;
+	if (key === fonts.document) return 0;
+	if (!fonts.offered.has(key)) return null;
+	let index = fonts.used.get(key);
+	if (index === undefined) {
+		index = fonts.used.size + 2;
+		fonts.used.set(key, index);
+	}
+	return index;
+}
+
 /**
  * Whether a font name is a monospace font's: Courier New, Consolas, Menlo, a "… Mono" family
  * (Roboto Mono, DejaVu Sans Mono), and their PostScript names (CourierNewPSMT, SFMono-Regular).
@@ -885,8 +1007,12 @@ function fontFamilyClass(name: string): 'roman' | 'modern' | 'swiss' {
  */
 export function cssFontFamily(name: string | undefined): string {
 	const font = cleanFontName(name);
-	const generic = { roman: 'serif', modern: 'monospace', swiss: 'sans-serif' }[fontFamilyClass(font)];
-	return `"${font}", ${generic}`;
+	return `"${font}", ${genericFor(font)}`;
+}
+
+/** The generic CSS family that suits a font name: what a screen without the font shows instead. */
+function genericFor(name: string): string {
+	return { roman: 'serif', modern: 'monospace', swiss: 'sans-serif' }[fontFamilyClass(name)];
 }
 
 /**
@@ -936,13 +1062,11 @@ export function htmlToRtf(editorEl: HTMLElement, options: RtfWriteOptions = {}):
 	}
 	colorTable += '}';
 
-	// \f0 is the document font, used for everything except code; \f1 is the
-	// monospace font for code.
-	const fontTable =
-		'{\\fonttbl' +
-		`{\\f0\\f${fontFamilyClass(fontName)}\\fcharset0 ${escapeRtf(fontName)};}` +
-		'{\\f1\\fmodern\\fcharset0 Courier New;}' +
-		'}';
+	const fonts: FontsWritten = {
+		document: fontName.toLowerCase(),
+		offered: new Map(fontChoices(options.fonts).map((choice) => [choice.key, choice])),
+		used: new Map()
+	};
 
 	const body = walkChildren(editorEl, {
 		colorIndex,
@@ -960,9 +1084,20 @@ export function htmlToRtf(editorEl: HTMLElement, options: RtfWriteOptions = {}):
 		color: 0,
 		script: null,
 		mono: false,
+		font: 0,
+		fonts,
 		indent: 0,
 		cellAlign: ''
 	});
+
+	// \f0 is the document font, used for everything except code; \f1 is the monospace font
+	// for code. After them, the fonts the application offers that the document has text in.
+	let fontTable = `{\\fonttbl{\\f0\\f${fontFamilyClass(fontName)}\\fcharset0 ${escapeRtf(fontName)};}{\\f1\\fmodern\\fcharset0 Courier New;}`;
+	for (const [key, index] of fonts.used) {
+		const name = fonts.offered.get(key)!.name;
+		fontTable += `{\\f${index}\\f${fontFamilyClass(name)}\\fcharset0 ${escapeRtf(name)};}`;
+	}
+	fontTable += '}';
 
 	const rtf =
 		'{\\rtf1\\ansi\\ansicpg1252\\deff0' +
@@ -1095,7 +1230,7 @@ function walkNodeAt(node: Node, ctx: WalkContext, restate: boolean, endLooseText
 				rtf += `\\fs${size}${ctx.bold ? '' : '\\b'} ${own.on}${walkChildren(el, own.ctx)}${own.off}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size} `;
 				break;
 			}
-			rtf += `\\pard${inCell(ctx)}${headingLayout(el, ctx)}\\f0\\fs${size}\\b ${own.on}${walkChildren(el, own.ctx)}${own.off}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
+			rtf += `\\pard${inCell(ctx)}${headingLayout(el, ctx)}\\f${ctx.font}\\fs${size}\\b ${own.on}${walkChildren(el, own.ctx)}${own.off}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
 			break;
 		}
 
@@ -1179,7 +1314,7 @@ function walkNodeAt(node: Node, ctx: WalkContext, restate: boolean, endLooseText
 
 		case 'pre': {
 			const size = scaled(ctx, PRE_SCALE);
-			rtf += `\\pard${inCell(ctx)}${cellAlign(ctx)}${liControl(ctx.indent + leftMarginTwips(el))}\\f1\\fs${size} ${walkChildren(el, { ...ctx, inPre: true, size })}\\f0\\fs${ctx.size}\\par `;
+			rtf += `\\pard${inCell(ctx)}${cellAlign(ctx)}${liControl(ctx.indent + leftMarginTwips(el))}\\f1\\fs${size} ${walkChildren(el, { ...ctx, inPre: true, size })}\\f${ctx.font}\\fs${ctx.size}\\par `;
 			break;
 		}
 
@@ -1209,7 +1344,7 @@ function walkNodeAt(node: Node, ctx: WalkContext, restate: boolean, endLooseText
 		case 'code': {
 			const own = charFormat(el, tag, ctx);
 			if (!ctx.inPre && !ctx.mono) {
-				rtf += `${own.on}\\f1 ${walkChildren(el, { ...own.ctx, mono: true })}\\f0 ${own.off}`;
+				rtf += `${own.on}\\f1 ${walkChildren(el, { ...own.ctx, mono: true })}\\f${own.ctx.font} ${own.off}`;
 			} else {
 				rtf += `${own.on}${walkChildren(el, own.ctx)}${own.off}`;
 			}
@@ -1359,12 +1494,19 @@ function charFormat(el: HTMLElement, rawTag: string, ctx: WalkContext, block = f
 
 	const color = colorIndexOf(el, ctx);
 	const size = block ? null : sizeOf(el);
+	// Code is in the code font, whatever font is named in it or around it.
+	const named = ctx.mono || ctx.inPre || rawTag === 'pre' ? null : fontOf(el, ctx.fonts);
+	const font = named === ctx.font ? null : named;
 
 	let on = '';
 	let off = '';
 	if (color != null) {
 		on += `\\cf${color} `;
 		off = `\\cf${ctx.color} `;
+	}
+	if (font != null) {
+		on += `\\f${font} `;
+		off = `\\f${ctx.font} ${off}`;
 	}
 	if (size != null) {
 		on += `\\fs${size} `;
@@ -1392,7 +1534,7 @@ function charFormat(el: HTMLElement, rawTag: string, ctx: WalkContext, block = f
 	}
 
 	if (!on) return { on, off, ctx };
-	return { on, off, ctx: { ...ctx, bold, italic, underline, strike, script, color: color ?? ctx.color, size: size ?? ctx.size } };
+	return { on, off, ctx: { ...ctx, bold, italic, underline, strike, script, color: color ?? ctx.color, size: size ?? ctx.size, font: font ?? ctx.font } };
 }
 
 /** Whether an element is shown and holds text or a picture: an empty <form> or a hidden <input> does not. */
@@ -1621,7 +1763,7 @@ function tableRtf(table: HTMLElement, ctx: WalkContext): string {
 				const own = charFormat(cell.el, 'td', { ...ctx, inTableCell: true, cellAlign: align }, true);
 				content = `${own.on}${withoutTrailingPar(walkChildren(cell.el, own.ctx))}`;
 			}
-			bodies += `{\\pard\\intbl${align} \\f0 \\sa0 \\li0 \\fi0 ${content}\\cell}`;
+			bodies += `{\\pard\\intbl${align} \\f${ctx.font} \\sa0 \\li0 \\fi0 ${content}\\cell}`;
 			c = last + 1;
 		}
 

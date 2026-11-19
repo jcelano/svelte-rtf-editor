@@ -14,6 +14,13 @@
 		/** The sizes offered, in points. */
 		fontSizes?: number[];
 		onfontsize?: (points: number) => void;
+		/** The font of the text at the caret, by its key: '' for the document font, null where the selection has more than one. */
+		font?: string | null;
+		/** The fonts offered beside the document's own. None, and there is no font list. */
+		fonts?: { name: string; css: string; key: string }[];
+		/** The document font's name: the first of the list, and what '' is shown as. */
+		documentFont?: string;
+		onfont?: (name: string) => void;
 		/** The Copy format brush is in hand: the button shows as pressed. */
 		copyingFormat?: boolean;
 		oncopyformat?: () => void;
@@ -29,6 +36,10 @@
 		fontSize = null,
 		fontSizes = [],
 		onfontsize,
+		font = '',
+		fonts = [],
+		documentFont = '',
+		onfont,
 		copyingFormat = false,
 		oncopyformat
 	}: Props = $props();
@@ -60,6 +71,30 @@
 			<option value="pre">Code Block</option>
 		</select>
 	</div>
+
+	{#if fonts.length > 0}
+		<!-- Font -->
+		<div class="toolbar-group">
+			<select
+				class="tb-select tb-font"
+				title="Font"
+				aria-label="Font"
+				value={font === null ? ' ' : font}
+				onchange={(e) => {
+					const key = (e.target as HTMLSelectElement).value;
+					if (key !== ' ') onfont?.(key);
+				}}
+			>
+				{#if font === null}
+					<option value=" "></option>
+				{/if}
+				<option value="">{documentFont}</option>
+				{#each fonts as choice (choice.key)}
+					<option value={choice.key} style:font-family={choice.css}>{choice.name}</option>
+				{/each}
+			</select>
+		</div>
+	{/if}
 
 	{#if fontSizes.length > 0}
 		<!-- Font size -->
@@ -253,6 +288,10 @@
 	}
 
 	/* Two or three digits: narrower than the list of paragraph kinds. */
+	.tb-font {
+		max-width: 11em;
+	}
+
 	.tb-size {
 		min-width: 52px;
 		padding-left: 8px;

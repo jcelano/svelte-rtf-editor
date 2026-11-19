@@ -112,6 +112,7 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 | `fontFamily` | `string` | `'Segoe UI'` | Font the document is shown in. See [Fonts](#fonts) |
 | `fontSize`   | `number` | `12`      | Body text size in points                 |
 | `maxRtfBytes` | `number` | `52428800` | The largest document it reads (50 MB); `0` reads any size. See [Size limit on import](#size-limit-on-import) |
+| `fonts`      | `string[]` | `[]`    | The fonts text may be shown in beside the document's own: the same list you give the editor. See [Fonts for selected text](#fonts-for-selected-text) |
 
 ---
 
@@ -137,6 +138,7 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 | `fontFamily`    | `string`   | `'Segoe UI'`                 | Document font, on screen and in the RTF. See [Fonts](#fonts) |
 | `fontSize`      | `number`   | `12`                         | Body text size in points, on screen and in the RTF        |
 | `fontSizes`     | `number[]` | `[8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36]` | The sizes, in points, the toolbar's size list offers for selected text. The body size is always among them; `[]` takes the list off the toolbar. See [Size of selected text](#size-of-selected-text) |
+| `fonts`         | `string[]` | `[]`                         | The fonts the toolbar's font list offers for selected text, beside the document's own. `[]` means no font list, and one font for the whole document. See [Fonts for selected text](#fonts-for-selected-text) |
 | `keepAttributes` | `string[]` | `[]` | `data-` attributes of your own that stay on HTML you set or the user pastes. See [HTML from outside](#html-from-outside) |
 | `keepClasses` | `string[]` | `[]` | Class names of your own that stay the same way |
 
@@ -162,6 +164,7 @@ editor.focus()            // → void    — focus the editor
 editor.exportFile(format) // → void    — download as 'html' | 'md' | 'rtf'
 editor.importRtf()        // → void    — open the file picker to import .rtf
 editor.setFontSize(14)    // → void    — size, in points, of the selected text, or of what is typed next
+editor.setFont('Calibri') // → void    — font of the selected text, or of what is typed next: one of `fonts`, or '' for the document font
 editor.clearFormatting()  // → void    — take bold, italic, underline, strike, color, size and font off the selected text
 ```
 
@@ -217,13 +220,13 @@ import {
 
 | Function                              | Description                                        |
 |---------------------------------------|----------------------------------------------------|
-| `rtfToHtml(rtf: string, options?: { fontSize?, maxBytes? }): string` | Parse an RTF string and return an HTML string. `fontSize` is the size of the screen it will be shown on (default 12). Throws a `RangeError` for a string longer than `maxBytes` (default 50 MB; see [Size limit on import](#size-limit-on-import)) |
+| `rtfToHtml(rtf: string, options?: { fontSize?, maxBytes?, fonts?, fontFamily? }): string` | Parse an RTF string and return an HTML string. `fontSize` is the size of the screen it will be shown on (default 12). `fonts` and `fontFamily` are the editor's: see [Fonts for selected text](#fonts-for-selected-text). Throws a `RangeError` for a string longer than `maxBytes` (default 50 MB; see [Size limit on import](#size-limit-on-import)) |
 | `htmlToRtf(el: HTMLElement, options?: { fontFamily?, fontSize? }): string` | Convert a DOM element's content to RTF, in Segoe UI 12 pt unless told otherwise |
 | `estimateRtfBytes(el: HTMLElement, options?: { fontFamily?, fontSize? }): number` | Approximate RTF size of a DOM element without converting it. Give it the options `htmlToRtf` is called with; it is never below the real size |
 | `isSafeLinkUrl(url: string): boolean` | Whether a link address is a web, mail or phone address; `htmlToRtf` and `htmlToMarkdown` write any other link as its text alone, and `rtfToHtml` reads any other as text |
 | `readRtfFile(file: File, options?: { fontSize?, maxBytes? }): Promise<string>` | Read a `.rtf` File object and return HTML. Rejects, without reading it, for a file larger than `maxBytes` |
 | `htmlToMarkdown(el: HTMLElement): string` | Convert a DOM element's content to Markdown. See [Markdown export](#markdown-export) |
-| `sanitizeHtml(html: string, options?: { keepAttributes?: string[]; keepClasses?: string[] }): string` | HTML made safe to show and edit. See [HTML from outside](#html-from-outside). Needs a DOM (`DOMParser`); without one it returns `''` |
+| `sanitizeHtml(html: string, options?: { keepAttributes?: string[]; keepClasses?: string[]; fonts?: string[]; fontFamily?: string }): string` | HTML made safe to show and edit. See [HTML from outside](#html-from-outside). Needs a DOM (`DOMParser`); without one it returns `''` |
 | `downloadFile(name, content, mime): void` | Trigger a file download in the browser        |
 
 ---
@@ -271,6 +274,27 @@ The toolbar has a list of sizes, next to the list of paragraph kinds. A size cho
 - `htmlToRtf` also reads `<font size="1">` to `<font size="7">`, which is how older pages and mail carry sizes, as the sizes a browser shows them at (7.5, 10, 12, 13.5, 18, 24 and 36 pt). They were shown at those sizes and written at the body size.
 
 The font has to be installed on the machine that displays the document. The RTF names it, and a reader without it substitutes one of its own.
+
+### Fonts for selected text
+
+By default a document has one font, `fontFamily`, and the toolbar has no font list. To let users set words in other fonts, name the fonts you offer:
+
+```svelte
+<InkEditor fonts={['Georgia', 'Calibri, Carlito, sans-serif', 'Arial']} bind:this={editor} />
+```
+
+The toolbar then has a font list before the size list: the document font first, then yours. A font chosen there is given to the selected text; with nothing selected, to what is typed next. `editor.setFont(name)` does the same from your own toolbar, and `editor.setFont('')` sets text back to the document font.
+
+Name only fonts that the system receiving the RTF has, and that your page can show: fonts installed where your users work, or fonts your page loads itself with `@font-face`. The list is the limit. A font that is not on it is not offered, is taken off HTML that is set or pasted, is not written to the RTF and is not read back from one.
+
+- An entry is a font name, or a CSS list whose first family is the name. The rest of the list is what a screen without that font shows the text in: `'Calibri, Carlito, sans-serif'` is Calibri in the list and in the RTF, and Carlito on a machine that has no Calibri. A name alone is given `serif`, `sans-serif` or `monospace` after it, whichever suits it.
+- In the RTF, each font the document has text in is one more entry of the font table, and the text is written between `\fN` and the font it was in before. A font that is offered and not used is not in the table.
+- Pass the same list wherever the document goes: `<RtfViewer fonts={…}>`, `htmlToRtf(el, { fonts })`, `rtfToHtml(rtf, { fonts, fontFamily })` and `sanitizeHtml(html, { fonts, fontFamily })`. Without it each of them does what it did before: the writer writes one font, the reader gives none, and the sanitizer leaves the fonts of a paste on the screen, where they were never written to the RTF.
+- An RTF file from another program is read the same way. Text it sets in a font you offer carries that font; text in any other font, and text in the font your screen shows the document in, carries none. TextEdit names each cut of a font (`TimesNewRomanPS-BoldMT`, `Arial-ItalicMT`): those are read as Times New Roman and Arial.
+- The editor uses the browser's own font command, so a change of font is undone and redone with everything else. In the HTML the font is on a `<font>` element (`<font face="Georgia, serif">`); what is read from RTF has it as a style (`<span style="font-family:Georgia, serif">`). Both are written to RTF alike.
+- Set back to the document font, the words lose their `<font>` in Chromium and Safari, and in Firefox are given one that names the document font. The RTF is the same.
+- Code stays in Courier New whatever font is around it. A monospace font you offer is written as that font, and read back as code, which is what a reader makes of text in a monospace font.
+- [Clear formatting](#clear-formatting) takes a font off with the rest.
 
 ### Clear formatting
 
