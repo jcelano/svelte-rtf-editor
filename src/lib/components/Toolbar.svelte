@@ -241,13 +241,13 @@
 </div>
 
 <style>
+	/* (Where it stands, and that it stays in sight of a long document, is the editor's: see
+	   .ink-head there. Its ground is not see-through: the document passes under it.) */
 	.toolbar {
-		position: static;
-		background: var(--bg-toolbar);
-		border: 1px solid var(--border);
-		border-radius: var(--radius);
+		background: var(--bg-toolbar, #fff);
+		border: 1px solid var(--border, #e5e2dc);
+		border-radius: var(--radius, 8px);
 		padding: 6px 8px;
-		margin: 24px 0 16px;
 		display: flex;
 		align-items: center;
 		gap: 2px;

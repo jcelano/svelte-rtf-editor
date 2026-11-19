@@ -104,6 +104,60 @@ test.describe('opening a link', () => {
 	});
 });
 
+test.describe('the toolbar of a long document', () => {
+	const long = { content: Array.from({ length: 80 }, (_, i) => `<p>Paragraph ${i + 1} of a long report.</p>`).join('') };
+	const END = process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End';
+	const where = (page: Page) =>
+		page.evaluate(() => {
+			const bar = document.querySelector('.toolbar')!.getBoundingClientRect();
+			const selection = getSelection()!;
+			const focus = document.createRange();
+			focus.setStart(selection.focusNode!, selection.focusOffset);
+			const caret = focus.getClientRects()[0];
+			return { scrolled: scrollY, top: bar.top, bottom: bar.bottom, caret: caret ? caret.top : null };
+		});
+
+	test('stays in sight when the page is scrolled to the end of the document, and can be used there', async ({ page }) => {
+		await open(page, long);
+		await page.click(`${content} p:first-child`);
+		expect((await where(page)).top).toBeGreaterThan(0);
+		await page.keyboard.press(END);
+		await expect.poll(async () => (await where(page)).scrolled).toBeGreaterThan(500);
+		const at = await where(page);
+		expect(Math.abs(at.top)).toBeLessThan(1);
+		// It is over the document, not in front of a window the document shows through.
+		await expect(page.locator('.toolbar')).toBeInViewport();
+		expect(await page.locator('.ink-head').evaluate((el) => getComputedStyle(el).backgroundColor)).not.toMatch(/rgba\(\d+, \d+, \d+, 0\)|transparent/);
+		// A button on it is the one a click at its place gets, and it does its work.
+		await page.keyboard.press('Shift+ArrowUp');
+		expect(await html(page)).not.toMatch(/<(b|strong)>/);
+		await page.click('.toolbar button[title^="Bold"]');
+		expect(await html(page)).toMatch(/<(b|strong)>[^<]*report\.<\/(b|strong)><\/p>$/);
+		expect(Math.abs((await where(page)).top)).toBeLessThan(1);
+	});
+
+	test('a caret moved up with the keys is not left under it', async ({ page }) => {
+		await open(page, long);
+		await page.click(`${content} p:first-child`);
+		await page.keyboard.press(END);
+		await expect.poll(async () => (await where(page)).scrolled).toBeGreaterThan(500);
+		for (let step = 0; step < 40; step++) {
+			await page.keyboard.press('ArrowUp');
+			const at = await where(page);
+			if (at.caret !== null && at.top < 1) expect(at.caret, `step ${step}`).toBeGreaterThanOrEqual(at.bottom);
+		}
+		expect((await where(page)).scrolled).toBeGreaterThan(0);
+	});
+
+	test('goes with the page where the application asks for that', async ({ page }) => {
+		await open(page, { ...long, stickyToolbar: '0' });
+		await page.click(`${content} p:first-child`);
+		await page.keyboard.press(END);
+		await expect.poll(async () => (await where(page)).scrolled).toBeGreaterThan(500);
+		expect((await where(page)).bottom).toBeLessThan(0);
+	});
+});
+
 test.describe('a new document', () => {
 	test('the first words typed are a paragraph, and two lines typed are two paragraphs in the RTF', async ({ page }) => {
 		await open(page);

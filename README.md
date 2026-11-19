@@ -128,6 +128,7 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 | `storageKey`    | `string`   | `'ink-editor-content'`       | `localStorage` key the draft is kept under. Give each document its own |
 | `ariaLabel`     | `string`   | `'Document'`                 | The name of the editing area for a screen reader          |
 | `showToolbar`   | `boolean`  | `true`                       | Show the formatting toolbar                               |
+| `stickyToolbar` | `boolean`  | `true`                       | Keep the toolbar in sight while a long document is scrolled. See [The toolbar of a long document](#the-toolbar-of-a-long-document) |
 | `showStatusBar` | `boolean`  | `true`                       | Show the word/character count bar                         |
 | `minHeight`     | `string`   | `'40vh'`                     | CSS `min-height` of the editing area                      |
 | `readonly`      | `boolean`  | `false`                      | Disable editing                                           |
@@ -261,6 +262,14 @@ Segoe UI is installed with Windows. On a system without it (macOS, Linux, a phon
 - `fontFamily` names one font. Given a CSS list such as `'Segoe UI, Selawik, sans-serif'`, the first family is the font: the one the RTF names, and the one the toolbar's font list shows. The rest of the list is for the screen alone, where the font is missing. Through 1.12.0 the rest of the list was ignored.
 - `fontSize` is rounded to the nearest half-point, which is what RTF measures in, and kept between 1 and 1638 pt.
 - If you show RTF in an editor or viewer set to another size, pass the same `fontSize` to `rtfToHtml`. Text at that size then carries no size of its own, text at any other size keeps it, and headings are recognized by the same ratios the writer uses. `InkEditor`'s RTF import and `RtfViewer` do this themselves. A heading must also be bold, at every body size, as every heading the writer emits is.
+
+### The toolbar of a long document
+
+The editing area grows with the document, and the page scrolls. The toolbar stays at the top of the window while it does, or at the top of the scrolling element the editor is in, and leaves with the end of the editor. A caret moved up with the keys is not left under it.
+
+- Under a header of your own that stays at the top too, give the toolbar its place below it: `--ink-toolbar-top: 56px` on the editor or any element around it.
+- It cannot stay where an element around the editor has `overflow: hidden`, `auto` or `scroll` and is not itself what scrolls: that is how `position: sticky` works. Take the `overflow` off that element, or make it the one that scrolls.
+- `stickyToolbar={false}` lets the toolbar go with the page, as it did through 1.12.0.
 
 ### Opening a link
 
@@ -494,6 +503,8 @@ The components use CSS custom properties with sensible fallbacks, so they work o
   --border:      #e5e2dc;        /* also the box around the toolbar's lists */
   --border-active: #c4b5a0;      /* that box, and the editor's, under the pointer */
   --bg-select:   transparent;    /* inside the toolbar's lists */
+  --bg-toolbar:  #fff;           /* the toolbar; not see-through, the document passes under it */
+  --ink-toolbar-top: 0px;        /* where the toolbar stays: the height of a header of yours that stays too */
   --ink:         #1a1714;
   --accent:      #6e56cf;
   --accent-soft: #ede9fe;

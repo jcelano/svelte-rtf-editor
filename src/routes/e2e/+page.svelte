@@ -9,7 +9,7 @@
 
 	let ed: ReturnType<typeof InkEditor> | null = $state(null);
 	let rtf = $state('');
-	let params = $state<{ autosave: boolean; content?: string; key?: string; onchange: boolean; keepAttributes: string[]; keepClasses: string[]; fonts: string[]; fontFamily?: string; readonly: boolean } | null>(null);
+	let params = $state<{ autosave: boolean; content?: string; key?: string; onchange: boolean; keepAttributes: string[]; keepClasses: string[]; fonts: string[]; fontFamily?: string; readonly: boolean; stickyToolbar: boolean } | null>(null);
 
 	onMount(() => {
 		const q = new URLSearchParams(location.search);
@@ -23,7 +23,8 @@
 			// (A font may be a list with commas of its own: the fonts are set apart by "|".)
 			fonts: (q.get('fonts') ?? '').split('|').filter(Boolean),
 			fontFamily: q.get('fontFamily') ?? undefined,
-			readonly: q.get('readonly') === '1'
+			readonly: q.get('readonly') === '1',
+			stickyToolbar: q.get('stickyToolbar') !== '0'
 		};
 		const w = window as unknown as Harness;
 		w.lib = lib;
@@ -48,6 +49,7 @@
 		fonts={params.fonts}
 		fontFamily={params.fontFamily}
 		readonly={params.readonly}
+		stickyToolbar={params.stickyToolbar}
 		onchange={params.onchange ? () => { (window as unknown as Harness).changes!++; } : undefined}
 		onsave={({ html }) => { (window as unknown as Harness).saves!.push(html); }}
 	/>

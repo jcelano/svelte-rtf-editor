@@ -38,6 +38,15 @@ has. An application that uses the editor for its HTML and wants pasted fonts kep
 `fonts`. `sanitizeHtml` called without `fonts` is unchanged; `sanitizeHtml(html, { fonts: [] })`
 takes every font off but the document's.
 
+**The toolbar stays in sight of a long document**
+
+The editing area grows with the document, and the toolbar used to leave the window with the
+top of it: at the end of a long report there was no toolbar to use. It now stays at the top of
+the window, or of the scrolling element the editor is in, and a caret moved up with the keys is
+not left under it. New prop `stickyToolbar` (default `true`; `false` is the behaviour through
+1.12.0) and CSS variable `--ink-toolbar-top`, for a page with a header of its own that stays.
+The toolbar's ground is now white where `--bg-toolbar` is not set; it was see-through.
+
 **A link opens on Ctrl+click (Cmd+click on a Mac)**
 
 A click on a link in the editor puts the caret in it, and until now only the browser's own menu

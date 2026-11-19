@@ -11,6 +11,10 @@
  *                   `content`. Default: false. Give each document its own storageKey.
 	 *   storageKey    — localStorage key for auto-save. Default: 'ink-editor-content'.
 	 *   showToolbar   — Show the formatting toolbar. Default: true.
+	 *   stickyToolbar — Keep the toolbar in sight while a long document is scrolled: it
+	 *                   stays at the top of the window, or of the scrolling element the
+	 *                   editor is in. Default: true. Under a header of your own that stays
+	 *                   too, set the CSS variable --ink-toolbar-top to its height.
 	 *   showStatusBar — Show the word/char count status bar. Default: true.
 	 *   minHeight     — CSS min-height of the editing area. Default: '40vh'.
 	 *   readonly      — If true, editor is not editable. Default: false.
@@ -135,6 +139,7 @@
 		autosave?: boolean;
 		storageKey?: string;
 		showToolbar?: boolean;
+		stickyToolbar?: boolean;
 		showStatusBar?: boolean;
 		minHeight?: string;
 		readonly?: boolean;
@@ -179,6 +184,7 @@
 		autosave = false,
 		storageKey = 'ink-editor-content',
 		showToolbar = true,
+		stickyToolbar = true,
 		showStatusBar = true,
 		minHeight = '40vh',
 		readonly = false,
@@ -1830,6 +1836,41 @@
 		pendingSize = null;
 		pendingFont = null;
 		updateToolbarState();
+		keepCaretInSight();
+	}
+
+	let headEl: HTMLDivElement | undefined = $state();
+
+	/**
+	 * The browser scrolls a caret into the window, and knows nothing of the toolbar that stays
+	 * at the top of it: a caret moved up with the keys ends under the toolbar. The page is
+	 * scrolled by what the toolbar covers of the caret's line.
+	 */
+	function keepCaretInSight(): void {
+		if (!stickyToolbar || !headEl || !editorEl) return;
+		const selection = window.getSelection();
+		if (!selection || selection.rangeCount === 0 || !selectionInEditor()) return;
+		const focus = document.createRange();
+		try {
+			focus.setStart(selection.focusNode!, selection.focusOffset);
+		} catch {
+			return;
+		}
+		const caret = focus.getClientRects()[0];
+		if (!caret) return;
+		const head = headEl.getBoundingClientRect();
+		// Only where the toolbar is over the document, which it is not until the page is scrolled.
+		if (head.bottom <= editorEl.getBoundingClientRect().top) return;
+		const covered = head.bottom + 8 - caret.top;
+		if (covered <= 0 || caret.bottom < head.top) return;
+		for (let at: HTMLElement | null = editorEl.parentElement; at; at = at.parentElement) {
+			const overflow = getComputedStyle(at).overflowY;
+			if ((overflow === 'auto' || overflow === 'scroll') && at.scrollHeight > at.clientHeight) {
+				at.scrollTop -= covered;
+				return;
+			}
+		}
+		window.scrollBy(0, -covered);
 	}
 
 	/** The editing area was scrolled sideways (a wide table): what is drawn over it moves with it. */
@@ -3230,38 +3271,42 @@
 	style:--ink-font-family={screenFontFamily}
 	style:--ink-font-size="{screenFontSize}pt"
 >
-	{#if showToolbar && !readonly}
-		<Toolbar
-			{formatState}
-			blockType={currentBlock}
-			onexec={exec}
-			onblock={setBlock}
-			oninsertlink={openLinkModal}
-			oninsertimage={openImageModal}
-			fontSize={currentFontSize}
-			fontSizes={sizeChoices}
-			onfontsize={setFontSize}
-			font={currentFont}
-			fonts={fontList}
-			documentFont={fontChoices([fontFamily])[0]?.name ?? DEFAULT_FONT_FAMILY}
-			onfont={setFont}
-			copyingFormat={copyFormat !== 'off'}
-			oncopyformat={toggleCopyFormat}
-		/>
-	{/if}
+	{#if !readonly && (showToolbar || copyFormat !== 'off')}
+		<div class="ink-head" class:sticky={stickyToolbar} bind:this={headEl}>
+			{#if showToolbar}
+				<Toolbar
+					{formatState}
+					blockType={currentBlock}
+					onexec={exec}
+					onblock={setBlock}
+					oninsertlink={openLinkModal}
+					oninsertimage={openImageModal}
+					fontSize={currentFontSize}
+					fontSizes={sizeChoices}
+					onfontsize={setFontSize}
+					font={currentFont}
+					fonts={fontList}
+					documentFont={fontChoices([fontFamily])[0]?.name ?? DEFAULT_FONT_FAMILY}
+					onfont={setFont}
+					copyingFormat={copyFormat !== 'off'}
+					oncopyformat={toggleCopyFormat}
+				/>
+			{/if}
 
-	{#if copyFormat !== 'off' && !readonly}
-		<div class="ink-copy-format" role="status">
-			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="14" height="6" rx="1.5"/><path d="M17 6h3v5h-9v3"/><rect x="9.5" y="14" width="3" height="7" rx="1"/></svg>
-			<span>
-				{copyFormat === 'pick'
-					? 'Copy format: click the paragraph to copy from.'
-					: 'Format copied. Click each paragraph that should get it.'}
-			</span>
-			<button type="button" class="ink-copy-format-done" onmousedown={(e) => e.preventDefault()} onclick={stopCopyFormat}>
-				{copyFormat === 'pick' ? 'Cancel' : 'Done'}
-			</button>
-			<span class="ink-copy-format-key">or press Esc</span>
+			{#if copyFormat !== 'off'}
+				<div class="ink-copy-format" role="status">
+					<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="14" height="6" rx="1.5"/><path d="M17 6h3v5h-9v3"/><rect x="9.5" y="14" width="3" height="7" rx="1"/></svg>
+					<span>
+						{copyFormat === 'pick'
+							? 'Copy format: click the paragraph to copy from.'
+							: 'Format copied. Click each paragraph that should get it.'}
+					</span>
+					<button type="button" class="ink-copy-format-done" onmousedown={(e) => e.preventDefault()} onclick={stopCopyFormat}>
+						{copyFormat === 'pick' ? 'Cancel' : 'Done'}
+					</button>
+					<span class="ink-copy-format-key">or press Esc</span>
+				</div>
+			{/if}
 		</div>
 	{/if}
 
@@ -3438,6 +3483,22 @@
 		width: 100%;
 	}
 
+	/* The toolbar, and under it the note of a format being copied. It stays in sight while a
+	   long document is scrolled, at the top of the window or of the scrolling element the
+	   editor is in: under a header of the page's own, --ink-toolbar-top is that header's
+	   height. Its ground is the toolbar's, so that no words show between its parts. */
+	.ink-head {
+		margin: 24px 0 16px;
+		border-radius: var(--radius, 8px);
+		background: var(--bg-toolbar, #fff);
+	}
+
+	.ink-head.sticky {
+		position: sticky;
+		top: var(--ink-toolbar-top, 0px);
+		z-index: 30;
+	}
+
 	/* Anchors the image selection frame, which lives outside the
 	   contenteditable area so it never lands in the exported HTML. */
 	.ink-content-wrap {
@@ -3496,7 +3557,7 @@
 		display: flex;
 		align-items: center;
 		gap: 10px;
-		margin: -8px 0 12px;
+		margin: 8px 0 0;
 		padding: 8px 12px;
 		border: 1px solid var(--accent, #6e56cf);
 		border-radius: var(--radius-sm, 5px);
