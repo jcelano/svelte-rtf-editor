@@ -843,26 +843,29 @@ export function pasteHasWords(html: string): boolean {
 const FRAME = /<i?frame[\s>/]/i;
 
 /**
- * A paste's HTML without the frames in it, or null where it has none, which is nearly every
- * paste.
+ * The HTML of a paste that holds a frame, made safe and without the frame; or null where it
+ * holds none, which is nearly every paste.
  *
  * A frame is not kept in a document, and until 1.12.0 it was taken out after the browser had
  * pasted it, with all else that is not safe. But a frame put in a page is a page being loaded,
  * and Safari forgets every step it could undo when one is taken out again: after a paste that
  * held a frame (a part of a web page with a video or an advertisement in it) nothing done
  * before the paste could be undone, and after Undo and Redo of it, not the paste either. So a
- * paste that holds a frame is put in by the editor, without it. Nothing of what is left is made
- * safe here: that is done to what comes in, as to any paste.
+ * paste that holds a frame is put in by the editor, without it.
+ *
+ * What the editor puts in itself has to be safe before it is in the page, all of it. A
+ * browser's own paste takes the scripts and the handlers out of what it pastes; the command
+ * the editor inserts with does not, and a handler runs as soon as its element is in the page
+ * (`<video onerror>`, `<svg><image onerror>`), whatever is taken out a moment later. So the
+ * whole of it is made safe here, in a document of its own where nothing is loaded and no script
+ * is run, as HTML from anywhere else is. (For a time only the frames were taken out, and a
+ * page one copied from could run script in the application by having a frame in the copy.)
  */
-export function pasteWithoutFrames(html: string): string | null {
+export function pasteWithoutFrames(html: string, keep?: Kept): string | null {
 	if (!FRAME.test(html) || typeof DOMParser === 'undefined') return null;
-	// (Parsed into a document of its own, where nothing is loaded and no script is run.)
-	const body = new DOMParser().parseFromString(html, 'text/html').body;
-	const frames = Array.from(body.querySelectorAll('iframe, frame, frameset'));
 	// (None after all: the letters were text, in a line of code or in a comment.)
-	if (frames.length === 0) return null;
-	for (const frame of frames) frame.remove();
-	return body.innerHTML;
+	if (new DOMParser().parseFromString(html, 'text/html').querySelector('iframe, frame, frameset') === null) return null;
+	return safeBody(html, undefined, keep)?.innerHTML ?? '';
 }
 
 /**

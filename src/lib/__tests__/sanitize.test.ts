@@ -999,15 +999,44 @@ describe('sanitizeHtml: what a second review found', () => {
 
 describe('a paste that holds a frame', () => {
 	// (A frame taken out of a page after it was put in makes Safari forget what it could undo:
-	// see pasteWithoutFrames. So it is taken out of the paste before.)
-	it('is given without the frame, and with all else as it came', async () => {
+	// see pasteWithoutFrames. So it is taken out of the paste before, and the editor puts the
+	// paste in itself.)
+	it('is given without the frame', async () => {
 		const { pasteWithoutFrames } = await import('../sanitize.js');
 		expect(pasteWithoutFrames('<p>came in</p><iframe src="https://example.com/frame"></iframe><p>after</p>')).toBe('<p>came in</p><p>after</p>');
 		expect(pasteWithoutFrames('<div><p>one</p><IFRAME srcdoc="<p>inside</p>"></IFRAME></div>')).toBe('<div><p>one</p></div>');
-		// Nothing else is made safe here: that is done to what comes in.
-		expect(pasteWithoutFrames('<form action="https://example.com/"><iframe></iframe><input value="typed"></form>')).toBe(
-			'<form action="https://example.com/"><input value="typed"></form>'
-		);
+	});
+
+	it('is made safe, all of it, before it is in the page: what the editor inserts, no browser has looked at', async () => {
+		// (Only the frames were taken out, and the rest made safe once it was in the page. But a
+		// handler runs as soon as its element is there: a page one copied from ran script in the
+		// application, by having a frame in the copy.)
+		const { pasteWithoutFrames, keptMarks } = await import('../sanitize.js');
+		const hostile =
+			'<p onclick="run()">came in</p><iframe></iframe>' +
+			'<video src="x:" onerror="run()"><source src="x:" onerror="run()"></video>' +
+			'<audio src="x:" onerror="run()"></audio>' +
+			'<svg onload="run()"><image href="x:" onerror="run()"/></svg>' +
+			'<img src="https://example.com/a.png" onerror="run()" onload="run()" alt="kept">' +
+			'<details open ontoggle="run()"><summary>s</summary>d</details>' +
+			'<input autofocus onfocus="run()"><form action="https://example.com/collect"><button formaction="javascript:run()">Go</button></form>' +
+			'<a href="javascript:run()">link</a><object data="x:" onerror="run()"></object><embed src="x:" onerror="run()">' +
+			'<script>run()</scr' + 'ipt><style onload="run()">p{}</style><link rel="stylesheet" href="x:" onerror="run()"><marquee onstart="run()">m</marquee>';
+		const safe = pasteWithoutFrames(hostile)!;
+		expect(safe).not.toMatch(/\son[a-z]+\s*=/i);
+		expect(safe).not.toMatch(/run\(\)|javascript:/);
+		expect(safe).not.toMatch(/<(iframe|video|audio|source|svg|image|script|style|link|object|embed|input|button)\b/i);
+		// (A form is left as the words it held, and sends nothing anywhere.)
+		expect(safe).not.toMatch(/action|collect/);
+		// The words and the picture are still there.
+		expect(safe).toContain('<p>came in</p>');
+		expect(safe).toContain('<img src="https://example.com/a.png" alt="kept">');
+		// It is the same as HTML from anywhere else is made.
+		expect(safe).toBe(sanitizeHtml(hostile));
+		// And with what the application keeps, kept.
+		const marked = '<p><span data-code="C50.9" class="dx" onclick="run()">carcinoma</span></p><iframe></iframe>';
+		expect(pasteWithoutFrames(marked, keptMarks({ keepAttributes: ['data-code'], keepClasses: ['dx'] }))).toBe('<p><span data-code="C50.9" class="dx">carcinoma</span></p>');
+		expect(pasteWithoutFrames(marked)).toBe('<p><span>carcinoma</span></p>');
 	});
 
 	it('is null where there is no frame: nearly every paste, which the browser then makes', async () => {

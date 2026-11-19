@@ -997,6 +997,60 @@ test.describe('what a third review found', () => {
 		}
 	});
 
+	// What a page one copies from may put in the copy to run script where it is pasted: each
+	// writes its name in `window.__ran` if it runs. With a frame among them, because a paste that
+	// holds a frame is put in by the editor itself, where no browser takes the handlers out.
+	const RAN = (name: string) => `(window.__ran = window.__ran || []).push('${name}')`;
+	const HOSTILE =
+		'<p>came in</p><iframe></iframe>' +
+		`<video><source src="x:" onerror="${RAN('source')}"></video>` +
+		`<video src="x:" onerror="${RAN('video')}"></video>` +
+		`<audio src="x:" onerror="${RAN('audio')}"></audio>` +
+		`<svg onload="${RAN('svg')}"><image href="x:" onerror="${RAN('svg image')}"/></svg>` +
+		`<img src="x:" onerror="${RAN('img')}">` +
+		`<details open ontoggle="${RAN('details')}"><summary>s</summary>d</details>` +
+		`<input autofocus onfocus="${RAN('input')}">` +
+		`<object data="x:" onerror="${RAN('object')}"></object>` +
+		`<link rel="stylesheet" href="x:" onerror="${RAN('link')}">` +
+		`<style onload="${RAN('style')}">p{}</style>` +
+		`<script>${RAN('script')}</scr` + `ipt>` +
+		`<body onload="${RAN('body')}">` +
+		'<p>and after</p>';
+	const ran = (page: Page) => page.evaluate(() => (window as unknown as { __ran?: string[] }).__ran ?? []);
+
+	test('a paste that holds a frame runs none of the handlers that came with it', async ({ page }) => {
+		// (It ran those of <source>, <video>, <audio> and <svg><image>: the editor took out the
+		// frames and put the rest in the page as it was, to be made safe there, too late.)
+		await open(page, { content: '<p>Body</p>' });
+		await page.click(`${content} p`);
+		// The paste event, with the HTML as a clipboard carries it: a script cannot put handlers
+		// on the clipboard, which the browser takes off what a script writes there.
+		const insertedByEditor = await page.evaluate((markup) => {
+			const data = new DataTransfer();
+			data.setData('text/html', markup);
+			const paste = new Event('paste', { bubbles: true, cancelable: true });
+			Object.defineProperty(paste, 'clipboardData', { value: data });
+			return !document.querySelector('.ink-content')!.dispatchEvent(paste);
+		}, HOSTILE);
+		expect(insertedByEditor).toBe(true);
+		await expect(page.locator(content)).toContainText('and after');
+		// (Long enough for a picture that is not there to have failed.)
+		await page.waitForTimeout(700);
+		expect(await ran(page)).toEqual([]);
+		expect(await html(page)).not.toMatch(/\son[a-z]+=|__ran|<(iframe|video|audio|svg|script|style|link|object|input)\b/i);
+		await expect(page.locator(content)).toContainText('came in');
+	});
+
+	test('nor does a drop that holds a frame', async ({ page }) => {
+		await open(page, { content: '<p>Line to drop on</p>' });
+		await draggable(page, HOSTILE);
+		await page.dragAndDrop('#drag-source', `${content} p`);
+		await expect(page.locator(content)).toContainText('and after');
+		await page.waitForTimeout(700);
+		expect(await ran(page)).toEqual([]);
+		expect(await html(page)).not.toMatch(/\son[a-z]+=|__ran|<(iframe|video|audio|svg|script|style|link|object|input)\b/i);
+	});
+
 	test('a paste that holds a frame leaves what was done before it to be undone', async ({ page, browserName }) => {
 		// (In Safari the words typed before such a paste could not be taken back after it.)
 		await open(page, { content: '<p>Body</p>' });
