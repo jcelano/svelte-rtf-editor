@@ -539,6 +539,13 @@ test.describe('what a third review found', () => {
 		'<p>came in</p><div id="over" style="position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:9999;color:red">over</div>' +
 		'<form action="https://example.com/collect"><input name="q" value="typed"><button>Go</button></form><iframe src="https://example.com/frame"></iframe>';
 
+	// Redo is Ctrl+Shift+Z and Ctrl+Y, but on a Mac only Cmd+Shift+Z: Cmd+Y is not Redo there.
+	const MAC = process.platform === 'darwin';
+	const REDO_KEYS = MAC ? ['Meta+Shift+z'] : ['Control+Shift+z', 'Control+y'];
+	// (And on a Mac, Home and End are not the ends of the line in every browser.)
+	const SELECT_TO_LINE_START = MAC ? 'Meta+Shift+ArrowLeft' : 'Shift+Home';
+	const LINE_END = MAC ? 'Meta+ArrowRight' : 'End';
+
 	/** What of OUTSIDE is in the document: nothing of it should be, but its words. */
 	const left = (page: Page) =>
 		page.evaluate(() => {
@@ -593,9 +600,8 @@ test.describe('what a third review found', () => {
 		expect(await html(page)).not.toMatch(/iframe|<input|<button|action=|position/);
 	});
 
-	test('words dragged from one line of the document to another are still moved', async ({ page }) => {
-		await open(page, { content: '<p>alpha beta gamma</p><p>second line</p><p>third line</p>' });
-		await selectIn(page, 0, 0, 5);
+	/** Drag what is selected to the third paragraph of the document. */
+	async function dragSelectionToThirdLine(page: Page): Promise<void> {
 		const at = await page.evaluate(() => {
 			const from = getSelection()!.getRangeAt(0).getBoundingClientRect();
 			const to = document.querySelectorAll('.ink-content p')[2].getBoundingClientRect();
@@ -603,12 +609,49 @@ test.describe('what a third review found', () => {
 		});
 		await page.mouse.move(at.x, at.y);
 		await page.mouse.down();
+		// (On a Mac, selected words pressed and moved at once are a new selection: they are
+		// dragged only once the button has been held a moment.)
+		await page.waitForTimeout(400);
 		await page.mouse.move(at.x + 5, at.y + 5, { steps: 3 });
 		await page.mouse.move(at.tx, at.ty, { steps: 8 });
 		await page.mouse.up();
+	}
+
+	test('words dragged from one line of the document to another are still moved', async ({ page }) => {
+		await open(page, { content: '<p>alpha beta gamma</p><p>second line</p><p>third line</p>' });
+		await selectIn(page, 0, 0, 5);
+		await dragSelectionToThirdLine(page);
 		await expect(page.locator(`${content} p`).nth(2)).toContainText('alpha');
 		await expect(page.locator(`${content} p`).nth(0)).not.toContainText('alpha');
 		expect(await page.locator(`${content} p`).count()).toBe(3);
+	});
+
+	test('and an element dragged with them keeps the id it had', async ({ page }) => {
+		// (What is moved was treated as pasted, and a pasted element loses its id: it might be in
+		// the document already. A moved one is in the document once, before and after.)
+		await open(page, { content: '<p>alpha <b id="mark1">beta</b> gamma</p><p>second line</p><p>third line</p>' });
+		await page.evaluate(() => {
+			const range = document.createRange();
+			range.selectNode(document.querySelector('.ink-content b')!);
+			getSelection()!.removeAllRanges();
+			getSelection()!.addRange(range);
+			(document.querySelector('.ink-content') as HTMLElement).focus();
+		});
+		await dragSelectionToThirdLine(page);
+		await expect(page.locator(`${content} p`).nth(2)).toContainText('beta');
+		await expect(page.locator(`${content} p`).nth(0)).not.toContainText('beta');
+		expect(await page.locator(`${content} p:nth-of-type(3) b#mark1`).count()).toBe(1);
+		expect(await page.locator(`${content} [id]`).count()).toBe(1);
+	});
+
+	test('words Word hid are not shown when they are dragged in, as when they are pasted', async ({ page }) => {
+		// (Only a paste was read for them: the same markup dragged in showed them as words.)
+		await open(page, { content: '<p>Line to drop on</p>' });
+		await draggable(page, '<p>shown <span style="mso-hide:all">secret</span> words</p>');
+		await page.dragAndDrop('#drag-source', `${content} p`);
+		await expect(page.locator(content)).toContainText('shown');
+		await expect(page.locator(content)).not.toContainText('secret');
+		await expect(page.locator(content)).toContainText(/shown\s+words/);
 	});
 
 	test('Redo does not put back what a paste was made safe of', async ({ page }) => {
@@ -620,13 +663,125 @@ test.describe('what a third review found', () => {
 		await page.keyboard.press('ControlOrMeta+v');
 		await expect(page.locator(content)).toContainText('came in');
 		expect((await left(page)).risky).toEqual([]);
-		for (const redo of ['ControlOrMeta+Shift+z', 'ControlOrMeta+y']) {
+		for (const redo of REDO_KEYS) {
 			await page.keyboard.press('ControlOrMeta+z');
 			await expect(page.locator(content)).not.toContainText('came in');
 			await page.keyboard.press(redo);
 			await expect(page.locator(content)).toContainText('came in');
 			expect(await left(page), redo).toEqual({ risky: [], overPosition: 'static', overColor: 'red' });
 		}
+	});
+
+	/** Paste markup at the end of the first paragraph, and give the document as it then is. */
+	async function pasteAtEnd(page: Page, markup: string): Promise<string> {
+		await page.evaluate(async (markup) => {
+			await navigator.clipboard.write([new ClipboardItem({ 'text/html': new Blob([markup], { type: 'text/html' }) })]);
+		}, markup);
+		await page.click(`${content} p`);
+		await page.keyboard.press('End');
+		const before = await html(page);
+		await page.keyboard.press('ControlOrMeta+v');
+		await expect.poll(() => html(page)).not.toBe(before);
+		return html(page);
+	}
+
+	/** Undo the paste and redo it, and give the document as it then is. */
+	async function undoAndRedo(page: Page, pasted: string, redo: string): Promise<string> {
+		await page.keyboard.press('ControlOrMeta+z');
+		await expect.poll(() => html(page)).not.toBe(pasted);
+		const undone = await html(page);
+		await page.keyboard.press(redo);
+		await expect.poll(() => html(page)).not.toBe(undone);
+		return html(page);
+	}
+
+	test('Redo does not write back the style that was taken off an element that stayed', async ({ page }) => {
+		// Chromium writes the style of a pasted element itself as it pastes, and Redo writes that
+		// same style again, on the element the editor had made safe: it was not looked at twice.
+		for (const markup of [
+			'before <span style="position:fixed;top:0;left:0;width:100vw;height:100vh;color:rgb(0,0,0);font-size:16px">over</span> after',
+			'<a href="https://example.com/" style="position:fixed;top:0">link</a> after'
+		]) {
+			await open(page, { content: '<p>Body text</p>' });
+			const pasted = await pasteAtEnd(page, markup);
+			expect(pasted).not.toContain('position');
+			for (const redo of REDO_KEYS) {
+				expect(await undoAndRedo(page, pasted, redo), redo).toBe(pasted);
+				expect(
+					await page.evaluate(() => Array.from(document.querySelectorAll<HTMLElement>('.ink-content *')).filter((el) => getComputedStyle(el).position !== 'static').length),
+					redo
+				).toBe(0);
+			}
+		}
+	});
+
+	// (Firefox does not undo a paste the editor has taken an element or words out of: so it was in 1.11.0.)
+	const UNDOES_SUCH_A_PASTE = (browserName: string) => browserName !== 'firefox';
+
+	test('Redo does not put the words of a button in the document a second time', async ({ page, browserName }) => {
+		test.fixme(!UNDOES_SUCH_A_PASTE(browserName));
+		await open(page, { content: '<p>Body text</p>' });
+		const pasted = await pasteAtEnd(page, '<p>first</p><p>second</p><button>Send</button><textarea>typed in a box</textarea>');
+		expect(pasted).not.toMatch(/<button|<textarea/);
+		expect(pasted.match(/Send/g)).toHaveLength(1);
+		for (const redo of REDO_KEYS) expect(await undoAndRedo(page, pasted, redo), redo).toBe(pasted);
+	});
+
+	test('Undo of a paste takes with it the words left where a button was', async ({ page, browserName }) => {
+		// (The browser's Undo knows nothing of those words: "Send" stayed in the report, a word
+		// of a paste the writer had taken back.)
+		test.fixme(!UNDOES_SUCH_A_PASTE(browserName));
+		await open(page, { content: '<p>Body text</p>' });
+		const before = await html(page);
+		const pasted = await pasteAtEnd(page, '<p>first</p><p>second</p><button>Send</button><textarea>typed in a box</textarea>');
+		for (const redo of REDO_KEYS) {
+			await page.keyboard.press('ControlOrMeta+z');
+			await expect.poll(() => html(page)).toBe(before);
+			await page.keyboard.press(redo);
+			await expect.poll(() => html(page), redo).toBe(pasted);
+		}
+	});
+
+	test('Redo does not show again the words Word hid in a paste', async ({ page, browserName }) => {
+		// (Redo puts the paste back as the browser first made it, before those words were taken out.)
+		test.fixme(!UNDOES_SUCH_A_PASTE(browserName));
+		// (WebKit rewrites markup a page puts on the clipboard: "mso-hide" is gone before the paste.)
+		test.fixme(browserName === 'webkit');
+		await open(page, { content: '<p>Body text</p>' });
+		const pasted = await pasteAtEnd(page, '<p>shown <span style="mso-hide:all">secret</span> words</p><p style="mso-hide:all">hidden whole</p><p>next</p>');
+		expect(pasted).not.toMatch(/secret|hidden whole/);
+		for (const redo of REDO_KEYS) {
+			const redone = await undoAndRedo(page, pasted, redo);
+			expect(redone, redo).not.toMatch(/secret|hidden whole/);
+			expect(redone, redo).toBe(pasted);
+		}
+	});
+
+	test('Redo leaves a paste of the document\'s own paragraphs as the paste left it', async ({ page }) => {
+		// Chromium copies a paragraph with its spacing written out; the paste is tidied of that
+		// (see tidyPasted), and Redo wrote it back.
+		await open(page, {
+			content: '<p style="margin-left: 96px; text-indent: -48px;">indented <b>one</b></p><p style="margin-left: 48px; text-align: center">centered</p><p>target</p>'
+		});
+		await page.evaluate(() => {
+			const blocks = document.querySelector('.ink-content')!.children;
+			const range = document.createRange();
+			range.setStart(blocks[0], 0);
+			range.setEnd(blocks[1], blocks[1].childNodes.length);
+			const selection = getSelection()!;
+			selection.removeAllRanges();
+			selection.addRange(range);
+			(document.querySelector('.ink-content') as HTMLElement).focus();
+		});
+		await page.keyboard.press('ControlOrMeta+c');
+		await page.click(`${content} > p >> nth=2`);
+		await page.keyboard.press('End');
+		const before = await html(page);
+		await page.keyboard.press('ControlOrMeta+v');
+		await expect.poll(() => html(page)).not.toBe(before);
+		const pasted = await html(page);
+		expect(pasted).not.toContain('0.2em');
+		for (const redo of REDO_KEYS) expect(await undoAndRedo(page, pasted, redo), redo).toBe(pasted);
 	});
 
 	test('a document with an element named "constructor" opens, is replaced by the next one, and can be pasted', async ({ page }) => {
@@ -682,6 +837,62 @@ test.describe('what a third review found', () => {
 		await page.getByRole('button', { name: 'Bold (Ctrl+B)' }).click();
 		expect(await html(page)).toBe('<p>alpha beta gamma</p><p><b>second</b> paragraph</p>');
 		expect(await page.evaluate(() => document.getElementById('outside')!.innerHTML)).toBe('words of the page around the editor');
+		// The same for a dialog opened from the toolbar: the link is made of those words, not
+		// put at the top of the document as its own address.
+		await page.evaluate(() => getSelection()!.selectAllChildren(document.getElementById('outside')!));
+		await page.evaluate(() => new Promise((done) => setTimeout(done, 50)));
+		await page.getByRole('button', { name: 'Insert link (Ctrl+K)' }).click();
+		await page.keyboard.type('https://example.com/');
+		await page.keyboard.press('Enter');
+		expect(await html(page)).toBe('<p>alpha beta gamma</p><p><b><a href="https://example.com/">second</a></b> paragraph</p>');
+		expect(await page.evaluate(() => document.getElementById('outside')!.innerHTML)).toBe('words of the page around the editor');
+	});
+
+	test('text copied in Word is pasted as its words, not as the picture of them Word copies beside', async ({ page, browserName }) => {
+		// (Chromium hands a paste both, and the picture was taken: the text of a report went in as
+		// a picture of it. Only Chromium can put both on the clipboard from a page.)
+		test.skip(browserName !== 'chromium');
+		const copy = (html: string) =>
+			page.evaluate(async (html) => {
+				const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+				const bytes = Uint8Array.from(atob(png), (c) => c.charCodeAt(0));
+				await navigator.clipboard.write([
+					new ClipboardItem({ 'text/html': new Blob([html], { type: 'text/html' }), 'image/png': new Blob([bytes], { type: 'image/png' }) })
+				]);
+			}, html);
+		await open(page, { content: '<p>Body</p>' });
+		await copy(
+			"<html><head><style>p.MsoNormal{margin:0in;font-size:11pt}</style></head><body><!--StartFragment--><p class=MsoNormal>Margins are clear <span style='mso-hide:all'>SECRET </span>of tumor.</p><!--EndFragment--></body></html>"
+		);
+		await page.click(`${content} p`);
+		await page.keyboard.press('ControlOrMeta+v');
+		await expect(page.locator(content)).toContainText('of tumor.');
+		await expect(page.locator(content)).not.toContainText('SECRET');
+		await expect(page.locator(content)).toContainText(/Margins are clear\s+of tumor\./);
+		expect(await page.locator(`${content} img`).count()).toBe(0);
+		// A picture copied in a browser comes with HTML too, but no words: it is still a picture.
+		await open(page, { content: '<p>Body</p>' });
+		await copy('<meta charset="utf-8"><img src="https://example.com/a.png" alt="">');
+		await page.click(`${content} p`);
+		await page.keyboard.press('ControlOrMeta+v');
+		await expect(page.locator(`${content} figure img`)).toHaveCount(1);
+		expect(await page.locator(`${content} img`).getAttribute('src')).toMatch(/^data:image\/png/);
+	});
+
+	test('a picture from the dialog goes in where the caret was when the dialog was opened', async ({ page }) => {
+		// (The dialog closes before the picture has been read, and the browser then puts a caret
+		// of its own at the top of the document: the picture went in after the first paragraph.)
+		const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+		for (const how of ['button', 'Enter']) {
+			await open(page, { content: '<p>first</p><p>second</p><p>third</p>' });
+			await selectIn(page, 2, 5, 5);
+			await page.getByRole('button', { name: 'Insert image' }).click();
+			await page.getByLabel('Image address').fill(PNG);
+			if (how === 'Enter') await page.keyboard.press('Enter');
+			else await page.getByRole('button', { name: 'Insert', exact: true }).click();
+			await expect(page.locator(`${content} figure`)).toHaveCount(1);
+			expect(await page.evaluate(() => Array.from(document.querySelector('.ink-content')!.children).map((el) => el.tagName.toLowerCase()).slice(0, 4)), how).toEqual(['p', 'p', 'p', 'figure']);
+		}
 	});
 
 	test('Undo and Redo leave what was typed and formatted as it was', async ({ page }) => {
@@ -700,12 +911,12 @@ test.describe('what a third review found', () => {
 		await page.keyboard.type('item one');
 		await page.keyboard.press('Enter');
 		await page.keyboard.type('sized');
-		await page.keyboard.press('Shift+Home');
+		await page.keyboard.press(SELECT_TO_LINE_START);
 		await page.locator('select[aria-label="Font size"]').selectOption('18');
-		await page.keyboard.press('End');
+		await page.keyboard.press(LINE_END);
 		await page.keyboard.press('Enter');
 		await page.keyboard.type('linked');
-		await page.keyboard.press('Shift+Home');
+		await page.keyboard.press(SELECT_TO_LINE_START);
 		await page.keyboard.press('ControlOrMeta+k');
 		await page.keyboard.type('https://example.com/');
 		await page.keyboard.press('Enter');

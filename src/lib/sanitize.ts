@@ -589,14 +589,20 @@ function isReadAloudCopy(el: Element): boolean {
  * Make the elements under `root` safe, in place. With `only`, just the elements it accepts (the
  * ones a paste brought in) are looked at; the rest of the document is left as it is. With
  * `idTaken`, an id it says the page already uses is taken off. With `keep` (see keptMarks),
- * the application's own `data-` attributes and classes stay.
+ * the application's own `data-` attributes and classes stay. `wordsLeft` is told of each element
+ * taken out with its words left in its place (a button, a text box), and of the text that holds
+ * them: an editor whose Redo puts the element back needs to know those words are there already.
+ * `leftOut` is told of each element that could not be checked, and so was taken out with what
+ * was in it: whoever shows the rest can say that a part is missing.
  * Returns whether anything was taken out or changed.
  */
 export function sanitizeTree(
 	root: Element,
 	only?: (el: Element) => boolean,
 	idTaken?: (id: string) => boolean,
-	keep?: Kept
+	keep?: Kept,
+	wordsLeft?: (el: Element, words: Text) => void,
+	leftOut?: (el: Element) => void
 ): boolean {
 	let changed = false;
 	const fonts: FontSizes = new Map();
@@ -616,6 +622,7 @@ export function sanitizeTree(
 				const kept = el.ownerDocument.createTextNode(lastKept !== null && el.previousSibling === lastKept ? ` ${text}` : text);
 				el.replaceWith(kept);
 				lastKept = kept;
+				wordsLeft?.(el, kept);
 			} else {
 				el.remove();
 			}
@@ -645,6 +652,7 @@ export function sanitizeTree(
 			// with nothing to say which half had been made safe.
 			el.remove();
 			changed = true;
+			leftOut?.(el);
 		}
 	}
 	return changed;
@@ -662,10 +670,10 @@ export function sanitizeHtml(html: string, options?: KeepOptions): string {
 }
 
 /** The HTML, read in a document of its own and made safe there; null where it cannot be. */
-function safeBody(html: string, idTaken?: (id: string) => boolean, keep?: Kept): HTMLElement | null {
+function safeBody(html: string, idTaken?: (id: string) => boolean, keep?: Kept, leftOut?: (el: Element) => void): HTMLElement | null {
 	if (!html || typeof DOMParser === 'undefined') return null;
 	const doc = new DOMParser().parseFromString(`<!DOCTYPE html><html><body>${html}</body></html>`, 'text/html');
-	sanitizeTree(doc.body, undefined, idTaken, keep);
+	sanitizeTree(doc.body, undefined, idTaken, keep, undefined, leftOut);
 	return doc.body;
 }
 
@@ -674,11 +682,64 @@ function safeBody(html: string, idTaken?: (id: string) => boolean, keep?: Kept):
  * checked is what is shown. Written out as text and read in again, a second reading has to
  * agree with the first for the check to mean anything, and that is where a sanitizer is got
  * round; it is also a third pass over a document that may hold megabytes of pictures.
+ * `leftOut` is told of each element that could not be checked (see sanitizeTree).
  */
-export function sanitizedNodes(html: string, into: Document, idTaken?: (id: string) => boolean, keep?: Kept): Node[] {
-	const body = safeBody(html, idTaken, keep);
+export function sanitizedNodes(
+	html: string,
+	into: Document,
+	idTaken?: (id: string) => boolean,
+	keep?: Kept,
+	leftOut?: (el: Element) => void
+): Node[] {
+	const body = safeBody(html, idTaken, keep, leftOut);
 	if (!body) return [];
 	return Array.from(body.childNodes).map((node) => into.importNode(node, true));
+}
+
+/** Where each part of a paste begins, when they are all there one after the other from `from`. */
+function partsInARow(from: number, parts: { text: string }[]): number[] {
+	let at = from;
+	return parts.map((part) => {
+		const start = at;
+		at += part.text.length;
+		return start;
+	});
+}
+
+/**
+ * Where each part of a paste begins in `shown`, from `from` on, when a hidden part may be
+ * missing (null for one that is): the first reading that fits, taking each hidden part as there
+ * where it can be. Null where there is no reading: this text is not that paste.
+ */
+function partsPutBack(shown: string, from: number, parts: { text: string; hidden: boolean }[]): (number | null)[] | null {
+	const starts: (number | null)[] = [];
+	/** Where the reading stood before each part, to go back to. */
+	const stood: number[] = [];
+	let at = from;
+	let i = 0;
+	// (A reading is given up and taken again from an earlier part; a text made to be read in
+	// very many ways is not read at all.)
+	for (let steps = 0; i < parts.length; steps++) {
+		if (steps > 200_000) return null;
+		stood[i] = at;
+		if (shown.startsWith(parts[i].text, at)) {
+			starts[i] = at;
+			at += parts[i].text.length;
+			i++;
+		} else if (parts[i].hidden) {
+			starts[i] = null;
+			i++;
+		} else {
+			// The last hidden part taken as there is taken as missing, and read on from it.
+			let back = i - 1;
+			while (back >= 0 && !(parts[back].hidden && starts[back] !== null)) back--;
+			if (back < 0) return null;
+			starts[back] = null;
+			at = stood[back];
+			i = back + 1;
+		}
+	}
+	return starts;
 }
 
 // ── What a paste loses on the way in ──
@@ -709,6 +770,18 @@ export interface PasteNotes {
 const NOT_PAGE_TEXT = new Set(['script', 'style', 'title', 'template', 'noscript', 'textarea']);
 
 const withoutSpace = (text: string) => text.replace(/\s/g, '');
+
+/**
+ * Whether a paste's HTML holds words. Word and Excel copy their text as HTML and put a picture
+ * of the same text beside it; a browser copies a picture as the picture and an `<img>` with no
+ * words. So a paste that has both is words where its HTML has any, and a picture where not.
+ */
+export function pasteHasWords(html: string): boolean {
+	if (!html || typeof DOMParser === 'undefined') return false;
+	const body = new DOMParser().parseFromString(html, 'text/html').body;
+	for (const el of Array.from(body.querySelectorAll(Array.from(NOT_PAGE_TEXT).join(',')))) el.remove();
+	return (body.textContent ?? '').trim() !== '';
+}
 
 /**
  * Read from a paste's HTML what the browser's own paste may lose: null where it holds neither
@@ -756,11 +829,15 @@ export function pasteNotes(html: string): PasteNotes | null {
  * characters were the hidden ones. An element left with nothing in it goes too, where
  * `mayRemove` allows (a paragraph that was hidden whole would stay as an empty line in the
  * RTF). Returns whether anything was taken out.
+ *
+ * With null for `to`, the paste is one that Redo has put back, after its hidden text was taken
+ * out once. A browser then brings back some of that text and not the rest, so each hidden
+ * piece may be there or not; all the other text of the paste has to be, from `from` on.
  */
 export function removeWordHidden(
 	root: Element,
 	from: number,
-	to: number,
+	to: number | null,
 	notes: PasteNotes,
 	mayRemove?: (el: Element) => boolean
 ): boolean {
@@ -772,22 +849,21 @@ export function removeWordHidden(
 		const children = Array.from(node.childNodes);
 		for (let i = children.length - 1; i >= 0; i--) todo.push(children[i]);
 	}
-	const pasted = withoutSpace(texts.map((text) => text.data).join('')).slice(from, to);
+	const shown = withoutSpace(texts.map((text) => text.data).join(''));
 	// A browser may leave what is not displayed out of a paste, or bring it along.
 	for (const pieces of [notes.pieces, notes.pieces.filter((piece) => !piece.undisplayed)]) {
-		if (withoutSpace(pieces.map((piece) => piece.text).join('')) !== pasted) continue;
+		const parts = pieces.map((piece) => ({ text: withoutSpace(piece.text), hidden: piece.hidden })).filter((part) => part.text !== '');
+		if (to !== null && parts.map((part) => part.text).join('') !== shown.slice(from, to)) continue;
+		const starts = to === null ? partsPutBack(shown, from, parts) : partsInARow(from, parts);
+		if (starts === null) continue;
 		/** The hidden runs, as [first, after last] among the characters that are not white space. */
 		const runs: [number, number][] = [];
-		let at = from;
-		for (const piece of pieces) {
-			const length = withoutSpace(piece.text).length;
-			if (piece.hidden && length > 0) {
-				const last = runs[runs.length - 1];
-				if (last && last[1] === at) last[1] = at + length;
-				else runs.push([at, at + length]);
-			}
-			at += length;
-		}
+		parts.forEach((part, i) => {
+			if (!part.hidden || starts[i] === null) return;
+			const last = runs[runs.length - 1];
+			if (last && last[1] === starts[i]) last[1] = starts[i]! + part.text.length;
+			else runs.push([starts[i]!, starts[i]! + part.text.length]);
+		});
 		if (runs.length === 0) return false;
 		let index = 0;
 		let run = 0;

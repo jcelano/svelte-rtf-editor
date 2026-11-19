@@ -923,6 +923,33 @@ describe('sanitizeHtml: what a second review found', () => {
 			expect(root.innerHTML).toBe('<p>before </p><p>ab</p><p>after</p>');
 		});
 
+		it('takes them out again of a paste Redo put back, where only some of them came back', () => {
+			// (A browser's Redo brings back the text it put in itself, and leaves the text the
+			// editor emptied as it is: "HID ONE" is there again, "whole para" is not.)
+			const notes = pasteNotes('<p>one <span style="mso-hide:all">HID ONE</span> two</p><p style="mso-hide:all">whole para</p><p>three</p>')!;
+			const root = pasted('<p>before</p><p>one HID ONEtwo</p><p>three</p>');
+			expect(removeWordHidden(root, count('before'), null, notes)).toBe(true);
+			expect(root.innerHTML).toBe('<p>before</p><p>one two</p><p>three</p>');
+			// With none of them back there is nothing to take out, and nothing is.
+			expect(removeWordHidden(root, count('before'), null, notes)).toBe(false);
+			expect(root.innerHTML).toBe('<p>before</p><p>one two</p><p>three</p>');
+			// Text that is not that paste is left alone, though it begins as the paste does.
+			const other = pasted('<p>before</p><p>one HID ONE two</p><p>thirty</p>');
+			expect(removeWordHidden(other, count('before'), null, notes)).toBe(false);
+			expect(other.textContent).toBe('beforeone HID ONE twothirty');
+		});
+
+		it('reads a hidden word as missing where reading it as there does not fit what follows', () => {
+			// "ab" hidden, then "abc" shown: in "abc" the hidden word is not there, in "ababc" it is.
+			const notes = pasteNotes('<p><span style="mso-hide:all">ab</span>abc</p>')!;
+			const without = pasted('<p>abc</p>');
+			expect(removeWordHidden(without, 0, null, notes)).toBe(false);
+			expect(without.innerHTML).toBe('<p>abc</p>');
+			const along = pasted('<p>ababc</p>');
+			expect(removeWordHidden(along, 0, null, notes)).toBe(true);
+			expect(along.innerHTML).toBe('<p>abc</p>');
+		});
+
 		it('leaves one space where the hidden words stood between two, and takes a paragraph hidden whole', () => {
 			const notes = pasteNotes('<p>one <span style="mso-hide:all">HID ONE</span> two</p><p style="mso-hide:all">whole para</p><p>three</p>')!;
 			const root = pasted('<p>one HID ONE two</p><p>whole para</p><p>three</p>');
