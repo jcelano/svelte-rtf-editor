@@ -839,6 +839,32 @@ export function pasteHasWords(html: string): boolean {
 	return (body.textContent ?? '').trim() !== '';
 }
 
+/** A frame in a paste's HTML: `<iframe>`, and the `<frame>` of an older page. */
+const FRAME = /<i?frame[\s>/]/i;
+
+/**
+ * A paste's HTML without the frames in it, or null where it has none, which is nearly every
+ * paste.
+ *
+ * A frame is not kept in a document, and until 1.12.0 it was taken out after the browser had
+ * pasted it, with all else that is not safe. But a frame put in a page is a page being loaded,
+ * and Safari forgets every step it could undo when one is taken out again: after a paste that
+ * held a frame (a part of a web page with a video or an advertisement in it) nothing done
+ * before the paste could be undone, and after Undo and Redo of it, not the paste either. So a
+ * paste that holds a frame is put in by the editor, without it. Nothing of what is left is made
+ * safe here: that is done to what comes in, as to any paste.
+ */
+export function pasteWithoutFrames(html: string): string | null {
+	if (!FRAME.test(html) || typeof DOMParser === 'undefined') return null;
+	// (Parsed into a document of its own, where nothing is loaded and no script is run.)
+	const body = new DOMParser().parseFromString(html, 'text/html').body;
+	const frames = Array.from(body.querySelectorAll('iframe, frame, frameset'));
+	// (None after all: the letters were text, in a line of code or in a comment.)
+	if (frames.length === 0) return null;
+	for (const frame of frames) frame.remove();
+	return body.innerHTML;
+}
+
 /**
  * Read from a paste's HTML what the browser's own paste may lose: null where it holds neither
  * Word's hidden text nor a text box, which is nearly every paste.

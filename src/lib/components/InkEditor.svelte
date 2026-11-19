@@ -90,7 +90,7 @@
 	import Modal from './Modal.svelte';
 	import ImageOverlay from './ImageOverlay.svelte';
 	import { htmlToMarkdown, downloadFile } from '../utils.js';
-	import { keptMarks, pasteHasWords, pasteNotes, removeWordHidden, sanitizedNodes, sanitizeTree, type PasteNotes } from '../sanitize.js';
+	import { keptMarks, pasteHasWords, pasteNotes, pasteWithoutFrames, removeWordHidden, sanitizedNodes, sanitizeTree, type PasteNotes } from '../sanitize.js';
 	import { readRtfFile, DEFAULT_MAX_RTF_BYTES } from '../rtf-parser.js';
 	import {
 		htmlToRtf,
@@ -2466,9 +2466,18 @@
 			// that sends what is typed in it somewhere else, a frame showing another site.)
 			expectInsertion(draggedFromHere);
 			// What the browser may lose of it, as of a paste: it begins where it is dropped.
-			const notes = pasteNotes(e.dataTransfer?.getData?.('text/html') ?? '');
+			const dropped = e.dataTransfer?.getData?.('text/html') ?? '';
+			const notes = pasteNotes(dropped);
 			const at = notes ? rangeAtPoint(e.clientX, e.clientY) : null;
 			pastedLoss = notes && at && editorEl?.contains(at.startContainer) ? { notes, from: shownCharsBefore(at.startContainer, at.startOffset), dropped: true } : null;
+			// What holds a frame is put in here, without it (see pasteWithoutFrames).
+			const unframed = pasteWithoutFrames(dropped);
+			if (unframed !== null) {
+				e.preventDefault();
+				editorEl?.focus();
+				placeCaretAtPoint(e.clientX, e.clientY);
+				document.execCommand('insertHTML', false, unframed);
+			}
 			return;
 		}
 		e.preventDefault();
@@ -2751,6 +2760,12 @@
 				notes && start && editorEl.contains(start.startContainer)
 					? { notes, from: shownCharsBefore(start.startContainer, start.startOffset) }
 					: null;
+			// What holds a frame is put in here, without it (see pasteWithoutFrames).
+			const unframed = pasteWithoutFrames(html);
+			if (unframed !== null) {
+				e.preventDefault();
+				document.execCommand('insertHTML', false, unframed);
+			}
 		}
 	}
 

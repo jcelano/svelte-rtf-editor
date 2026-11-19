@@ -888,13 +888,44 @@ test.describe('what a third review found', () => {
 		await page.keyboard.press('ControlOrMeta+v');
 		await expect(page.locator(content)).toContainText('came in');
 		expect((await left(page)).risky).toEqual([]);
-		for (const redo of REDO_KEYS) {
+		// Twice with each key. (Safari forgot the paste after its first Redo: the frame the paste
+		// held was put back and taken out again, and with a frame goes all that could be undone.
+		// On a Mac, where there is one key for Redo, it was done once and that was not seen.)
+		for (const redo of [...REDO_KEYS, ...REDO_KEYS]) {
 			await page.keyboard.press('ControlOrMeta+z');
 			await expect(page.locator(content)).not.toContainText('came in');
 			await page.keyboard.press(redo);
 			await expect(page.locator(content)).toContainText('came in');
 			expect(await left(page), redo).toEqual({ risky: [], overPosition: 'static', overColor: 'red' });
 		}
+	});
+
+	test('a paste that holds a frame leaves what was done before it to be undone', async ({ page, browserName }) => {
+		// (In Safari the words typed before such a paste could not be taken back after it.)
+		await open(page, { content: '<p>Body</p>' });
+		await page.evaluate(async (markup) => {
+			await navigator.clipboard.write([new ClipboardItem({ 'text/html': new Blob([markup], { type: 'text/html' }) })]);
+		}, '<p>came in</p><iframe src="https://example.com/frame"></iframe>');
+		await page.click(`${content} p`);
+		await page.keyboard.press(LINE_END);
+		await page.keyboard.type(' typed');
+		await expect(page.locator(content)).toContainText('Body typed');
+		// (A pause, as a writer makes one: keys pressed at once are one step to a browser.)
+		await page.waitForTimeout(700);
+		await page.keyboard.press('ControlOrMeta+v');
+		await expect(page.locator(content)).toContainText('came in');
+		expect(await page.locator(`${content} iframe`).count()).toBe(0);
+		await page.keyboard.press('ControlOrMeta+z');
+		await expect(page.locator(content)).not.toContainText('came in');
+		// (Safari's engine may take the step before a paste back with it, whatever is pasted.)
+		if (browserName !== 'webkit') await expect(page.locator(content)).toContainText('Body typed');
+		// And the words typed before it can still be taken back.
+		await expect
+			.poll(async () => {
+				await page.keyboard.press('ControlOrMeta+z');
+				return page.locator(content).textContent();
+			})
+			.toBe('Body');
 	});
 
 	/** Paste markup at the end of the first paragraph, and give the document as it then is. */
