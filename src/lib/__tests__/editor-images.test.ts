@@ -38,15 +38,16 @@ function contentEl(): HTMLElement {
 }
 
 /** Fire a paste carrying image files, the way a browser delivers a screenshot. */
-function pasteFiles(files: File[]): void {
+function pasteFiles(files: File[], html = ''): Event {
 	const event = new Event('paste', { bubbles: true, cancelable: true });
 	Object.defineProperty(event, 'clipboardData', {
 		value: {
 			items: files.map((file) => ({ kind: 'file', type: file.type, getAsFile: () => file })),
-			getData: () => ''
+			getData: (type: string) => (type === 'text/html' ? html : '')
 		}
 	});
 	contentEl().dispatchEvent(event);
+	return event;
 }
 
 /** Fire a drop carrying image files, the way a file drag from the desktop arrives. */
@@ -153,6 +154,25 @@ describe('InkEditor image insertion', () => {
 
 		expect(defaultPrevented).toBe(true); // the browser must not navigate to the file
 		expect(editor.getHTML().match(/<figure/g)?.length).toBe(2);
+	});
+
+	it('pastes the words, not the picture of them, where a copy carries both', async () => {
+		// (Word copies text as HTML with a picture of the same text beside it, and Chromium hands
+		// over both: the text went in as a picture of it.)
+		const word =
+			"<html><head><style>p.MsoNormal{margin:0in}</style></head><body><!--StartFragment--><p class=MsoNormal>Margins are clear.</p><!--EndFragment--></body></html>";
+		const event = pasteFiles([pngFile('picture-of-the-words.png')], word);
+		await settle();
+		// The paste is left to the browser, which puts the words in.
+		expect(event.defaultPrevented).toBe(false);
+		expect(editor.getHTML()).not.toContain('<figure');
+	});
+
+	it('still pastes a picture that comes with HTML that has no words: a picture copied in a browser', async () => {
+		const event = pasteFiles([pngFile('scan.png')], '<meta charset="utf-8"><img src="https://example.com/scan.png" alt="">');
+		await settle();
+		expect(event.defaultPrevented).toBe(true);
+		expect(editor.getHTML()).toContain('<figure');
 	});
 
 	it('ignores drops that carry no images', async () => {

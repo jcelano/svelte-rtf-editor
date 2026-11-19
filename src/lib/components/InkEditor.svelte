@@ -64,6 +64,10 @@
 	 *   focus()        — Focuses the editor.
 	 *   exportFile(format) — Downloads as 'html', 'md', or 'rtf'.
 	 *   importRtf()    — Opens the file picker to import an RTF file.
+	 *   setFontSize(points) — Sets the size of the selected text, or of what is typed next.
+	 *   clearFormatting()   — Takes bold, italic, underline, strike, color, size and font off
+	 *                    the selected text. Headings, lists, links, alignment, indents and
+	 *                    the application's own marks stay.
 	 */
 
 	import { onMount } from 'svelte';
@@ -71,7 +75,7 @@
 	import Modal from './Modal.svelte';
 	import ImageOverlay from './ImageOverlay.svelte';
 	import { htmlToMarkdown, downloadFile } from '../utils.js';
-	import { keptMarks, pasteNotes, removeWordHidden, sanitizedNodes, sanitizeTree, type PasteNotes } from '../sanitize.js';
+	import { keptMarks, pasteHasWords, pasteNotes, removeWordHidden, sanitizedNodes, sanitizeTree, type PasteNotes } from '../sanitize.js';
 	import { readRtfFile, DEFAULT_MAX_RTF_BYTES } from '../rtf-parser.js';
 	import {
 		htmlToRtf,
@@ -144,6 +148,9 @@
 	 * and the RTF then carries the empty paragraph as a blank line the screen never showed.
 	 */
 	const EMPTY_DOCUMENT = '<p><br></p>';
+
+	/** The kinds of block the toolbar's list offers. */
+	const BLOCK_CHOICES = new Set(['p', 'h1', 'h2', 'h3', 'blockquote', 'pre']);
 
 	/** The sizes, in points, the toolbar's size list offers unless `fontSizes` says otherwise. */
 	const DEFAULT_FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36];
@@ -235,8 +242,14 @@
 		if (editorEl) {
 			selectedImage = null;
 			documentReplaced();
-			showDocument(html);
+			const shown = showDocument(html);
 			updateCounts();
+			if (!shown) {
+				// The caller is told, and the editor is empty: see showDocument.
+				dropDraft();
+				showError(NOT_SHOWN);
+				throw new Error(`InkEditor.setHTML: ${NOT_SHOWN.toLowerCase()}`);
+			}
 			if (autosave) scheduleAutoSave();
 		}
 	}
@@ -245,20 +258,168 @@
 	 * Put HTML from outside in the editor: made safe first, and with a line in every empty
 	 * paragraph, so it shows as the blank line the RTF writes for it. The nodes that were checked
 	 * are the nodes shown (see sanitizedNodes): the HTML is read once.
+	 *
+	 * Returns whether the document is shown. If it could not be made safe it is not shown, and
+	 * neither is the one before it: the editor is left empty. (A failure here used to go up to
+	 * whoever called. Given as `content`, there was then no editor at all; given to setHTML, the
+	 * document before stayed on the screen, where it read as the one just asked for: one
+	 * patient's report under another's name.)
 	 */
-	function showDocument(html: string): void {
-		if (!editorEl) return;
+	function showDocument(html: string): boolean {
+		if (!editorEl) return false;
 		// An id the page already uses outside an editor is not the document's to take: see
 		// sanitize.ts. (Another editor on the page may hold a document with the same ids.)
 		const idTaken = (id: string) => {
 			const owner = document.getElementById(id);
 			return owner !== null && owner.closest('.ink-content') === null;
 		};
-		editorEl.replaceChildren(...sanitizedNodes(html, document, idTaken, keptNames));
+		let nodes: Node[] | null = null;
+		try {
+			nodes = sanitizedNodes(html, document, idTaken, keptNames, partLeftOut);
+		} catch {
+			// Not shown: see above.
+		}
+		if (nodes === null) editorEl.innerHTML = EMPTY_DOCUMENT;
+		else editorEl.replaceChildren(...nodes);
 		for (const p of Array.from(editorEl.querySelectorAll('p'))) {
 			if (p.childNodes.length === 0) p.appendChild(document.createElement('br'));
 		}
+		return nodes !== null;
 	}
+
+	/** Said when a document could not be made safe, and so is not shown. */
+	const NOT_SHOWN = 'This document could not be shown';
+
+	/**
+	 * Said when one element could not be checked and was taken out, with what was in it, while
+	 * the rest was. (It went without a word: a part of a report gone, and nobody told.)
+	 */
+	const PART_LEFT_OUT = 'A part of this could not be checked, so that part was left out';
+	const partLeftOut = () => showError(PART_LEFT_OUT);
+
+	// ── What the browser brings in, and puts back ──
+	// Markup reaches the document in more ways than setHTML and a paste: it is dragged in, and
+	// Undo and Redo put back what the browser remembers of a paste, not what the editor made of
+	// it. Redo brings back the frame or the form that was taken out, as an element the editor has
+	// not seen. It also writes the style it first gave an element back on that element, which
+	// the editor has seen and made safe: "position: fixed" was on it again, over the page. So
+	// there is no element that, checked once, need not be looked at again: after Undo or Redo
+	// the whole document is checked, as it is when it is first shown.
+
+	/**
+	 * Make safe the elements `only` accepts. If that cannot be done at all, they are taken out:
+	 * what could not be checked does not stay. Returns whether it could be done.
+	 */
+	function makeSafe(only: (el: Element) => boolean): boolean {
+		if (!editorEl) return true;
+		try {
+			sanitizeTree(editorEl, only, undefined, keptNames, wordsLeftFor, partLeftOut);
+			return true;
+		} catch {
+			for (const el of Array.from(editorEl.querySelectorAll('*'))) {
+				if (el.isConnected && only(el)) el.remove();
+			}
+			return false;
+		}
+	}
+
+	/**
+	 * Make the whole document safe again: after Undo or Redo, and after a paste or a drop the
+	 * editor was not told of. What a paste was tidied of, Redo also puts back, and it is taken
+	 * off again. A document that cannot be checked is not shown, as in showDocument, and the
+	 * draft is left as it was last kept: that one was checked, and it is the writer's work.
+	 * Returns whether the document is shown.
+	 */
+	function checkDocument(): boolean {
+		if (!editorEl) return true;
+		try {
+			sanitizeTree(editorEl, undefined, undefined, keptNames, wordsLeftFor, partLeftOut);
+		} catch {
+			editorEl.innerHTML = EMPTY_DOCUMENT;
+			documentReplaced();
+			clearTimeout(saveTimer);
+			showError(NOT_SHOWN);
+			return false;
+		}
+		// (Only where the style is not the one it was left with: each of these is measured.)
+		tidySpacing(
+			(el) => broughtIn.has(el) && broughtIn.get(el)!.style !== el.getAttribute('style'),
+			(el) => broughtIn.get(el)?.own ?? false
+		);
+		return true;
+	}
+
+	/**
+	 * The words left in the document where an element was taken out of it: a button's, a text
+	 * box's. The browser's history knows nothing of them. Undo takes the paste out and leaves
+	 * them, and Redo puts the button back beside them, to be taken out again: its words were
+	 * then in the document twice, and three times after the next Redo. So where an element comes
+	 * back whose words are still there as they were left, those go, and the ones just left in
+	 * its place stay.
+	 *
+	 * (The elements are held here, not looked up in a WeakMap. An element that is out of the
+	 * document, with nothing but the browser's history holding it, is given a new object by
+	 * WebKit when it comes back: a WeakMap had forgotten it, and Safari had the words twice.
+	 * The history holds the elements as long anyway; these go when the document is replaced.)
+	 */
+	const wordsLeft = new Map<Element, { node: Text; text: string }>();
+
+	function wordsLeftFor(el: Element, node: Text): void {
+		const earlier = wordsLeft.get(el);
+		// (Words that have been typed in since are the writer's own, and stay.)
+		if (earlier && earlier.node !== node && earlier.node.isConnected && earlier.node.data === earlier.text) earlier.node.remove();
+		wordsLeft.set(el, { node, text: node.data });
+		leftNow?.push(el);
+	}
+
+	/**
+	 * Each paste or drop that left such words, with the elements it brought that stayed. Undo of
+	 * the paste takes those elements out and knows nothing of the words: they stayed in the
+	 * report, words of a paste the writer had taken back. So where an Undo has just taken out
+	 * every element a paste brought, the words it left go too, if they are still as they were
+	 * left. (A paste that brought words and no element that stayed has nothing to be known by,
+	 * and its words do stay.)
+	 */
+	const pastesWithWords: { stayed: Element[]; left: Element[]; there: boolean }[] = [];
+	/** The elements the paste being made safe has left words for. */
+	let leftNow: Element[] | null = null;
+
+	function followPastes(undone: boolean): void {
+		for (const paste of pastesWithWords) {
+			const there = paste.stayed.some((el) => el.isConnected);
+			if (undone && paste.there && !there) {
+				for (const el of paste.left) {
+					const words = wordsLeft.get(el);
+					if (words?.node.isConnected && words.node.data === words.text) words.node.remove();
+				}
+			}
+			paste.there = there;
+		}
+	}
+
+	/**
+	 * Each paste Word's hidden text was taken out of, with the elements that were left empty
+	 * and went with it. Redo puts the paste back much as the browser first made it: some of the
+	 * hidden words shown again, and those elements empty. Where the text there is once more that
+	 * paste, the words are taken out again (see removeWordHidden), and the elements with them.
+	 */
+	const hiddenTaken: { notes: PasteNotes; from: number; came: Set<Element>; emptied: Element[] }[] = [];
+
+	function hideAgain(): void {
+		for (const paste of hiddenTaken) {
+			takeHidden(paste.from, null, paste.notes, (el) => paste.came.has(el));
+			const sel = window.getSelection();
+			for (const el of paste.emptied) {
+				if (!el.isConnected || el.childNodes.length > 0) continue;
+				// (Not the one the caret is in: see takeHidden.)
+				if (sel?.anchorNode && el.contains(sel.anchorNode)) el.appendChild(document.createElement('br'));
+				else el.remove();
+			}
+		}
+	}
+
+	/** Said when what came in could not be made safe, and so was taken out again. */
+	const LEFT_OUT = 'What was put in could not be checked, so it was left out';
 
 	export function getMarkdown(): string {
 		if (!editorEl) return '';
@@ -287,10 +448,8 @@
 			selectedImage = null;
 			documentReplaced();
 			editorEl.innerHTML = EMPTY_DOCUMENT;
-			clearTimeout(saveTimer);
-			try { localStorage.removeItem(storageKey); } catch (e) {}
+			dropDraft();
 			updateCounts();
-			lastSaved = '';
 			fireChange();
 		}
 	}
@@ -334,6 +493,14 @@
 		indentUndo = [];
 		pastedOver = null;
 		pastedLoss = null;
+		// (A selection kept from the document before points at nothing in the new one.)
+		savedSelection = null;
+		dialogSelection = null;
+		wordsLeft.clear();
+		broughtIn.clear();
+		pastesWithWords.length = 0;
+		hiddenTaken.length = 0;
+		clearUndo = clearRedo = clearPast = null;
 		stopCopyFormat();
 	}
 
@@ -352,19 +519,76 @@
 	});
 
 	// ── Selection helpers ──
-	function saveSelection(): void {
+	/** Whether what is selected now, or the caret, is in the document. */
+	function selectionInEditor(): boolean {
 		const sel = window.getSelection();
-		if (sel && sel.rangeCount > 0) {
-			savedSelection = sel.getRangeAt(0).cloneRange();
-		}
+		return !!editorEl && !!sel && sel.rangeCount > 0 && editorEl.contains(sel.anchorNode) && editorEl.contains(sel.focusNode);
 	}
 
+	/**
+	 * Keep the selection, to put back when a dialog closes. Only one in the document is kept:
+	 * with something on the page around the editor selected, the one kept is still the last one
+	 * that was in the document. (That one was kept in its place, and could not be put back: the
+	 * link made from the toolbar then went to the top of the document, as its own address.)
+	 */
+	function saveSelection(): void {
+		if (!selectionInEditor()) return;
+		savedSelection = window.getSelection()!.getRangeAt(0).cloneRange();
+	}
+
+	/**
+	 * Put the selection back in the document, where it has left it: a dialog or a list of the
+	 * toolbar took the keyboard. Where the selection is in the document, that is the one to act
+	 * on, and it is left alone. (The kept one was put back every time, and it was kept only when a
+	 * dialog opened or a picture went in: after one link, Bold and every other button changed
+	 * the words of that link, whatever was selected by then.)
+	 */
 	function restoreSelection(): void {
-		if (savedSelection) {
-			const sel = window.getSelection();
-			sel?.removeAllRanges();
-			sel?.addRange(savedSelection);
+		if (selectionInEditor()) return;
+		select(savedSelection);
+	}
+
+	/** Select a range kept earlier, if it is still in the document. Returns whether it was. */
+	function select(kept: Range | null): boolean {
+		if (!kept || !editorEl?.contains(kept.startContainer) || !editorEl.contains(kept.endContainer)) return false;
+		const sel = window.getSelection();
+		sel?.removeAllRanges();
+		sel?.addRange(kept);
+		return true;
+	}
+
+	/**
+	 * The selection a dialog was opened on, kept apart from the one that follows the document's.
+	 * (That one moves when the dialog closes: the browser gives the document the keyboard back
+	 * with a caret of its own at the top, and a picture that was still being read went in there,
+	 * not where the writer had been.)
+	 */
+	let dialogSelection: Range | null = null;
+
+	function keepForDialog(): void {
+		saveSelection();
+		dialogSelection = savedSelection?.cloneRange() ?? null;
+	}
+
+	/** Put back the selection a dialog was opened on, or failing that the last one in the document. */
+	function restoreFor(dialog: Range | null): void {
+		if (!select(dialog)) restoreSelection();
+	}
+
+	/**
+	 * Keep the selection whenever it changes in the document, so the one put back is the last one
+	 * there. (Kept in the one Range, moved along: a new Range for every key pressed would be a
+	 * thousand of them for the browser to keep up to date with the text.)
+	 */
+	function trackSelection(): void {
+		if (!selectionInEditor()) return;
+		const range = window.getSelection()!.getRangeAt(0);
+		if (!savedSelection) {
+			savedSelection = range.cloneRange();
+			return;
 		}
+		savedSelection.setStart(range.startContainer, range.startOffset);
+		savedSelection.setEnd(range.endContainer, range.endOffset);
 	}
 
 	// ── Font size ──
@@ -542,6 +766,10 @@
 
 	// ── Exec command ──
 	function exec(cmd: string, value: string | null = null): void {
+		if (cmd === 'removeFormat') {
+			clearFormatting();
+			return;
+		}
 		restoreSelection();
 		editorEl?.focus();
 		// Color commands require an actual text selection — a collapsed cursor
@@ -559,10 +787,294 @@
 			hangAtCaret();
 			return;
 		}
-		if (cmd === 'undo' && undoIndent()) return;
+		if (cmd === 'undo' && (undoIndent() || undoClear())) return;
+		if (cmd === 'redo' && redoClear()) return;
 		document.execCommand(cmd, false, value ?? undefined);
 		if (cmd === 'undo' || cmd === 'redo') afterHistory();
 		updateToolbarState();
+	}
+
+	// ── Clear formatting ──
+	// The browser's own command does this, and each browser does it differently. Chromium and
+	// Safari take a paragraph's alignment and first-line indent with its color; Firefox leaves
+	// the color on the paragraph, and takes out the element an application's mark is on; Safari
+	// leaves a size where it is. So the command is used for what only it can do, which is to
+	// take the <b>, <i> and <font> elements out with an entry in the browser's own history
+	// (taken out by the editor instead, the next Undo in Safari empties the document). What is
+	// written on the elements is the editor's to change: before the command, the looks of the
+	// text are taken off every element whose text is all selected, and after it, whatever the
+	// command took off that is not a look of the text is written back.
+
+	/** What is written on an element for the looks of its text. */
+	const CHARACTER_STYLES = [
+		'color', 'background', 'background-color', 'font', 'font-family', 'font-size', 'font-weight', 'font-style',
+		'font-variant', 'font-stretch', 'text-decoration', 'text-decoration-line', 'text-decoration-color',
+		'text-decoration-style', 'text-decoration-thickness', 'letter-spacing', 'text-transform', 'text-shadow',
+		'vertical-align', '-webkit-text-stroke-width', '-webkit-text-fill-color'
+	];
+	const isLook = (prop: string) =>
+		CHARACTER_STYLES.includes(prop) || /^(font|text-decoration|background|-webkit-text)-/.test(prop);
+	/** In a table these are the table's design, not the looks of its text. */
+	const TABLE_PARTS = 'table, thead, tbody, tfoot, tr, td, th, col, colgroup';
+	const TABLE_DESIGN = new Set(['background', 'background-color', 'vertical-align']);
+	/** The attributes that carry looks: `style`, and on a <font> its own. */
+	const LOOKS = ['style', 'color', 'size', 'face'] as const;
+	type Looks = Record<(typeof LOOKS)[number], string | null>;
+
+	/** One Clear formatting: what was written on each element before and after, to put back. */
+	interface ClearStep {
+		before: Map<Element, Looks>;
+		after: Map<Element, Looks>;
+		/** The browser's command changed something, and has an entry in its history. */
+		native: boolean;
+		/** The document as the editor handed it to the command: where the browser's Undo of the command leads back to. */
+		pre: string;
+		/** The document as the step left it. */
+		cleared: string;
+		/** The document as it is now, the step done or undone: it is undone, or redone, only from there. */
+		html: string;
+	}
+	let clearUndo: ClearStep | null = null;
+	let clearRedo: ClearStep | null = null;
+	/** The last one made, also after more was typed: the browser's Undo may yet lead back to it. */
+	let clearPast: ClearStep | null = null;
+	/** The input events of the editor's own commands, while it clears: what they leave is not yet the document. */
+	let clearing = false;
+
+	/**
+	 * After the browser's own Undo. A Clear formatting is the editor's to undo only while nothing
+	 * else has been done. After that the browser undoes its command with everything else, and
+	 * knows nothing of what the editor took off the elements: bold was back, and the color was
+	 * not. Where its Undo has led back to the document as the command was given it, the rest is
+	 * put back here. A step the command left nothing of (a paragraph's color and no more) has no
+	 * such place to be led back to: it is the editor's to undo again once the document is as
+	 * that step left it, which is when what was typed after it has been undone.
+	 */
+	function afterUndoOfClear(): void {
+		const step = clearPast;
+		if (!step || !editorEl || clearing) return;
+		const now = editorEl.innerHTML;
+		if (step.native && step.pre !== step.cleared) {
+			if (now !== step.pre) return;
+			writeLooks(step.before);
+			clearUndo = null;
+			clearRedo = { ...step, html: editorEl.innerHTML };
+		} else if (now === step.cleared) {
+			clearUndo = { ...step, html: now };
+		}
+	}
+
+	const looksOf = (el: Element): Looks => ({
+		style: el.getAttribute('style'),
+		color: el.getAttribute('color'),
+		size: el.getAttribute('size'),
+		face: el.getAttribute('face')
+	});
+
+	function writeLooks(looks: Map<Element, Looks>): void {
+		for (const [el, wanted] of looks) {
+			if (!el.isConnected) continue;
+			for (const name of LOOKS) {
+				if (el.getAttribute(name) === wanted[name]) continue;
+				if (wanted[name] === null) el.removeAttribute(name);
+				else el.setAttribute(name, wanted[name]);
+			}
+		}
+	}
+
+	/** Whether all the text of an element is selected. (One with no text is, if it is in the selection.) */
+	function allSelected(range: Range, el: Element): boolean {
+		const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+		for (let text = walker.nextNode() as Text | null; text; text = walker.nextNode() as Text | null) {
+			if (text.data === '') continue;
+			if (range.comparePoint(text, 0) !== 0 || range.comparePoint(text, text.data.length) !== 0) return false;
+		}
+		return true;
+	}
+
+	/**
+	 * A <span> that is there for the looks of its text and nothing else. The command takes such
+	 * a one out whole, in every browser, and its Undo puts it back as it was: it is left to it.
+	 */
+	function onlyLooks(el: HTMLElement): boolean {
+		return el.tagName === 'SPAN' && el.attributes.length === 1 && el.style.length > 0 && Array.from(el.style).every(isLook);
+	}
+
+	/** An element that says something of its text other than how it looks: a mark of the application's, a tab. */
+	function isMark(el: HTMLElement): boolean {
+		return (
+			Array.from(el.attributes).some((attr) => !(LOOKS as readonly string[]).includes(attr.name)) ||
+			Array.from(el.style).some((prop) => !isLook(prop))
+		);
+	}
+
+	/** Take the looks of its text off one element: the element stays, and so does its layout. */
+	function plain(el: HTMLElement): void {
+		const tablePart = el.matches(TABLE_PARTS);
+		for (const prop of [...CHARACTER_STYLES, ...Array.from(el.style).filter(isLook)]) {
+			if (tablePart && TABLE_DESIGN.has(prop)) continue;
+			el.style.removeProperty(prop);
+		}
+		if (!el.getAttribute('style')) el.removeAttribute('style');
+		if (el.tagName === 'FONT') for (const name of ['color', 'size', 'face']) el.removeAttribute(name);
+	}
+
+	/**
+	 * Take the formatting off the selected text: bold, italic, underline, strike, color, size and
+	 * font, wherever it is written. What the text is stays: a heading is still a heading, a list
+	 * a list, a link a link, and a paragraph keeps its alignment and its indents. So do the
+	 * marks the application named (keepAttributes, keepClasses). Undo puts it back.
+	 */
+	export function clearFormatting(): void {
+		if (readonly || !editorEl) return;
+		restoreSelection();
+		editorEl.focus();
+		const sel = window.getSelection();
+		if (!sel || sel.rangeCount === 0 || !selectionInEditor()) return;
+		if (sel.isCollapsed) {
+			// At a caret there is nothing to clear but what was chosen for the words typed next.
+			pendingSize = null;
+			document.execCommand('removeFormat');
+			updateToolbarState();
+			return;
+		}
+		// The document changes outside an input event: earlier indent steps no longer undo.
+		indentUndo = [];
+		const range = sel.getRangeAt(0);
+		const touched = Array.from(editorEl.querySelectorAll<HTMLElement>('*')).filter((el) => range.intersectsNode(el));
+		const before = new Map(touched.map((el) => [el, looksOf(el)]));
+		const whole = touched.filter((el) => allSelected(range, el));
+		for (const el of whole) if (!onlyLooks(el)) plain(el);
+		const wanted = new Map(touched.map((el) => [el, el.getAttribute('style')]));
+		const html = editorEl.innerHTML;
+		// An element that says something of its text other than how it looks is not there for the
+		// command to take out: it is the application's mark, or the space a tab takes. Safari
+		// takes out a <span> that has nothing but a style, and Firefox every <span> there is; and
+		// where only some words of a mark are selected, Firefox cuts the mark in two around them.
+		// So each such element is marked for the command as one to keep, which is enough for
+		// Safari; and where one is taken out or cut all the same, the command is taken back and
+		// done again with those elements closed to it. (What is bold inside one of them then
+		// stays bold.)
+		const marks = new Map(touched.filter(isMark).map((el) => [el, el.textContent]));
+		const kept = Array.from(marks.keys());
+		const selected = range.cloneRange();
+		clearing = true;
+		try {
+			let closed = spansAreTakenOut ? kept.filter((el) => el.tagName === 'SPAN') : [];
+			removeFormat(selected, kept, closed);
+			const lost = kept.filter((el) => !el.isConnected || el.textContent !== marks.get(el));
+			if (lost.length > 0) {
+				document.execCommand('undo');
+				if (lost.some((el) => el.tagName === 'SPAN')) spansAreTakenOut = true;
+				closed = Array.from(new Set([...closed, ...lost])).filter((el) => el.isConnected);
+				removeFormat(selected, kept.filter((el) => el.isConnected), closed);
+			}
+		} finally {
+			clearing = false;
+		}
+		const native = editorEl.innerHTML !== html;
+		// What the command took off that is not a look of the text goes back on.
+		const probe = document.createElement('span');
+		for (const el of touched) {
+			if (!el.isConnected) continue;
+			probe.setAttribute('style', wanted.get(el) ?? '');
+			for (const prop of Array.from(probe.style)) {
+				if (isLook(prop) && !(el.matches(TABLE_PARTS) && TABLE_DESIGN.has(prop))) continue;
+				const value = probe.style.getPropertyValue(prop);
+				if (el.style.getPropertyValue(prop) !== value) el.style.setProperty(prop, value, probe.style.getPropertyPriority(prop));
+			}
+			if (!el.getAttribute('style')) el.removeAttribute('style');
+		}
+		// (And a <span> left to the command that it did not take out after all.)
+		for (const el of whole) if (el.isConnected) plain(el);
+		const after = new Map(touched.map((el) => [el, looksOf(el)]));
+		const changed = native || touched.some((el) => LOOKS.some((name) => before.get(el)![name] !== after.get(el)![name]));
+		const cleared = editorEl.innerHTML;
+		clearUndo = clearPast = changed ? { before, after, native, pre: html, cleared, html: cleared } : null;
+		clearRedo = null;
+		updateToolbarState();
+		if (!changed) return;
+		fireChange();
+		if (autosave) scheduleAutoSave();
+	}
+
+	/** Whether this browser's command has been seen to take out a <span> that was to stay. */
+	let spansAreTakenOut = false;
+	/** Written on an element while the command runs, so that it is not one with only a style. */
+	const KEEP_MARK = 'data-ink-keep';
+
+	/**
+	 * The browser's command on what was selected, with the elements in `kept` marked to stay and
+	 * those in `closed` out of its reach. Where the selection begins or ends inside a closed
+	 * element, the command would do nothing at all: it is given the part outside it.
+	 */
+	function removeFormat(selected: Range, kept: HTMLElement[], closed: HTMLElement[]): void {
+		const selection = window.getSelection();
+		if (!selection) return;
+		if (closed.length > 0 && selected.startContainer.isConnected && selected.endContainer.isConnected) {
+			const outside = selected.cloneRange();
+			for (const el of closed) {
+				if (el.contains(outside.startContainer)) outside.setStartAfter(el);
+				if (el.contains(outside.endContainer)) outside.setEndBefore(el);
+			}
+			if (outside.collapsed) return;
+			selection.removeAllRanges();
+			selection.addRange(outside);
+		}
+		const was = closed.map((el) => el.getAttribute('contenteditable'));
+		for (const el of kept) el.setAttribute(KEEP_MARK, '');
+		for (const el of closed) el.setAttribute('contenteditable', 'false');
+		document.execCommand('removeFormat');
+		// (Also off the copy the command makes of an element it cuts in two.)
+		for (const el of [...kept, ...Array.from(editorEl?.querySelectorAll(`[${KEEP_MARK}]`) ?? [])]) el.removeAttribute(KEEP_MARK);
+		closed.forEach((el, i) => {
+			if (was[i] === null) el.removeAttribute('contenteditable');
+			else el.setAttribute('contenteditable', was[i]!);
+		});
+	}
+
+	/** Undo the last Clear formatting, if nothing has changed since. */
+	function undoClear(): boolean {
+		const step = clearUndo;
+		clearUndo = null;
+		if (!step || !editorEl || editorEl.innerHTML !== step.html) return false;
+		clearing = true;
+		try {
+			if (step.native) document.execCommand('undo');
+		} finally {
+			clearing = false;
+		}
+		writeLooks(step.before);
+		// (Safari may take the step before back with it, and that may be a change of size.)
+		afterHistory();
+		clearRedo = { ...step, html: editorEl.innerHTML };
+		clearChanged();
+		return true;
+	}
+
+	/** Do it again, if nothing has changed since it was undone. */
+	function redoClear(): boolean {
+		const step = clearRedo;
+		clearRedo = null;
+		if (!step || !editorEl || editorEl.innerHTML !== step.html) return false;
+		// (In the order it was done: the command read the elements as the editor had left them.)
+		writeLooks(step.after);
+		clearing = true;
+		try {
+			if (step.native) document.execCommand('redo');
+		} finally {
+			clearing = false;
+		}
+		writeLooks(step.after);
+		clearUndo = { ...step, html: editorEl.innerHTML };
+		clearChanged();
+		return true;
+	}
+
+	function clearChanged(): void {
+		updateToolbarState();
+		fireChange();
+		if (autosave) scheduleAutoSave();
 	}
 
 	// ── Indent ──
@@ -1151,8 +1663,7 @@
 
 		const block = document.queryCommandValue('formatBlock');
 		const normalized = block.replace(/[<>]/g, '').toLowerCase();
-		const map: Record<string, string> = { h1: 'h1', h2: 'h2', h3: 'h3', blockquote: 'blockquote', pre: 'pre', p: 'p' };
-		currentBlock = map[normalized] || 'p';
+		currentBlock = BLOCK_CHOICES.has(normalized) ? normalized : 'p';
 
 		updateCounts();
 	}
@@ -1209,8 +1720,9 @@
 	// ── Auto-save ──
 	let saveTimer: ReturnType<typeof setTimeout> | undefined;
 
-	function autoSaveNow(): void {
-		if (!editorEl || !autosave) return;
+	/** Keep the draft in the browser's storage. */
+	function keepDraft(): void {
+		if (!editorEl) return;
 		try {
 			localStorage.setItem(storageKey, editorEl.innerHTML);
 			lastSaved = `Saved ${new Date().toLocaleTimeString()}`;
@@ -1220,6 +1732,35 @@
 			// fires so the host app can persist the content itself.
 			lastSaved = 'Too large to auto-save in this browser';
 		}
+	}
+
+	/**
+	 * Forget the draft, and the save that was waiting. (A document that could not be shown left
+	 * the draft of the one before it: opened again, the editor showed that one, the report of
+	 * the patient before.)
+	 */
+	function dropDraft(): void {
+		clearTimeout(saveTimer);
+		try { localStorage.removeItem(storageKey); } catch (e) {}
+		lastSaved = '';
+	}
+
+	function autoSaveNow(): void {
+		if (!editorEl || !autosave) return;
+		keepDraft();
+		onsave?.({ html: editorEl.innerHTML });
+	}
+
+	/**
+	 * Ctrl+S: onsave, whether or not drafts are kept. (It went through the auto-save, which does
+	 * nothing where `autosave` is off. Since that is the default, the key was taken from the
+	 * browser and nothing was saved anywhere: an application that saves from onsave saved nothing.)
+	 */
+	function saveNow(): void {
+		if (!editorEl) return;
+		// The save that was waiting is this one.
+		clearTimeout(saveTimer);
+		if (autosave) keepDraft();
 		onsave?.({ html: editorEl.innerHTML });
 	}
 
@@ -1228,18 +1769,38 @@
 		saveTimer = setTimeout(autoSaveNow, 1000);
 	}
 
+	/** The kinds of input event that put markup from somewhere else into the document. */
+	const MARKUP_FROM_OUTSIDE = new Set(['insertFromPaste', 'insertFromPasteAsQuotation', 'insertFromDrop', 'insertFromYank']);
+
 	// ── Input handler ──
 	function handleInput(e?: Event): void {
 		placeCopySourceBox();
-		if (pastedOver) {
+		const kind = (e as InputEvent | undefined)?.inputType ?? '';
+		const history = kind === 'historyUndo' || kind === 'historyRedo';
+		// (Words dragged from one place in the document to another are first taken out where
+		// they were, which is an input event of its own: what was dropped has not come in yet.)
+		let shown = true;
+		if (pastedOver && kind !== 'deleteByDrag') {
 			tidyPasted(pastedOver);
 			pastedOver = null;
+		} else if (history || MARKUP_FROM_OUTSIDE.has(kind)) {
+			// Undo and Redo put back what the browser remembers, not what the editor made of it:
+			// Redo after a paste brings back the frame that was taken out of the paste, the
+			// style that was taken off what stayed, and Word's hidden text as words. And a drop
+			// or a paste the editor was not told of is still a drop or a paste.
+			if (kind === 'historyRedo') hideAgain();
+			shown = checkDocument();
 		}
+		followPastes(kind === 'historyUndo');
 		indentUndo = [];
-		const kind = (e as InputEvent | undefined)?.inputType ?? '';
-		if (kind === 'historyUndo' || kind === 'historyRedo') {
-			afterHistory();
+		if (history) {
+			// (Not in the middle of a Clear formatting or of its Undo: the sizes are then not
+			// yet back on the elements. And what the editor puts back first, for the same reason.)
+			if (kind === 'historyUndo') afterUndoOfClear();
+			if (!clearing) afterHistory();
 		} else {
+			// (And a Clear formatting before this edit is the browser's to undo from here on.)
+			clearUndo = clearRedo = null;
 			// An edit: what was undone can no longer be redone.
 			sizeSteps = sizeSteps.slice(0, sizeStepsApplied);
 			// What was typed at a caret after a size was chosen came in marked: give it the size.
@@ -1251,13 +1812,15 @@
 		// selection here keeps Backspace editing that text instead of deleting a
 		// still-selected image somewhere else in the document.
 		selectedImage = null;
+		// (Clear formatting says so itself, when the document is as it leaves it.)
+		if (clearing) return;
 		fireChange();
-		if (autosave) scheduleAutoSave();
+		if (autosave && shown) scheduleAutoSave();
 	}
 
 	// ── Link modal ──
 	function openLinkModal(): void {
-		saveSelection();
+		keepForDialog();
 		linkUrl = '';
 		linkText = '';
 		linkError = '';
@@ -1276,7 +1839,7 @@
 		linkError = '';
 		// Inserting changes the document outside an input event: earlier indent steps no longer undo.
 		indentUndo = [];
-		restoreSelection();
+		restoreFor(dialogSelection);
 		editorEl?.focus();
 
 		if (linkText) {
@@ -1315,7 +1878,7 @@
 
 	// ── Images ──
 	function openImageModal(): void {
-		saveSelection();
+		keepForDialog();
 		imageUrl = '';
 		imageAlt = '';
 		imageCaption = '';
@@ -1338,12 +1901,13 @@
 		const url = imageUrl.trim();
 		const caption = imageCaption.trim();
 		const alt = imageAlt.trim();
+		const at = dialogSelection;
 
 		imageModalOpen = false;
 		pendingImageFiles = [];
 
 		if (files.length > 0) {
-			await insertImageFiles(files, caption, alt);
+			await insertImageFiles(files, caption, alt, at);
 			return;
 		}
 		if (!url) return;
@@ -1366,7 +1930,7 @@
 				showError(UNREADABLE_MESSAGE);
 				return;
 			}
-			restoreSelection();
+			restoreFor(at);
 			editorEl?.focus();
 			finishInsert(insertFigure(src, alt || caption, caption));
 			// It displays either way, but only embedded bytes reach the RTF.
@@ -1503,8 +2067,11 @@
 		if (autosave) scheduleAutoSave();
 	}
 
-	/** Insert one figure per file, in the order they were given. */
-	async function insertImageFiles(files: File[], caption = '', alt = ''): Promise<void> {
+	/**
+	 * Insert one figure per file, in the order they were given: at `at`, the selection the dialog
+	 * they were chosen in was opened on, or where the selection is.
+	 */
+	async function insertImageFiles(files: File[], caption = '', alt = '', at: Range | null = null): Promise<void> {
 		if (files.length === 0) return;
 		insertingImages = true;
 		let inserted: { img: HTMLImageElement; after: HTMLElement } | null = null;
@@ -1513,7 +2080,9 @@
 			for (const file of files) {
 				try {
 					const src = await fileToImageSrc(file, imageLimits());
-					restoreSelection();
+					// (The next one goes after this one: the caret is put there.)
+					restoreFor(at);
+					at = null;
 					editorEl?.focus();
 					// A single image takes the description typed in the dialog; a batch
 					// gets empty captions the user fills in under each picture.
@@ -1602,15 +2171,27 @@
 	function handleDrop(e: DragEvent): void {
 		if (readonly) return;
 		const files = Array.from(e.dataTransfer?.files || []).filter((f) => f.type.startsWith('image/'));
-		if (files.length === 0) return;
+		if (files.length === 0) {
+			// Text or markup dragged in, from another page or from further up this one. The
+			// browser puts it in the document itself, as it does a paste, and the input event
+			// that follows makes it safe the same way. (Only a paste was: what was dragged in
+			// stayed as the browser left it, with a block drawn over the whole page, a form
+			// that sends what is typed in it somewhere else, a frame showing another site.)
+			expectInsertion(draggedFromHere);
+			// What the browser may lose of it, as of a paste: it begins where it is dropped.
+			const notes = pasteNotes(e.dataTransfer?.getData?.('text/html') ?? '');
+			const at = notes ? rangeAtPoint(e.clientX, e.clientY) : null;
+			pastedLoss = notes && at && editorEl?.contains(at.startContainer) ? { notes, from: shownCharsBefore(at.startContainer, at.startOffset), dropped: true } : null;
+			return;
+		}
 		e.preventDefault();
 		editorEl?.focus();
 		placeCaretAtPoint(e.clientX, e.clientY);
 		void insertImageFiles(files);
 	}
 
-	/** Move the caret under the pointer so a dropped image lands where it was dropped. */
-	function placeCaretAtPoint(x: number, y: number): void {
+	/** The place in the text under the pointer. */
+	function rangeAtPoint(x: number, y: number): Range | null {
 		const doc = document as Document & {
 			caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
 			caretRangeFromPoint?: (x: number, y: number) => Range | null;
@@ -1627,7 +2208,12 @@
 		} else if (typeof doc.caretRangeFromPoint === 'function') {
 			range = doc.caretRangeFromPoint(x, y);
 		}
+		return range;
+	}
 
+	/** Move the caret under the pointer so a dropped image lands where it was dropped. */
+	function placeCaretAtPoint(x: number, y: number): void {
+		const range = rangeAtPoint(x, y);
 		if (!range || !editorEl?.contains(range.startContainer)) return;
 		const sel = window.getSelection();
 		sel?.removeAllRanges();
@@ -1651,9 +2237,14 @@
 				documentReplaced();
 				// (What the reader writes is safe as it stands; it goes the same way as any other
 				// HTML so there is one way in.)
-				showDocument(html);
+				const shown = showDocument(html);
 				updateCounts();
+				// (Shown or not, the document before it is gone, and the application is told so.)
 				fireChange();
+				if (!shown) {
+					dropDraft();
+					throw new Error(NOT_SHOWN);
+				}
 				if (autosave) scheduleAutoSave();
 				onimport?.({ html });
 			}
@@ -1678,8 +2269,11 @@
 		if (mod && e.key === 'i') { e.preventDefault(); exec('italic'); }
 		if (mod && e.key === 'u') { e.preventDefault(); exec('underline'); }
 		if (mod && e.key === 'k') { e.preventDefault(); openLinkModal(); }
-		if (mod && e.key === 's') { e.preventDefault(); autoSaveNow(); }
-		if (mod && !e.shiftKey && e.key.toLowerCase() === 'z' && undoIndent()) { e.preventDefault(); return; }
+		if (mod && e.key === 's') { e.preventDefault(); saveNow(); }
+		if (mod && !e.shiftKey && e.key.toLowerCase() === 'z' && (undoIndent() || undoClear())) { e.preventDefault(); return; }
+		// (Redo is Ctrl+Y as well, but not Cmd+Y.)
+		const redoKey = (e.shiftKey && e.key.toLowerCase() === 'z') || (e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'y');
+		if (mod && redoKey && redoClear()) { e.preventDefault(); return; }
 		if (mod && e.key === ']') { e.preventDefault(); indentBlocks('indent'); return; }
 		if (mod && e.key === '[') { e.preventDefault(); indentBlocks('outdent'); return; }
 
@@ -1842,7 +2436,12 @@
 			.map((item) => item.getAsFile())
 			.filter((file): file is File => file !== null);
 
-		if (files.length > 0 && !readonly) {
+		// A picture that comes with words is a picture of those words: Word copies its text
+		// that way, and Chromium hands over both. The words are what is pasted. (The picture was:
+		// text copied in Word went in as a picture of it, which cannot be edited, and Word's
+		// hidden text with it, unseen. Safari hands over no picture, and pasted the words.)
+		const html = e.clipboardData?.getData('text/html') ?? '';
+		if (files.length > 0 && !readonly && !pasteHasWords(html)) {
 			e.preventDefault();
 			void insertImageFiles(files);
 			return;
@@ -1857,25 +2456,37 @@
 		}
 		// The browser pastes next; the input event that follows tidies what came in.
 		if (!readonly && editorEl) {
-			const snapshot = new Set(editorEl.querySelectorAll('*'));
-			pastedOver = snapshot;
+			expectInsertion();
 			// What the browser's paste may lose (see pasteNotes), and where the paste begins.
-			const notes = pasteNotes(e.clipboardData?.getData('text/html') ?? '');
+			const notes = pasteNotes(html);
 			const start = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
 			pastedLoss =
 				notes && start && editorEl.contains(start.startContainer)
 					? { notes, from: shownCharsBefore(start.startContainer, start.startOffset) }
 					: null;
-			// A paste that inserts nothing (an empty clipboard, a host that cancels it) raises no
-			// input event. Left set, the snapshot would make the next keystroke treat the whole
-			// document as pasted.
-			setTimeout(() => {
-				if (pastedOver === snapshot) {
-					pastedOver = null;
-					pastedLoss = null;
-				}
-			}, 0);
 		}
+	}
+
+	/**
+	 * The browser is about to put something in the document itself, a paste or a drop: remember
+	 * which elements are there now, so that the input event that follows knows what came in.
+	 * `own` says it was picked up in this document.
+	 */
+	function expectInsertion(own = false): void {
+		if (readonly || !editorEl) return;
+		const snapshot = new Set(editorEl.querySelectorAll('*'));
+		pastedOver = snapshot;
+		pastedOwn = own;
+		pastedLoss = null;
+		// A paste that inserts nothing (an empty clipboard, a host that cancels it) raises no
+		// input event. Left set, the snapshot would make the next keystroke treat the whole
+		// document as pasted.
+		setTimeout(() => {
+			if (pastedOver === snapshot) {
+				pastedOver = null;
+				pastedLoss = null;
+			}
+		}, 0);
 	}
 
 	/** How many characters that are not white space the document has before a place in it. */
@@ -1891,7 +2502,7 @@
 	 * Set right what the browser's paste changed before it could be looked at: Word's hidden
 	 * text shown as text, and a text box left empty.
 	 */
-	function restorePasteLoss(before: Set<Element>, loss: { notes: PasteNotes; from: number }): void {
+	function restorePasteLoss(before: Set<Element>, loss: { notes: PasteNotes; from: number; dropped?: boolean }): void {
 		if (!editorEl) return;
 		const areas = Array.from(editorEl.querySelectorAll('textarea')).filter((area) => !before.has(area));
 		if (areas.length === loss.notes.textareas.length) {
@@ -1899,17 +2510,36 @@
 				if (area.value === '') area.textContent = loss.notes.textareas[i];
 			});
 		}
-		// After a paste the caret is at its end.
+		// After a paste the caret is at its end. After a drop what was dropped may be selected
+		// instead, and then it is known exactly where it begins as well.
 		const sel = window.getSelection();
-		if (!sel || sel.rangeCount === 0 || !sel.isCollapsed || !editorEl.contains(sel.anchorNode)) return;
-		const caret = sel.getRangeAt(0);
-		const to = shownCharsBefore(caret.startContainer, caret.startOffset);
+		if (!sel || sel.rangeCount === 0 || !editorEl.contains(sel.anchorNode) || !editorEl.contains(sel.focusNode)) return;
+		if (!sel.isCollapsed && !loss.dropped) return;
+		const range = sel.getRangeAt(0);
+		const from = sel.isCollapsed ? loss.from : shownCharsBefore(range.startContainer, range.startOffset);
+		const to = shownCharsBefore(range.endContainer, range.endOffset);
+		const came = new Set(Array.from(editorEl.querySelectorAll('*')).filter((el) => !before.has(el)));
+		if (takeHidden(from, to, loss.notes, (el) => came.has(el))) {
+			hiddenTaken.push({ notes: loss.notes, from, came, emptied: Array.from(came).filter((el) => !el.isConnected) });
+		}
+	}
+
+	/**
+	 * Take Word's hidden text out of the paste that is the text from the `from`th to the `to`th
+	 * character shown, or with null for `to`, the paste Redo has put back from the `from`th on
+	 * (see removeWordHidden). Returns whether anything was taken out.
+	 */
+	function takeHidden(from: number, to: number | null, notes: PasteNotes, came: (el: Element) => boolean): boolean {
+		if (!editorEl) return false;
 		// A pasted element left with nothing in it goes, but not the one the caret is in: that
 		// one becomes an empty line, to type in. (Taken out as well, a paste of hidden text
 		// alone left the caret in no line at all, and the next words typed were in none.)
-		const held = sel.anchorNode instanceof Element ? sel.anchorNode : (sel.anchorNode?.parentElement ?? null);
-		if (!removeWordHidden(editorEl, loss.from, to, loss.notes, (el) => !before.has(el) && !(held !== null && el.contains(held)))) return;
+		const sel = window.getSelection();
+		const at = sel && sel.rangeCount > 0 && editorEl.contains(sel.anchorNode) ? sel.anchorNode : null;
+		const held = at instanceof Element ? at : (at?.parentElement ?? null);
+		if (!removeWordHidden(editorEl, from, to, notes, (el) => came(el) && !(held !== null && el.contains(held)))) return false;
 		if (held && held !== editorEl && held.isConnected && held.childNodes.length === 0) held.appendChild(document.createElement('br'));
+		return true;
 	}
 
 	// ── Pasted formatting ──
@@ -1922,8 +2552,58 @@
 	const PASTED_SPACING = ['margin-top', 'margin-right', 'margin-bottom', 'margin-left', 'text-indent'];
 	/** The elements in the editor just before a paste; what is not in it came from the paste. */
 	let pastedOver: Set<Element> | null = null;
-	/** What the paste under way may lose, and how much text the document had before it. */
-	let pastedLoss: { notes: PasteNotes; from: number } | null = null;
+	/** Whether what is coming in was picked up in this document, and dragged to another place in it. */
+	let pastedOwn = false;
+	/** Whether what is being dragged now was picked up in this document. */
+	let draggedFromHere = false;
+	/**
+	 * Every element a paste or a drop has brought in, with the style it was left with when it
+	 * was tidied, and whether it was the document's own (see pastedOwn). Redo writes back on
+	 * these the style the browser first gave them, with the margins that were taken off: an
+	 * element whose style is another by then is tidied again.
+	 * (Held, not looked up in a WeakMap, for the reason given at wordsLeft.)
+	 */
+	const broughtIn = new Map<Element, { style: string | null; own: boolean }>();
+	/** What the paste or the drop under way may lose, and how much text the document had before it. */
+	let pastedLoss: { notes: PasteNotes; from: number; dropped?: boolean } | null = null;
+
+	/**
+	 * Take off the elements `came` accepts, the ones a paste or a drop brought in, their id and
+	 * the margins and first-line indents that change nothing (see above). One `own` accepts was
+	 * moved from another place in this document, and keeps its id unless another element has it
+	 * too. (Moved words lost theirs like pasted ones, though the id was in the document once,
+	 * as before: an application that marks elements with ids lost its marks to a drag.)
+	 */
+	function tidySpacing(came: (el: Element) => boolean, own: (el: Element) => boolean = () => false): void {
+		if (!editorEl) return;
+		const all = Array.from(editorEl.querySelectorAll<HTMLElement>('*'));
+		const timesUsed = new Map<string, number>();
+		for (const el of all) if (el.id) timesUsed.set(el.id, (timesUsed.get(el.id) ?? 0) + 1);
+		for (const el of all) {
+			if (!came(el)) continue;
+			const isOwn = own(el);
+			if (el.hasAttribute('id') && !(isOwn && timesUsed.get(el.id) === 1)) {
+				timesUsed.set(el.id, (timesUsed.get(el.id) ?? 1) - 1);
+				el.removeAttribute('id');
+			}
+			tidyStyle(el);
+			broughtIn.set(el, { style: el.getAttribute('style'), own: isOwn });
+		}
+	}
+
+	/** Take off one element the margins and the first-line indent that change nothing. */
+	function tidyStyle(el: HTMLElement): void {
+		if (!el.getAttribute('style')) return;
+		const inline = !el.matches(`${INDENT_TARGETS}, li, table, thead, tbody, tfoot, tr, td, th, figcaption, hr`);
+		for (const prop of PASTED_SPACING) {
+			const value = el.style.getPropertyValue(prop);
+			if (!value) continue;
+			const shown = getComputedStyle(el).getPropertyValue(prop);
+			el.style.removeProperty(prop);
+			if (!inline && getComputedStyle(el).getPropertyValue(prop) !== shown) el.style.setProperty(prop, value);
+		}
+		if (!el.getAttribute('style')) el.removeAttribute('style');
+	}
 
 	function tidyPasted(before: Set<Element>): void {
 		if (!editorEl) return;
@@ -1932,20 +2612,22 @@
 		// What the paste brought is made safe as HTML from anywhere else is: a browser takes the
 		// scripts out of a paste itself, but leaves a form, an <iframe>, or a block with
 		// position: fixed that covers the page.
-		sanitizeTree(editorEl, (el) => !before.has(el), undefined, keptNames);
-		for (const el of Array.from(editorEl.querySelectorAll<HTMLElement>('*'))) {
-			if (before.has(el)) continue;
-			el.removeAttribute('id');
-			if (!el.getAttribute('style')) continue;
-			const inline = !el.matches(`${INDENT_TARGETS}, li, table, thead, tbody, tfoot, tr, td, th, figcaption, hr`);
-			for (const prop of PASTED_SPACING) {
-				const value = el.style.getPropertyValue(prop);
-				if (!value) continue;
-				const shown = getComputedStyle(el).getPropertyValue(prop);
-				el.style.removeProperty(prop);
-				if (!inline && getComputedStyle(el).getPropertyValue(prop) !== shown) el.style.setProperty(prop, value);
-			}
-			if (!el.getAttribute('style')) el.removeAttribute('style');
+		// (And if it cannot be made safe, none of it stays.)
+		const came = (el: Element) => !before.has(el);
+		const own = pastedOwn;
+		pastedOwn = false;
+		leftNow = [];
+		const safe = makeSafe(came);
+		const left = leftNow;
+		leftNow = null;
+		if (!safe) {
+			showError(LEFT_OUT);
+			return;
+		}
+		tidySpacing(came, () => own);
+		if (left.length > 0) {
+			const stayed = Array.from(editorEl.querySelectorAll('*')).filter(came);
+			if (stayed.length > 0) pastesWithWords.push({ stayed, left, there: true });
 		}
 		// A picture copied with its text comes in by address (<img src="https://…">), or as data in
 		// a format the RTF cannot carry (GIF, WebP, SVG) or larger than maxImageBytes. Only PNG or
@@ -2226,23 +2908,33 @@
 	// ── Lifecycle ──
 	onMount(() => {
 		if (!editorEl) return;
+		document.addEventListener('selectionchange', trackSelection);
+		const stopTracking = () => document.removeEventListener('selectionchange', trackSelection);
 		if (autosave) {
+			let saved: string | null = null;
 			try {
-				const saved = localStorage.getItem(storageKey);
-				if (saved) {
-					// A draft is HTML from outside like any other: anything that can write to this
-					// origin's storage can write it.
-					showDocument(saved);
-					updateCounts();
-					return;
-				}
+				saved = localStorage.getItem(storageKey);
 			} catch (e) {}
+			if (saved) {
+				// A draft is HTML from outside like any other: anything that can write to this
+				// origin's storage can write it.
+				if (showDocument(saved)) {
+					updateCounts();
+					return stopTracking;
+				}
+				// (A draft that cannot be shown was dropped without a word; it is said now, and
+				// the content given is shown in its place.)
+				showError('The draft kept in this browser could not be shown');
+			}
 		}
 		// Always write the initial content prop so the div isn't empty.
 		// {#html content} must NOT be used inside the contenteditable div —
 		// Svelte would re-inject it on every reactive update, duplicating text.
-		showDocument(content || EMPTY_DOCUMENT);
+		// (A document that cannot be shown leaves the editor empty and says so: the failure
+		// used to go up through the component as it was made, and there was no editor.)
+		if (!showDocument(content || EMPTY_DOCUMENT)) showError(NOT_SHOWN);
 		updateCounts();
+		return stopTracking;
 	});
 
 	// Suppress unused warning for importing state (used in template)
@@ -2335,6 +3027,8 @@
 			onblur={() => (tabLeavesEditor = false)}
 			onpaste={handlePaste}
 			onclick={handleContentClick}
+			ondragstart={() => (draggedFromHere = true)}
+			ondragend={() => (draggedFromHere = false)}
 			ondragover={handleDragOver}
 			ondrop={handleDrop}
 			data-placeholder={placeholder}

@@ -16,7 +16,7 @@ RTF viewer and rich-text editor components for **Svelte 5**.
   - Images: upload, paste or drag-and-drop, with a description below each picture, drag-to-resize and left/centre/right placement — embedded in the RTF, not linked
   - Import an RTF file from disk; export as RTF, HTML, or Markdown
   - Optional auto-save to `localStorage` (off unless asked for)
-  - HTML from outside (the `content` prop, `setHTML`, a restored draft, a paste) is made safe before it is shown. See [HTML from outside](#html-from-outside)
+  - HTML from outside (the `content` prop, `setHTML`, a restored draft, a paste, a drop) is made safe before it is shown. See [HTML from outside](#html-from-outside)
   - Word count and character count status bar
   - Keyboard shortcuts (`Ctrl+S` to save, `Ctrl+B/I/U` for formatting)
 - **Utility functions** — `rtfToHtml`, `htmlToRtf`, `readRtfFile`, `htmlToMarkdown`, `downloadFile`
@@ -145,7 +145,7 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 | Prop       | Payload                                      | Description                                 |
 |------------|----------------------------------------------|---------------------------------------------|
 | `onchange` | `{ html, text, wordCount, charCount, estimatedRtfBytes }` | Fired on every content change. `html`, `text` and `estimatedRtfBytes` are worked out when the handler reads them, so a handler that only wants the counts costs nothing on a long document. They are the document as it is when first read: read them in the handler. A payload kept and read after a later edit gives the document as it is by then |
-| `onsave`   | `{ html }`                                   | Fired on auto-save or `Ctrl+S`              |
+| `onsave`   | `{ html }`                                   | Fired on `Ctrl+S`, and after each auto-save where `autosave` is on |
 | `onimport` | `{ html }`                                   | Fired after a successful RTF file import    |
 
 #### Methods (via `bind:this`)
@@ -153,7 +153,7 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 ```ts
 editor.getHTML()          // → string  — current editor HTML
 editor.getText()          // → string  — plain text (no tags)
-editor.setHTML(html)      // → void    — replace content programmatically (made safe first)
+editor.setHTML(html)      // → void    — replace content programmatically (made safe first; throws, leaving the editor empty, if it cannot be)
 editor.getMarkdown()      // → string  — Markdown conversion of content
 editor.getRTF()           // → string  — RTF conversion of content
 editor.getRtfSize()       // → number  — exact byte size of that RTF
@@ -162,6 +162,7 @@ editor.focus()            // → void    — focus the editor
 editor.exportFile(format) // → void    — download as 'html' | 'md' | 'rtf'
 editor.importRtf()        // → void    — open the file picker to import .rtf
 editor.setFontSize(14)    // → void    — size, in points, of the selected text, or of what is typed next
+editor.clearFormatting()  // → void    — take bold, italic, underline, strike, color, size and font off the selected text
 ```
 
 #### Auto-save
@@ -173,7 +174,11 @@ editor.setFontSize(14)    // → void    — size, in points, of the selected te
 
 #### HTML from outside
 
-Whatever HTML reaches the editor is made safe before it is shown: the `content` prop, `setHTML()`, a draft restored from `localStorage`, and what a paste brings. `sanitizeHtml` is exported for HTML you show yourself (stored editor output in a preview, say).
+Whatever HTML reaches the editor is made safe before it is shown: the `content` prop, `setHTML()`, a draft restored from `localStorage`, what a paste brings, what is dragged in from another page or from elsewhere in the document, and what Undo and Redo put back (Redo after a paste gives the browser's own copy of the paste, not the one that was made safe). `sanitizeHtml` is exported for HTML you show yourself (stored editor output in a preview, say).
+
+A paste and a drop are made safe just after the browser has put them in the document, not before: a frame or a picture in them may be asked for from its address in that moment, though it does not stay.
+
+An element that cannot be checked is taken out, and a document that cannot be checked at all is not shown: the editor is left empty and says so, `setHTML()` throws, and the document that was there before does not stay on the screen in its place.
 
 | Taken out | Why |
 |---|---|
@@ -266,6 +271,24 @@ The toolbar has a list of sizes, next to the list of paragraph kinds. A size cho
 - `htmlToRtf` also reads `<font size="1">` to `<font size="7">`, which is how older pages and mail carry sizes, as the sizes a browser shows them at (7.5, 10, 12, 13.5, 18, 24 and 36 pt). They were shown at those sizes and written at the body size.
 
 The font has to be installed on the machine that displays the document. The RTF names it, and a reader without it substitutes one of its own.
+
+### Clear formatting
+
+The toolbar's Clear formatting button, next to the text color, takes the formatting off the selected text. `editor.clearFormatting()` does the same from your own toolbar. With nothing selected it changes nothing in the document.
+
+| Taken off | Stays |
+| --- | --- |
+| Bold, italic, underline, strikethrough | Headings, lists, block quotes, code blocks, tables |
+| Text color and highlight | Links |
+| Size and font | Alignment, indents, hanging indents, tabs |
+| Superscript, subscript, inline code | Pictures, their size and captions |
+| The same written as a style on a paragraph, a table cell or a pasted `<span>` | A table cell's shading |
+| | Elements carrying your `keepAttributes` or `keepClasses` |
+
+- Only the selected words change: clearing two words of a bold sentence leaves the rest bold.
+- The result is the same HTML in Chromium, Firefox and Safari. The browsers' own command is not: one takes a paragraph's alignment with its color, another leaves the color on the paragraph, a third takes out the element your mark is on.
+- Undo puts the formatting back and Redo takes it off again, from the keyboard and from the toolbar, also after more has been typed and undone. In Safari one Undo may take back the step before it as well.
+- A mark stays whole in all three browsers, whatever part of it is selected. In Firefox the words inside it keep the bold or italic they have there: its command cannot clear them without cutting the mark in two.
 
 ---
 

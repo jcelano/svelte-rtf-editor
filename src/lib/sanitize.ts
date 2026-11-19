@@ -183,8 +183,19 @@ function namesIn(given: unknown): string[] {
 	return list.filter((name): name is string => typeof name === 'string').map((name) => name.trim());
 }
 
+/**
+ * A table to look names up in that come from the document: a tag, a unit, the name of a size.
+ * Written as an object, such a table also answers to the names every object has (`constructor`,
+ * `toString`, `__proto__`), with a function where a list or a number was meant: an element
+ * named <constructor> with an attribute of its own stopped the sanitizer where it stood. A Map
+ * holds what was put in it and nothing else.
+ */
+function table<T>(entries: Record<string, T>): ReadonlyMap<string, T> {
+	return new Map(Object.entries(entries));
+}
+
 /** Attributes only some elements may keep. */
-const TAG_ATTRIBUTES: Record<string, string[]> = {
+const TAG_ATTRIBUTES = table<string[]>({
 	a: ['href', 'target', 'rel'],
 	img: ['src', 'alt', 'width', 'height'],
 	td: ['colspan', 'rowspan', 'width'],
@@ -196,7 +207,7 @@ const TAG_ATTRIBUTES: Record<string, string[]> = {
 	li: ['value'],
 	font: ['color', 'size', 'face'],
 	details: ['open']
-};
+});
 
 /**
  * The one class that means something here: Safari's wrapper around a typed tab. Any other class
@@ -223,10 +234,10 @@ const UNSAFE_STYLE_VALUE = /url\s*\(|expression\s*\(|javascript:|@import|behavio
 // screen, so those values go too.
 
 /** Lengths in px, for the limits below. The units that follow the font are in FONT_UNITS. */
-const PX_PER_UNIT: Record<string, number> = { px: 1, pt: 4 / 3, pc: 16, in: 96, cm: 96 / 2.54, mm: 96 / 25.4, q: 96 / 101.6, rem: 16 };
+const PX_PER_UNIT = table<number>({ px: 1, pt: 4 / 3, pc: 16, in: 96, cm: 96 / 2.54, mm: 96 / 25.4, q: 96 / 101.6, rem: 16 });
 
 /** Lengths counted in the element's font size: how many of them make one. */
-const FONT_UNITS: Record<string, number> = { em: 1, ex: 2, ch: 2 };
+const FONT_UNITS = table<number>({ em: 1, ex: 2, ch: 2 });
 
 /** The font size where nothing above sets one. */
 const BASE_FONT_PX = 16;
@@ -238,10 +249,10 @@ const BASE_FONT_PX = 16;
 const LEAST_FONT_PX = 0.5;
 
 /** The font sizes that have names, in px. */
-const NAMED_FONT_PX: Record<string, number> = {
+const NAMED_FONT_PX = table<number>({
 	'xx-small': 9, 'x-small': 10, small: 13, medium: 16, large: 18, 'x-large': 24, 'xx-large': 32, 'xxx-large': 48,
 	'-webkit-xxx-large': 48
-};
+});
 
 /** A step up or down in size (`larger`, `smaller`): the factor a browser uses. */
 const FONT_STEP = 1.2;
@@ -264,13 +275,13 @@ const INLINE_TAGS = new Set([
 ]);
 
 /** What each part of a border picture is when there is none: what `border: …` sets them to. */
-const NO_BORDER_IMAGE: Record<string, string[]> = {
+const NO_BORDER_IMAGE = table<string[]>({
 	'border-image-source': ['none', 'initial'],
 	'border-image-slice': ['100%', 'initial'],
 	'border-image-width': ['1', 'initial'],
 	'border-image-outset': ['0', '0px', 'initial'],
 	'border-image-repeat': ['stretch', 'initial']
-};
+});
 
 /** A little over the widest page there is, 22 inches (2112 px). */
 const MOST_PX = 2200;
@@ -286,8 +297,10 @@ const DISPLAY_VALUES = new Set([
 
 /** One number of a style value with its unit, as px; null for a percentage, a bare number or a unit not known. */
 function lengthPx(digits: string, unit: string, fontPx: number): number | null {
-	if (unit in PX_PER_UNIT) return Number(digits) * PX_PER_UNIT[unit];
-	if (unit in FONT_UNITS) return (Number(digits) * fontPx) / FONT_UNITS[unit];
+	const px = PX_PER_UNIT.get(unit);
+	if (px !== undefined) return Number(digits) * px;
+	const perFont = FONT_UNITS.get(unit);
+	if (perFont !== undefined) return (Number(digits) * fontPx) / perFont;
 	return null;
 }
 
@@ -336,7 +349,8 @@ function oneLengthPx(value: string, fontPx: number): number | null {
  */
 function fontSizePx(value: string, parentPx: number): number | null {
 	const text = value.trim().toLowerCase();
-	if (text in NAMED_FONT_PX) return NAMED_FONT_PX[text];
+	const named = NAMED_FONT_PX.get(text);
+	if (named !== undefined) return named;
 	if (text === 'larger') return parentPx * FONT_STEP;
 	if (text === 'smaller') return parentPx / FONT_STEP;
 	if (text === 'inherit' || text === 'initial' || text === 'unset' || text === 'revert') return text === 'initial' ? BASE_FONT_PX : parentPx;
@@ -450,11 +464,12 @@ function sanitizeStyle(el: HTMLElement, tag: string, fonts: FontSizes): void {
 		const name = style.item(i);
 		const value = style.getPropertyValue(name);
 		if (name === 'font-size') continue;
-		if (name in NO_BORDER_IMAGE) {
+		const noPicture = NO_BORDER_IMAGE.get(name);
+		if (noPicture !== undefined) {
 			// `border: 1px solid` also says "no border picture", and a browser lists that with
 			// the properties it read. That much is no reason to write the attribute again; a
 			// border picture itself is drawn outside its element, and a document has none.
-			if (!NO_BORDER_IMAGE[name].includes(value.trim().toLowerCase())) drop.push(...Object.keys(NO_BORDER_IMAGE));
+			if (!noPicture.includes(value.trim().toLowerCase())) drop.push(...NO_BORDER_IMAGE.keys());
 			continue;
 		}
 		if (!STYLE_PROPERTY.test(name) || UNSAFE_STYLE_VALUE.test(value) || !sizeAllowed(name, value, tag, fontPx)) drop.push(name);
@@ -516,7 +531,7 @@ function namesAGlobal(id: string): boolean {
 }
 
 function sanitizeAttributes(el: HTMLElement, tag: string, fonts: FontSizes, idTaken?: (id: string) => boolean, keep?: Kept): void {
-	const own = TAG_ATTRIBUTES[tag];
+	const own = TAG_ATTRIBUTES.get(tag);
 	for (const attr of Array.from(el.attributes)) {
 		const name = attr.name.toLowerCase();
 		if (name === 'class') {
@@ -574,28 +589,31 @@ function isReadAloudCopy(el: Element): boolean {
  * Make the elements under `root` safe, in place. With `only`, just the elements it accepts (the
  * ones a paste brought in) are looked at; the rest of the document is left as it is. With
  * `idTaken`, an id it says the page already uses is taken off. With `keep` (see keptMarks),
- * the application's own `data-` attributes and classes stay.
+ * the application's own `data-` attributes and classes stay. `wordsLeft` is told of each element
+ * taken out with its words left in its place (a button, a text box), and of the text that holds
+ * them: an editor whose Redo puts the element back needs to know those words are there already.
+ * `leftOut` is told of each element that could not be checked, and so was taken out with what
+ * was in it: whoever shows the rest can say that a part is missing.
  * Returns whether anything was taken out or changed.
  */
 export function sanitizeTree(
 	root: Element,
 	only?: (el: Element) => boolean,
 	idTaken?: (id: string) => boolean,
-	keep?: Kept
+	keep?: Kept,
+	wordsLeft?: (el: Element, words: Text) => void,
+	leftOut?: (el: Element) => void
 ): boolean {
 	let changed = false;
 	const fonts: FontSizes = new Map();
 	/** The words of the last element that left its words, where they are still in the document. */
 	let lastKept: Text | null = null;
-	for (const el of Array.from(root.querySelectorAll<HTMLElement>('*'))) {
-		// Gone already, with something it was in.
-		if (!root.contains(el)) continue;
-		if (only && !only(el)) continue;
+	/** One element made safe; returns whether it was taken out or changed. */
+	const check = (el: HTMLElement): boolean => {
 		const tag = el.tagName.toLowerCase();
 		if (REMOVED_TAGS.has(tag) || isReadAloudCopy(el)) {
 			el.remove();
-			changed = true;
-			continue;
+			return true;
 		}
 		if (TEXT_KEPT_TAGS.has(tag)) {
 			const text = shownText(el, tag);
@@ -604,23 +622,38 @@ export function sanitizeTree(
 				const kept = el.ownerDocument.createTextNode(lastKept !== null && el.previousSibling === lastKept ? ` ${text}` : text);
 				el.replaceWith(kept);
 				lastKept = kept;
+				wordsLeft?.(el, kept);
 			} else {
 				el.remove();
 			}
-			changed = true;
-			continue;
+			return true;
 		}
 		// A custom element would be given its behaviour by the page: only what it holds is kept,
 		// and nothing of one that was hidden, which would show once the element is gone.
 		if (tag.includes('-')) {
 			if (hiddenByItself(el)) el.remove();
 			else el.replaceWith(...Array.from(el.childNodes));
-			changed = true;
-			continue;
+			return true;
 		}
 		const before = el.attributes.length + (el.getAttribute('style') ?? '') + (el.getAttribute('href') ?? '') + (el.getAttribute('width') ?? '') + (el.getAttribute('height') ?? '');
 		sanitizeAttributes(el, tag, fonts, idTaken, keep);
-		if (before !== el.attributes.length + (el.getAttribute('style') ?? '') + (el.getAttribute('href') ?? '') + (el.getAttribute('width') ?? '') + (el.getAttribute('height') ?? '')) changed = true;
+		return before !== el.attributes.length + (el.getAttribute('style') ?? '') + (el.getAttribute('href') ?? '') + (el.getAttribute('width') ?? '') + (el.getAttribute('height') ?? '');
+	};
+	for (const el of Array.from(root.querySelectorAll<HTMLElement>('*'))) {
+		// Gone already, with something it was in.
+		if (!root.contains(el)) continue;
+		if (only && !only(el)) continue;
+		try {
+			if (check(el)) changed = true;
+		} catch {
+			// An element that cannot be checked, for a reason nobody thought of, is not kept: it
+			// goes, with what is in it, and the elements after it are still looked at. Stopping
+			// here left the rest of a paste in the document as it came in, and whoever called
+			// with nothing to say which half had been made safe.
+			el.remove();
+			changed = true;
+			leftOut?.(el);
+		}
 	}
 	return changed;
 }
@@ -637,10 +670,10 @@ export function sanitizeHtml(html: string, options?: KeepOptions): string {
 }
 
 /** The HTML, read in a document of its own and made safe there; null where it cannot be. */
-function safeBody(html: string, idTaken?: (id: string) => boolean, keep?: Kept): HTMLElement | null {
+function safeBody(html: string, idTaken?: (id: string) => boolean, keep?: Kept, leftOut?: (el: Element) => void): HTMLElement | null {
 	if (!html || typeof DOMParser === 'undefined') return null;
 	const doc = new DOMParser().parseFromString(`<!DOCTYPE html><html><body>${html}</body></html>`, 'text/html');
-	sanitizeTree(doc.body, undefined, idTaken, keep);
+	sanitizeTree(doc.body, undefined, idTaken, keep, undefined, leftOut);
 	return doc.body;
 }
 
@@ -649,11 +682,64 @@ function safeBody(html: string, idTaken?: (id: string) => boolean, keep?: Kept):
  * checked is what is shown. Written out as text and read in again, a second reading has to
  * agree with the first for the check to mean anything, and that is where a sanitizer is got
  * round; it is also a third pass over a document that may hold megabytes of pictures.
+ * `leftOut` is told of each element that could not be checked (see sanitizeTree).
  */
-export function sanitizedNodes(html: string, into: Document, idTaken?: (id: string) => boolean, keep?: Kept): Node[] {
-	const body = safeBody(html, idTaken, keep);
+export function sanitizedNodes(
+	html: string,
+	into: Document,
+	idTaken?: (id: string) => boolean,
+	keep?: Kept,
+	leftOut?: (el: Element) => void
+): Node[] {
+	const body = safeBody(html, idTaken, keep, leftOut);
 	if (!body) return [];
 	return Array.from(body.childNodes).map((node) => into.importNode(node, true));
+}
+
+/** Where each part of a paste begins, when they are all there one after the other from `from`. */
+function partsInARow(from: number, parts: { text: string }[]): number[] {
+	let at = from;
+	return parts.map((part) => {
+		const start = at;
+		at += part.text.length;
+		return start;
+	});
+}
+
+/**
+ * Where each part of a paste begins in `shown`, from `from` on, when a hidden part may be
+ * missing (null for one that is): the first reading that fits, taking each hidden part as there
+ * where it can be. Null where there is no reading: this text is not that paste.
+ */
+function partsPutBack(shown: string, from: number, parts: { text: string; hidden: boolean }[]): (number | null)[] | null {
+	const starts: (number | null)[] = [];
+	/** Where the reading stood before each part, to go back to. */
+	const stood: number[] = [];
+	let at = from;
+	let i = 0;
+	// (A reading is given up and taken again from an earlier part; a text made to be read in
+	// very many ways is not read at all.)
+	for (let steps = 0; i < parts.length; steps++) {
+		if (steps > 200_000) return null;
+		stood[i] = at;
+		if (shown.startsWith(parts[i].text, at)) {
+			starts[i] = at;
+			at += parts[i].text.length;
+			i++;
+		} else if (parts[i].hidden) {
+			starts[i] = null;
+			i++;
+		} else {
+			// The last hidden part taken as there is taken as missing, and read on from it.
+			let back = i - 1;
+			while (back >= 0 && !(parts[back].hidden && starts[back] !== null)) back--;
+			if (back < 0) return null;
+			starts[back] = null;
+			at = stood[back];
+			i = back + 1;
+		}
+	}
+	return starts;
 }
 
 // ── What a paste loses on the way in ──
@@ -684,6 +770,18 @@ export interface PasteNotes {
 const NOT_PAGE_TEXT = new Set(['script', 'style', 'title', 'template', 'noscript', 'textarea']);
 
 const withoutSpace = (text: string) => text.replace(/\s/g, '');
+
+/**
+ * Whether a paste's HTML holds words. Word and Excel copy their text as HTML and put a picture
+ * of the same text beside it; a browser copies a picture as the picture and an `<img>` with no
+ * words. So a paste that has both is words where its HTML has any, and a picture where not.
+ */
+export function pasteHasWords(html: string): boolean {
+	if (!html || typeof DOMParser === 'undefined') return false;
+	const body = new DOMParser().parseFromString(html, 'text/html').body;
+	for (const el of Array.from(body.querySelectorAll(Array.from(NOT_PAGE_TEXT).join(',')))) el.remove();
+	return (body.textContent ?? '').trim() !== '';
+}
 
 /**
  * Read from a paste's HTML what the browser's own paste may lose: null where it holds neither
@@ -731,11 +829,15 @@ export function pasteNotes(html: string): PasteNotes | null {
  * characters were the hidden ones. An element left with nothing in it goes too, where
  * `mayRemove` allows (a paragraph that was hidden whole would stay as an empty line in the
  * RTF). Returns whether anything was taken out.
+ *
+ * With null for `to`, the paste is one that Redo has put back, after its hidden text was taken
+ * out once. A browser then brings back some of that text and not the rest, so each hidden
+ * piece may be there or not; all the other text of the paste has to be, from `from` on.
  */
 export function removeWordHidden(
 	root: Element,
 	from: number,
-	to: number,
+	to: number | null,
 	notes: PasteNotes,
 	mayRemove?: (el: Element) => boolean
 ): boolean {
@@ -747,22 +849,21 @@ export function removeWordHidden(
 		const children = Array.from(node.childNodes);
 		for (let i = children.length - 1; i >= 0; i--) todo.push(children[i]);
 	}
-	const pasted = withoutSpace(texts.map((text) => text.data).join('')).slice(from, to);
+	const shown = withoutSpace(texts.map((text) => text.data).join(''));
 	// A browser may leave what is not displayed out of a paste, or bring it along.
 	for (const pieces of [notes.pieces, notes.pieces.filter((piece) => !piece.undisplayed)]) {
-		if (withoutSpace(pieces.map((piece) => piece.text).join('')) !== pasted) continue;
+		const parts = pieces.map((piece) => ({ text: withoutSpace(piece.text), hidden: piece.hidden })).filter((part) => part.text !== '');
+		if (to !== null && parts.map((part) => part.text).join('') !== shown.slice(from, to)) continue;
+		const starts = to === null ? partsPutBack(shown, from, parts) : partsInARow(from, parts);
+		if (starts === null) continue;
 		/** The hidden runs, as [first, after last] among the characters that are not white space. */
 		const runs: [number, number][] = [];
-		let at = from;
-		for (const piece of pieces) {
-			const length = withoutSpace(piece.text).length;
-			if (piece.hidden && length > 0) {
-				const last = runs[runs.length - 1];
-				if (last && last[1] === at) last[1] = at + length;
-				else runs.push([at, at + length]);
-			}
-			at += length;
-		}
+		parts.forEach((part, i) => {
+			if (!part.hidden || starts[i] === null) return;
+			const last = runs[runs.length - 1];
+			if (last && last[1] === starts[i]) last[1] = starts[i]! + part.text.length;
+			else runs.push([starts[i]!, starts[i]! + part.text.length]);
+		});
 		if (runs.length === 0) return false;
 		let index = 0;
 		let run = 0;
