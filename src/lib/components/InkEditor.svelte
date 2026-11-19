@@ -11,6 +11,10 @@
  *                   `content`. Default: false. Give each document its own storageKey.
 	 *   storageKey    — localStorage key for auto-save. Default: 'ink-editor-content'.
 	 *   showToolbar   — Show the formatting toolbar. Default: true.
+	 *   stickyToolbar — Keep the toolbar in sight while a long document is scrolled: it
+	 *                   stays at the top of the window, or of the scrolling element the
+	 *                   editor is in. Default: true. Under a header of your own that stays
+	 *                   too, set the CSS variable --ink-toolbar-top to its height.
 	 *   showStatusBar — Show the word/char count status bar. Default: true.
 	 *   minHeight     — CSS min-height of the editing area. Default: '40vh'.
 	 *   readonly      — If true, editor is not editable. Default: false.
@@ -30,13 +34,22 @@
 	 *   maxRtfBytes   — The largest RTF file Import reads. Default: 52428800 (50 MB);
 	 *                   0 reads any size.
 	 *   fontFamily    — Font for the document, both on screen and in the RTF.
-	 *                   Default: DEFAULT_FONT_FAMILY (rtf-writer.ts).
+	 *                   Given a CSS list ('Segoe UI, Selawik, sans-serif'), the first
+	 *                   family is the font, and the rest is what a screen without it
+	 *                   shows. Default: DEFAULT_FONT_FAMILY (rtf-writer.ts).
 	 *   fontSize      — Body text size in points, both on screen and in the RTF.
 	 *                   Headings scale from it. Default: 12.
 	 *   fontSizes     — The sizes, in points, the toolbar's size list offers for the
 	 *                   selected text. The body size is always among them. An empty
 	 *                   list takes the size list off the toolbar.
 	 *                   Default: 8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36.
+	 *   fonts         — The fonts the toolbar's font list offers for the selected text,
+	 *                   beside the document's own: names ('Calibri'), or CSS lists whose
+	 *                   first family is the name ('Calibri, Carlito, sans-serif'). Text
+	 *                   in one of them is written in it to the RTF and read back in it;
+	 *                   any other font is taken off HTML as it comes in, set or pasted.
+	 *                   Default: none: there is no font list, and no font but the
+	 *                   document's is let in.
 	 *   keepAttributes — `data-` attributes the application's documents carry, which
 	 *                   the editor leaves on their elements: a mark on a paragraph that
 	 *                   the application reads back (`data-section="2"`). Every other
@@ -65,6 +78,8 @@
 	 *   exportFile(format) — Downloads as 'html', 'md', or 'rtf'.
 	 *   importRtf()    — Opens the file picker to import an RTF file.
 	 *   setFontSize(points) — Sets the size of the selected text, or of what is typed next.
+	 *   setFont(name)  — Sets the font of the selected text, or of what is typed next, to
+	 *                    one of `fonts`; '' or the document font's name sets it back.
 	 *   clearFormatting()   — Takes bold, italic, underline, strike, color, size and font off
 	 *                    the selected text. Headings, lists, links, alignment, indents and
 	 *                    the application's own marks stay.
@@ -81,7 +96,10 @@
 		htmlToRtf,
 		estimateRtfBytes,
 		isSafeLinkUrl,
+		linkTarget,
 		cssFontFamily,
+		fontChoices,
+		fontKey,
 		normalizeFontSize,
 		DEFAULT_FONT_FAMILY,
 		DEFAULT_FONT_SIZE
@@ -121,6 +139,7 @@
 		autosave?: boolean;
 		storageKey?: string;
 		showToolbar?: boolean;
+		stickyToolbar?: boolean;
 		showStatusBar?: boolean;
 		minHeight?: string;
 		readonly?: boolean;
@@ -133,6 +152,8 @@
 		fontFamily?: string;
 		fontSize?: number;
 		fontSizes?: number[];
+		/** The fonts offered for text, beside the document's own; none unless given. */
+		fonts?: string[];
 		/** `data-` attributes of the application's own, kept on HTML that is set or pasted. */
 		keepAttributes?: string[];
 		/** Class names of the application's own, kept the same way. */
@@ -163,6 +184,7 @@
 		autosave = false,
 		storageKey = 'ink-editor-content',
 		showToolbar = true,
+		stickyToolbar = true,
 		showStatusBar = true,
 		minHeight = '40vh',
 		readonly = false,
@@ -174,6 +196,7 @@
 		fontFamily = DEFAULT_FONT_FAMILY,
 		fontSize = DEFAULT_FONT_SIZE,
 		fontSizes = DEFAULT_FONT_SIZES,
+		fonts = NO_KEPT_ATTRIBUTES,
 		keepAttributes = NO_KEPT_ATTRIBUTES,
 		keepClasses = NO_KEPT_ATTRIBUTES,
 		onchange,
@@ -181,12 +204,15 @@
 		onimport
 	}: Props = $props();
 
-	const keptNames = $derived(keptMarks({ keepAttributes, keepClasses }));
+	const keptNames = $derived(keptMarks({ keepAttributes, keepClasses, fonts, fontFamily }));
 
 	// The same font and size go to the screen and to the RTF, so the editor
 	// shows what the receiving system will show.
-	const rtfOptions = $derived({ fontFamily, fontSize });
+	const rtfOptions = $derived({ fontFamily, fontSize, fonts });
 	const screenFontFamily = $derived(cssFontFamily(fontFamily));
+	/** The name the document font is looked up by, and the fonts offered beside it. */
+	const documentFontKey = $derived(fontKey(screenFontFamily));
+	const fontList = $derived(fontChoices(fonts).filter((choice) => choice.key !== documentFontKey));
 	const screenFontSize = $derived(normalizeFontSize(fontSize));
 
 	// ── Internal state ──
@@ -198,6 +224,8 @@
 	let currentBlock: string = $state('p');
 	/** The size of the text at the caret, in points, for the toolbar. */
 	let currentFontSize: number | null = $state(null);
+	/** The font at the selection, by its key: '' for the document font, null where it has more than one. */
+	let currentFont: string | null = $state('');
 
 	let formatState = $state({
 		bold: false,
@@ -736,7 +764,7 @@
 		if (autosave) scheduleAutoSave();
 	}
 
-	/** The size of the text at the selection, for the toolbar: null where it starts and ends in different sizes. */
+	/** The size of the text at the selection, for the toolbar: null where the text selected is in more than one. */
 	function sizeAtSelection(): number | null {
 		if (pendingSize !== null) return pendingSize;
 		const selection = window.getSelection();
@@ -754,7 +782,137 @@
 		const first = start ? shownSize(start) : null;
 		if (range.collapsed) return first;
 		const end = holder(range.endContainer, range.endOffset, true);
-		return end && shownSize(end) === first ? first : null;
+		if (!end || shownSize(end) !== first) return null;
+		// The same at both ends, and another in between: the list shows none, as for two.
+		return throughout(range, (el) => shownSize(el) ?? 0) === null ? null : first;
+	}
+
+	// ── Font ──
+	// The browser's own command does all of it: it writes <font face="…"> around the selected
+	// text, cuts a font that is there already in two rather than putting one inside another,
+	// and keeps the font for what is typed next at a caret. So a change of font is undone and
+	// redone with everything else. Which fonts there may be is the application's to say
+	// (`fonts`): the sanitizer takes any other off what comes in.
+
+	/** The font chosen at a caret and not yet typed in: the document has no element to show it by. */
+	let pendingFont: string | null = null;
+
+	/**
+	 * Set the font of the selected text; with nothing selected, of what is typed next. The name
+	 * is one of `fonts`; '' or the document font's own name sets the text back to the document
+	 * font. A font that is not offered is not set. Also what the toolbar's font list calls.
+	 */
+	export function setFont(name: string | null): void {
+		if (readonly || !editorEl) return;
+		const key = fontKey(name);
+		const choice = fontList.find((font) => font.key === key);
+		if (key !== '' && key !== documentFontKey && !choice) return;
+		restoreSelection();
+		editorEl.focus();
+		const selection = window.getSelection();
+		if (!selection || selection.rangeCount === 0 || !selectionInEditor()) return;
+		const wanted = choice?.key ?? '';
+		// Nothing to change: no step is made that would undo to the same thing.
+		if (fontAtSelection() === wanted) {
+			updateToolbarState();
+			return;
+		}
+		// (Given the document font as the screen has it, Chromium and Safari take the font off
+		// the text; Firefox writes it, which the writer and the font list read as no font.)
+		document.execCommand('fontName', false, choice ? choice.css : screenFontFamily);
+		// With text selected the font is on it now. At a caret it waits for the typing.
+		pendingFont = selection.isCollapsed ? wanted : null;
+		updateToolbarState();
+	}
+
+	/** The font an element's text is in, by its key: '' for the document font, or a font that is not offered. */
+	function fontOfElement(el: Element | null): string {
+		for (let at = el; at && at !== editorEl; at = at.parentElement) {
+			const key = fontKey((at as HTMLElement).style?.fontFamily || (at.tagName === 'FONT' ? at.getAttribute('face') : ''));
+			if (key) return fontList.some((font) => font.key === key) ? key : '';
+		}
+		return '';
+	}
+
+	/** The font of the text at the selection, for the toolbar: null where the text selected is in more than one. */
+	function fontAtSelection(): string | null {
+		if (pendingFont !== null) return pendingFont;
+		const selection = window.getSelection();
+		if (!editorEl || !selection || selection.rangeCount === 0) return '';
+		const range = selection.getRangeAt(0);
+		if (!editorEl.contains(range.startContainer)) return '';
+		if (range.collapsed) {
+			const at = range.startContainer;
+			return fontOfElement(at.nodeType === Node.ELEMENT_NODE ? (at as Element) : at.parentElement);
+		}
+		const font = throughout(range, fontOfElement);
+		return font === undefined ? '' : font;
+	}
+
+	/** Lists, tables and the document itself: white space between their parts is not text one sees. */
+	const HOLDS_BLOCKS = new Set(['UL', 'OL', 'TABLE', 'THEAD', 'TBODY', 'TFOOT', 'TR']);
+
+	/**
+	 * What all the text selected has in common, as `of` reads it from the element a text is in:
+	 * its font, its size. null where two texts differ, so that the toolbar's list shows none
+	 * rather than the one the selection happens to start in. undefined where no text is selected.
+	 *
+	 * From the first text selected to the last: a selection often starts at the end of the text
+	 * before it (Safari leaves it there after the command), which is in another font.
+	 */
+	function throughout<T>(range: Range, of: (el: Element) => T): T | null | undefined {
+		const first = textAtEdge(range, false);
+		const last = textAtEdge(range, true);
+		if (!editorEl || !first || !last) return undefined;
+		if (first !== last && !(first.compareDocumentPosition(last) & Node.DOCUMENT_POSITION_FOLLOWING)) return undefined;
+		const walker = document.createTreeWalker(editorEl, NodeFilter.SHOW_TEXT);
+		walker.currentNode = first;
+		let seen: Element | null = null;
+		let value: T | undefined;
+		for (let text: Text | null = first; text; text = walker.nextNode() as Text | null) {
+			const parent = text.parentElement;
+			const unseen = (parent === editorEl || HOLDS_BLOCKS.has(parent?.tagName ?? '')) && text.data.trim() === '';
+			if (parent && parent !== seen && text.data !== '' && !unseen) {
+				const here = of(parent);
+				if (seen && here !== value) return null;
+				value = here;
+				seen = parent;
+			}
+			if (text === last) break;
+		}
+		return value;
+	}
+
+	/** The first text a range has a character of, or the last. */
+	function textAtEdge(range: Range, last: boolean): Text | null {
+		if (!editorEl) return null;
+		const walker = document.createTreeWalker(editorEl, NodeFilter.SHOW_TEXT);
+		const node = last ? range.endContainer : range.startContainer;
+		const offset = last ? range.endOffset : range.startOffset;
+		const step = () => (last ? walker.previousNode() : walker.nextNode()) as Text | null;
+		let text: Text | null;
+		if (node.nodeType === Node.TEXT_NODE) {
+			walker.currentNode = node;
+			const inside = last ? offset > 0 : offset < (node as Text).data.length;
+			text = inside ? (node as Text) : step();
+		} else {
+			// From the point between two children: into the child on the range's side of it, or
+			// on from the element where it has none there.
+			const child = node.childNodes[last ? offset - 1 : offset];
+			if (child) {
+				let edge: Node = child;
+				if (last) while (edge.lastChild) edge = edge.lastChild;
+				walker.currentNode = edge;
+				text = edge.nodeType === Node.TEXT_NODE ? (edge as Text) : step();
+			} else {
+				let edge: Node = node;
+				if (!last) while (edge.lastChild) edge = edge.lastChild;
+				walker.currentNode = edge;
+				text = step();
+			}
+		}
+		while (text && text.data === '') text = step();
+		return text && range.intersectsNode(text) ? text : null;
 	}
 
 	/** The sizes the list offers: those asked for, and always the body size. */
@@ -934,6 +1092,7 @@
 		if (sel.isCollapsed) {
 			// At a caret there is nothing to clear but what was chosen for the words typed next.
 			pendingSize = null;
+			pendingFont = null;
 			document.execCommand('removeFormat');
 			updateToolbarState();
 			return;
@@ -1653,6 +1812,7 @@
 		// temporarily moved to a toolbar element (e.g. colour picker, select).
 		saveSelection();
 		currentFontSize = sizeAtSelection();
+		currentFont = fontList.length > 0 ? fontAtSelection() : '';
 
 		formatState = {
 			bold: document.queryCommandState('bold'),
@@ -1674,11 +1834,48 @@
 	 */
 	function caretMoved(): void {
 		pendingSize = null;
+		pendingFont = null;
 		updateToolbarState();
+		keepCaretInSight();
+	}
+
+	let headEl: HTMLDivElement | undefined = $state();
+
+	/**
+	 * The browser scrolls a caret into the window, and knows nothing of the toolbar that stays
+	 * at the top of it: a caret moved up with the keys ends under the toolbar. The page is
+	 * scrolled by what the toolbar covers of the caret's line.
+	 */
+	function keepCaretInSight(): void {
+		if (!stickyToolbar || !headEl || !editorEl) return;
+		const selection = window.getSelection();
+		if (!selection || selection.rangeCount === 0 || !selectionInEditor()) return;
+		const focus = document.createRange();
+		try {
+			focus.setStart(selection.focusNode!, selection.focusOffset);
+		} catch {
+			return;
+		}
+		const caret = focus.getClientRects()[0];
+		if (!caret) return;
+		const head = headEl.getBoundingClientRect();
+		// Only where the toolbar is over the document, which it is not until the page is scrolled.
+		if (head.bottom <= editorEl.getBoundingClientRect().top) return;
+		const covered = head.bottom + 8 - caret.top;
+		if (covered <= 0 || caret.bottom < head.top) return;
+		for (let at: HTMLElement | null = editorEl.parentElement; at; at = at.parentElement) {
+			const overflow = getComputedStyle(at).overflowY;
+			if ((overflow === 'auto' || overflow === 'scroll') && at.scrollHeight > at.clientHeight) {
+				at.scrollTop -= covered;
+				return;
+			}
+		}
+		window.scrollBy(0, -covered);
 	}
 
 	/** The editing area was scrolled sideways (a wide table): what is drawn over it moves with it. */
 	function contentScrolled(): void {
+		hideLinkHint();
 		overlayRef?.reposition();
 		placeCopySourceBox();
 	}
@@ -1700,7 +1897,7 @@
 		// every keystroke: with a few pictures in the document it took a tenth of a second. Each is
 		// worked out when the handler asks for it, once, and not at all if it never does.
 		const el = editorEl;
-		const options = { fontFamily, fontSize };
+		const options = { fontFamily, fontSize, fonts };
 		const once = <T,>(read: () => T): (() => T) => {
 			let value: { v: T } | null = null;
 			return () => (value ??= { v: read() }).v;
@@ -1807,6 +2004,7 @@
 			applyPendingSize();
 		}
 		pendingSize = null;
+		pendingFont = null;
 		updateToolbarState();
 		// Typing means the user is editing text, not the picture. Dropping the
 		// selection here keeps Backspace editing that text instead of deleting a
@@ -2115,12 +2313,101 @@
 	}
 
 	// ── Image selection / editing ──
+	// ── Opening a link ──
+	// A click in text one can edit puts the caret there, in a link as anywhere else, so that the
+	// link's words can be changed: the browser follows no link in it. As in Word, a click with
+	// Ctrl (Cmd on a Mac) opens the link, in a new tab, and a note at the link under the pointer
+	// says so. The note is the editor's own and no part of the document.
+
+	const ON_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+	const OPEN_HINT = ON_MAC ? '\u2318 Command-click to open link' : 'Ctrl+click to open link';
+	/** Room kept for the note beside the link, so that it is not cut off at the right. */
+	const HINT_WIDTH = 320;
+
+	let linkHint: { top: number; left: number; above: boolean; href: string } | null = $state(null);
+	/**
+	 * Ctrl or Cmd is down: the link under the pointer shows the hand it will be opened with.
+	 * (Only with the pointer at a link: the keys are down for every shortcut, and the document's
+	 * element is not to change its class with each.)
+	 */
+	let linkArmed = $state(false);
+	let hintedLink: Element | null = null;
+
+	/** The link an event is at, where it has an address a link may have. */
+	function linkAt(e: Event): Element | null {
+		const link = e.target instanceof Element ? e.target.closest('a[href]') : null;
+		return link && editorEl?.contains(link) && linkTarget(link.getAttribute('href') ?? '') !== null ? link : null;
+	}
+
+	function hideLinkHint(): void {
+		hintedLink = null;
+		linkHint = null;
+	}
+
+	function linkHovered(e: MouseEvent): void {
+		linkArmed = !readonly && (e.metaKey || e.ctrlKey);
+		// (Not with a button down: the pointer is selecting text, and the note would be in its way.)
+		if (readonly || copyFormat !== 'off' || e.buttons !== 0 || !contentWrapEl) return;
+		const link = linkAt(e);
+		if (!link || link === hintedLink) return;
+		hintedLink = link;
+		const wrap = contentWrapEl.getBoundingClientRect();
+		// The line of the link the pointer is on: a link may run over two.
+		const line = Array.from(link.getClientRects()).find((r) => e.clientY >= r.top && e.clientY <= r.bottom) ?? link.getBoundingClientRect();
+		// Below the line, or above it where there is no room left in the window.
+		const above = line.bottom + 64 > window.innerHeight;
+		linkHint = {
+			top: (above ? line.top - 6 : line.bottom + 6) - wrap.top,
+			left: Math.max(0, Math.min(line.left - wrap.left, wrap.width - HINT_WIDTH)),
+			above,
+			href: link.getAttribute('href') ?? ''
+		};
+	}
+
+	function linkLeft(e: MouseEvent): void {
+		if (!hintedLink) return;
+		const to = e.relatedTarget;
+		if (!(to instanceof Node) || !hintedLink.contains(to)) hideLinkHint();
+	}
+
+	/** Open a link in a tab of its own, which is not handed this page. */
+	function openLink(address: string): void {
+		const target = linkTarget(address);
+		if (target === null) return;
+		const link = document.createElement('a');
+		link.href = target;
+		link.target = '_blank';
+		link.rel = 'noopener noreferrer';
+		link.click();
+	}
+
+	/**
+	 * A click on a link: with Ctrl or Cmd it is opened. Where the document cannot be edited a
+	 * plain click opens it, as in the viewer, and in a new tab too: the browser would open it
+	 * in this one, in place of the application. True where the click was the link's.
+	 */
+	function followLink(e: MouseEvent): boolean {
+		const modified = e.metaKey || e.ctrlKey;
+		// (Read only, a click with a key down is the browser's own: a new tab, a new window.)
+		if (readonly ? modified || e.shiftKey || e.altKey : !modified) return false;
+		const link = e.target instanceof Element ? e.target.closest('a[href]') : null;
+		if (!link || !editorEl?.contains(link)) return false;
+		e.preventDefault();
+		hideLinkHint();
+		openLink(link.getAttribute('href') ?? '');
+		return true;
+	}
+
 	function handleContentClick(e: MouseEvent): void {
-		if (readonly) return;
+		if (readonly) {
+			followLink(e);
+			return;
+		}
 		if (copyFormat !== 'off') {
 			handleCopyFormatClick(e);
 			return;
 		}
+		if (followLink(e)) return;
 		const target = e.target as HTMLElement | null;
 		selectedImage = target?.tagName === 'IMG' ? (target as HTMLImageElement) : null;
 	}
@@ -2231,7 +2518,7 @@
 		importing = true;
 
 		try {
-			const html = await readRtfFile(file, { fontSize, maxBytes: maxRtfBytes });
+			const html = await readRtfFile(file, { fontSize, fontFamily, fonts, maxBytes: maxRtfBytes });
 			if (editorEl) {
 				selectedImage = null;
 				documentReplaced();
@@ -2963,8 +3250,19 @@
 <svelte:window
 	onkeydown={(e) => {
 		if (copyFormat !== 'off' && e.key === 'Escape') stopCopyFormat();
+		linkArmed = !readonly && (e.metaKey || e.ctrlKey);
+		// Typing: the note at a link is in the way of the words.
+		if (linkHint && e.key !== 'Meta' && e.key !== 'Control') hideLinkHint();
 	}}
-	onresize={placeCopySourceBox}
+	onkeyup={(e) => (linkArmed = !readonly && (e.metaKey || e.ctrlKey))}
+	onblur={() => {
+		linkArmed = false;
+		hideLinkHint();
+	}}
+	onresize={() => {
+		placeCopySourceBox();
+		hideLinkHint();
+	}}
 />
 
 <div
@@ -2973,43 +3271,54 @@
 	style:--ink-font-family={screenFontFamily}
 	style:--ink-font-size="{screenFontSize}pt"
 >
-	{#if showToolbar && !readonly}
-		<Toolbar
-			{formatState}
-			blockType={currentBlock}
-			onexec={exec}
-			onblock={setBlock}
-			oninsertlink={openLinkModal}
-			oninsertimage={openImageModal}
-			fontSize={currentFontSize}
-			fontSizes={sizeChoices}
-			onfontsize={setFontSize}
-			copyingFormat={copyFormat !== 'off'}
-			oncopyformat={toggleCopyFormat}
-		/>
-	{/if}
+	{#if !readonly && (showToolbar || copyFormat !== 'off')}
+		<div class="ink-head" class:sticky={stickyToolbar} bind:this={headEl}>
+			{#if showToolbar}
+				<Toolbar
+					{formatState}
+					blockType={currentBlock}
+					onexec={exec}
+					onblock={setBlock}
+					oninsertlink={openLinkModal}
+					oninsertimage={openImageModal}
+					fontSize={currentFontSize}
+					fontSizes={sizeChoices}
+					onfontsize={setFontSize}
+					font={currentFont}
+					fonts={fontList}
+					documentFont={fontChoices([fontFamily])[0]?.name ?? DEFAULT_FONT_FAMILY}
+					onfont={setFont}
+					copyingFormat={copyFormat !== 'off'}
+					oncopyformat={toggleCopyFormat}
+				/>
+			{/if}
 
-	{#if copyFormat !== 'off' && !readonly}
-		<div class="ink-copy-format" role="status">
-			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="14" height="6" rx="1.5"/><path d="M17 6h3v5h-9v3"/><rect x="9.5" y="14" width="3" height="7" rx="1"/></svg>
-			<span>
-				{copyFormat === 'pick'
-					? 'Copy format: click the paragraph to copy from.'
-					: 'Format copied. Click each paragraph that should get it.'}
-			</span>
-			<button type="button" class="ink-copy-format-done" onmousedown={(e) => e.preventDefault()} onclick={stopCopyFormat}>
-				{copyFormat === 'pick' ? 'Cancel' : 'Done'}
-			</button>
-			<span class="ink-copy-format-key">or press Esc</span>
+			{#if copyFormat !== 'off'}
+				<div class="ink-copy-format" role="status">
+					<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="14" height="6" rx="1.5"/><path d="M17 6h3v5h-9v3"/><rect x="9.5" y="14" width="3" height="7" rx="1"/></svg>
+					<span>
+						{copyFormat === 'pick'
+							? 'Copy format: click the paragraph to copy from.'
+							: 'Format copied. Click each paragraph that should get it.'}
+					</span>
+					<button type="button" class="ink-copy-format-done" onmousedown={(e) => e.preventDefault()} onclick={stopCopyFormat}>
+						{copyFormat === 'pick' ? 'Cancel' : 'Done'}
+					</button>
+					<span class="ink-copy-format-key">or press Esc</span>
+				</div>
+			{/if}
 		</div>
 	{/if}
 
 	<div class="ink-content-wrap" bind:this={contentWrapEl}>
-		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<!-- (The pointer over a link shows a note of how the pointer opens it: there is nothing
+		     in it for the keyboard, which opens a link from the browser's own menu.) -->
+		<!-- svelte-ignore a11y_no_static_element_interactions, a11y_mouse_events_have_key_events -->
 		<div
 			class="ink-content"
 			class:copy-format-pick={copyFormat === 'pick'}
 			class:copy-format-apply={copyFormat === 'apply'}
+			class:links-open={linkArmed && linkHint !== null}
 			contenteditable={!readonly}
 			role="textbox"
 			tabindex="0"
@@ -3023,7 +3332,12 @@
 			onkeyup={caretMoved}
 			onscroll={contentScrolled}
 			onkeydown={handleKeydown}
-			onmousedown={() => (tabLeavesEditor = false)}
+			onmousedown={() => {
+				tabLeavesEditor = false;
+				hideLinkHint();
+			}}
+			onmouseover={linkHovered}
+			onmouseout={linkLeft}
 			onblur={() => (tabLeavesEditor = false)}
 			onpaste={handlePaste}
 			onclick={handleContentClick}
@@ -3042,6 +3356,19 @@
 				style:width="{copySourceBox.width}px"
 				style:height="{copySourceBox.height}px"
 			></div>
+		{/if}
+
+		{#if linkHint && !readonly}
+			<div
+				class="ink-link-hint"
+				class:above={linkHint.above}
+				role="tooltip"
+				style:top="{linkHint.top}px"
+				style:left="{linkHint.left}px"
+			>
+				<span class="ink-link-hint-address">{linkHint.href}</span>
+				<span class="ink-link-hint-how">{OPEN_HINT}</span>
+			</div>
 		{/if}
 
 		{#if !readonly}
@@ -3156,6 +3483,22 @@
 		width: 100%;
 	}
 
+	/* The toolbar, and under it the note of a format being copied. It stays in sight while a
+	   long document is scrolled, at the top of the window or of the scrolling element the
+	   editor is in: under a header of the page's own, --ink-toolbar-top is that header's
+	   height. Its ground is the toolbar's, so that no words show between its parts. */
+	.ink-head {
+		margin: 24px 0 16px;
+		border-radius: var(--radius, 8px);
+		background: var(--bg-toolbar, #fff);
+	}
+
+	.ink-head.sticky {
+		position: sticky;
+		top: var(--ink-toolbar-top, 0px);
+		z-index: 30;
+	}
+
 	/* Anchors the image selection frame, which lives outside the
 	   contenteditable area so it never lands in the exported HTML. */
 	.ink-content-wrap {
@@ -3214,7 +3557,7 @@
 		display: flex;
 		align-items: center;
 		gap: 10px;
-		margin: -8px 0 12px;
+		margin: 8px 0 0;
 		padding: 8px 12px;
 		border: 1px solid var(--accent, #6e56cf);
 		border-radius: var(--radius-sm, 5px);
@@ -3257,6 +3600,64 @@
 		border: 1.5px dashed var(--accent, #6e56cf);
 		border-radius: 3px;
 		pointer-events: none;
+	}
+
+	/* The note at a link under the pointer: where it goes, and how to open it. */
+	.ink-link-hint {
+		position: absolute;
+		z-index: 5;
+		box-sizing: border-box;
+		max-width: min(320px, 100%);
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		padding: 6px 10px;
+		border-radius: 8px;
+		background: var(--ink, #1a1714);
+		color: #fff;
+		font-family: 'DM Sans', system-ui, sans-serif;
+		font-size: 12px;
+		line-height: 1.35;
+		box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+		pointer-events: none;
+		/* Not at once: the pointer crosses links on its way elsewhere. */
+		animation: ink-link-hint-in 120ms ease 350ms both;
+	}
+
+	.ink-link-hint.above {
+		transform: translateY(-100%);
+	}
+
+	.ink-link-hint-address {
+		overflow: hidden;
+		white-space: nowrap;
+		text-overflow: ellipsis;
+		opacity: 0.75;
+	}
+
+	.ink-link-hint-how {
+		font-weight: 600;
+		white-space: nowrap;
+	}
+
+	@keyframes ink-link-hint-in {
+		from {
+			opacity: 0;
+		}
+		to {
+			opacity: 1;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.ink-link-hint {
+			animation-duration: 1ms;
+		}
+	}
+
+	/* Ctrl or Cmd is down: a click will open the link. */
+	.ink-content.links-open :global(a[href]) {
+		cursor: pointer;
 	}
 
 	/* Placeholder */

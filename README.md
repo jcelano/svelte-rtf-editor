@@ -109,9 +109,10 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 | Prop         | Type     | Default   | Description                              |
 |--------------|----------|-----------|------------------------------------------|
 | `content`    | `string` | —         | Raw RTF string to parse and display      |
-| `fontFamily` | `string` | `'Segoe UI'` | Font the document is shown in. See [Fonts](#fonts) |
+| `fontFamily` | `string` | `'Segoe UI'` | Font the document is shown in; a CSS list names the font first, then what a screen without it shows. See [Fonts](#fonts) |
 | `fontSize`   | `number` | `12`      | Body text size in points                 |
 | `maxRtfBytes` | `number` | `52428800` | The largest document it reads (50 MB); `0` reads any size. See [Size limit on import](#size-limit-on-import) |
+| `fonts`      | `string[]` | `[]`    | The fonts text may be shown in beside the document's own: the same list you give the editor. See [Fonts for selected text](#fonts-for-selected-text) |
 
 ---
 
@@ -127,6 +128,7 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 | `storageKey`    | `string`   | `'ink-editor-content'`       | `localStorage` key the draft is kept under. Give each document its own |
 | `ariaLabel`     | `string`   | `'Document'`                 | The name of the editing area for a screen reader          |
 | `showToolbar`   | `boolean`  | `true`                       | Show the formatting toolbar                               |
+| `stickyToolbar` | `boolean`  | `true`                       | Keep the toolbar in sight while a long document is scrolled. See [The toolbar of a long document](#the-toolbar-of-a-long-document) |
 | `showStatusBar` | `boolean`  | `true`                       | Show the word/character count bar                         |
 | `minHeight`     | `string`   | `'40vh'`                     | CSS `min-height` of the editing area                      |
 | `readonly`      | `boolean`  | `false`                      | Disable editing                                           |
@@ -134,9 +136,10 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 | `maxImageBytes` | `number`   | `524288`                     | Encoded byte ceiling per image; an oversized picture is re-encoded and shrunk until it fits, and is not inserted if it cannot. `0` disables |
 | `maxRtfBytes`   | `number`   | `52428800`                   | The largest RTF file Import reads (50 MB); `0` reads any size |
 | `maxImageDisplayWidth` | `number` | `624`                 | Width (px) a newly inserted image is displayed at, unless the column is narrower — 6.5in of page. `0` fills the column |
-| `fontFamily`    | `string`   | `'Segoe UI'`                 | Document font, on screen and in the RTF. See [Fonts](#fonts) |
+| `fontFamily`    | `string`   | `'Segoe UI'`                 | Document font, on screen and in the RTF. A CSS list names the font first, then what a screen without it shows. See [Fonts](#fonts) |
 | `fontSize`      | `number`   | `12`                         | Body text size in points, on screen and in the RTF        |
 | `fontSizes`     | `number[]` | `[8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36]` | The sizes, in points, the toolbar's size list offers for selected text. The body size is always among them; `[]` takes the list off the toolbar. See [Size of selected text](#size-of-selected-text) |
+| `fonts`         | `string[]` | `[]`                         | The fonts the toolbar's font list offers for selected text, beside the document's own. `[]` means no font list, and one font for the whole document. See [Fonts for selected text](#fonts-for-selected-text) |
 | `keepAttributes` | `string[]` | `[]` | `data-` attributes of your own that stay on HTML you set or the user pastes. See [HTML from outside](#html-from-outside) |
 | `keepClasses` | `string[]` | `[]` | Class names of your own that stay the same way |
 
@@ -162,6 +165,7 @@ editor.focus()            // → void    — focus the editor
 editor.exportFile(format) // → void    — download as 'html' | 'md' | 'rtf'
 editor.importRtf()        // → void    — open the file picker to import .rtf
 editor.setFontSize(14)    // → void    — size, in points, of the selected text, or of what is typed next
+editor.setFont('Calibri') // → void    — font of the selected text, or of what is typed next: one of `fonts`, or '' for the document font
 editor.clearFormatting()  // → void    — take bold, italic, underline, strike, color, size and font off the selected text
 ```
 
@@ -217,13 +221,13 @@ import {
 
 | Function                              | Description                                        |
 |---------------------------------------|----------------------------------------------------|
-| `rtfToHtml(rtf: string, options?: { fontSize?, maxBytes? }): string` | Parse an RTF string and return an HTML string. `fontSize` is the size of the screen it will be shown on (default 12). Throws a `RangeError` for a string longer than `maxBytes` (default 50 MB; see [Size limit on import](#size-limit-on-import)) |
+| `rtfToHtml(rtf: string, options?: { fontSize?, maxBytes?, fonts?, fontFamily? }): string` | Parse an RTF string and return an HTML string. `fontSize` is the size of the screen it will be shown on (default 12). `fonts` and `fontFamily` are the editor's: see [Fonts for selected text](#fonts-for-selected-text). Throws a `RangeError` for a string longer than `maxBytes` (default 50 MB; see [Size limit on import](#size-limit-on-import)) |
 | `htmlToRtf(el: HTMLElement, options?: { fontFamily?, fontSize? }): string` | Convert a DOM element's content to RTF, in Segoe UI 12 pt unless told otherwise |
 | `estimateRtfBytes(el: HTMLElement, options?: { fontFamily?, fontSize? }): number` | Approximate RTF size of a DOM element without converting it. Give it the options `htmlToRtf` is called with; it is never below the real size |
 | `isSafeLinkUrl(url: string): boolean` | Whether a link address is a web, mail or phone address; `htmlToRtf` and `htmlToMarkdown` write any other link as its text alone, and `rtfToHtml` reads any other as text |
 | `readRtfFile(file: File, options?: { fontSize?, maxBytes? }): Promise<string>` | Read a `.rtf` File object and return HTML. Rejects, without reading it, for a file larger than `maxBytes` |
 | `htmlToMarkdown(el: HTMLElement): string` | Convert a DOM element's content to Markdown. See [Markdown export](#markdown-export) |
-| `sanitizeHtml(html: string, options?: { keepAttributes?: string[]; keepClasses?: string[] }): string` | HTML made safe to show and edit. See [HTML from outside](#html-from-outside). Needs a DOM (`DOMParser`); without one it returns `''` |
+| `sanitizeHtml(html: string, options?: { keepAttributes?: string[]; keepClasses?: string[]; fonts?: string[]; fontFamily?: string }): string` | HTML made safe to show and edit. See [HTML from outside](#html-from-outside). Needs a DOM (`DOMParser`); without one it returns `''` |
 | `downloadFile(name, content, mime): void` | Trigger a file download in the browser        |
 
 ---
@@ -250,14 +254,66 @@ An application that shows documents in more than one place does well to keep the
 
 The default was Arial through 1.9.0. A document is written in the font of the editor that saves it, not in the font it was written in before: a report saved in Arial and opened and saved again by an editor left at the default comes out in Segoe UI. To keep Arial, pass `fontFamily="Arial"`.
 
-Segoe UI is installed with Windows. On a system without it (macOS, Linux, a phone) the screen shows the system's sans-serif font in its place, and the RTF still names Segoe UI, which is what the receiving system reads.
+Segoe UI is installed with Windows. On a system without it (macOS, Linux, a phone) the screen shows the system's sans-serif font in its place, and the RTF still names Segoe UI, which is what the receiving system reads. To show such a screen something closer, see [A font the screen does not have](#a-font-the-screen-does-not-have).
 
 - `fontFamily` is used for the whole document: body text, headings, lists and tables. Code keeps Courier New.
 - `fontSize` is the body size in points. Headings scale from it: at 12 pt, `h1` is 24 pt, `h2` 18 pt and `h3` 14 pt.
 - If you call `htmlToRtf` yourself on the editor's content, pass the same options you gave the editor, or the two produce different RTF.
-- `fontFamily` names one font. Given a CSS list such as `'Arial, sans-serif'`, only the first family is used.
+- `fontFamily` names one font. Given a CSS list such as `'Segoe UI, Selawik, sans-serif'`, the first family is the font: the one the RTF names, and the one the toolbar's font list shows. The rest of the list is for the screen alone, where the font is missing. Through 1.12.0 the rest of the list was ignored.
 - `fontSize` is rounded to the nearest half-point, which is what RTF measures in, and kept between 1 and 1638 pt.
 - If you show RTF in an editor or viewer set to another size, pass the same `fontSize` to `rtfToHtml`. Text at that size then carries no size of its own, text at any other size keeps it, and headings are recognized by the same ratios the writer uses. `InkEditor`'s RTF import and `RtfViewer` do this themselves. A heading must also be bold, at every body size, as every heading the writer emits is.
+
+### The toolbar of a long document
+
+The editing area grows with the document, and the page scrolls. The toolbar stays at the top of the window while it does, or at the top of the scrolling element the editor is in, and leaves with the end of the editor. A caret moved up with the keys is not left under it.
+
+- Under a header of your own that stays at the top too, give the toolbar its place below it: `--ink-toolbar-top: 56px` on the editor or any element around it.
+- It cannot stay where an element around the editor has `overflow: hidden`, `auto` or `scroll` and is not itself what scrolls: that is how `position: sticky` works. Take the `overflow` off that element, or make it the one that scrolls.
+- `stickyToolbar={false}` lets the toolbar go with the page, as it did through 1.12.0.
+
+### Opening a link
+
+A click on a link in the editor puts the caret in it, as anywhere else in the text, so that its words can be changed. To open the link, click it with `Ctrl` held down (`Cmd` on a Mac), as in Word. The pointer over a link shows a note with the address and that instruction. The note is the editor's own: it is not in the HTML or the RTF.
+
+- The link opens in a new tab, which is given no access to your page and is not told where it was opened from.
+- Only an address `isSafeLinkUrl` accepts is opened: a web, mail or phone address.
+- With `readonly` there is no caret to place, so a plain click opens the link, in a new tab like the viewer's. It used to open in place of your application.
+- How a link opens for the reader of the RTF is the receiving system's own affair. The RTF holds the address and the words (a `HYPERLINK` field), and says nothing of clicks.
+
+### A font the screen does not have
+
+The RTF names a font; it does not carry one. Whoever opens the document sees it in that font only if their machine has it, and that goes for your users' browsers too. On a Mac, a document in Segoe UI is shown in Helvetica, which is hard to tell from Arial, and lines break in other places than they will for the reader on Windows.
+
+A page cannot reliably find out which fonts a machine has, and does not need to. Give the font a stand-in the page loads itself, and name it after the font:
+
+```css
+/* Your page's stylesheet. The files are served by your own application. */
+@font-face { font-family: "Selawik"; font-weight: 400; src: url("/fonts/selawik-regular.woff2") format("woff2"); }
+@font-face { font-family: "Selawik"; font-weight: 700; src: url("/fonts/selawik-bold.woff2") format("woff2"); }
+```
+
+```svelte
+<InkEditor fontFamily="Segoe UI, Selawik, sans-serif" />
+<RtfViewer content={rtf} fontFamily="Segoe UI, Selawik, sans-serif" />
+```
+
+Where Segoe UI is installed the browser uses it and does not fetch the stand-in. Where it is not, the stand-in is fetched and shown. The RTF names Segoe UI either way. The fonts you offer for selected text take a stand-in the same way: `fonts={['Calibri, Carlito, sans-serif']}`.
+
+Fonts made to take the place of the usual ones, with letters of the same widths, so that lines break where they do in the original:
+
+| Font | Stand-in |
+| --- | --- |
+| Segoe UI | Selawik (upright cuts only: italic is slanted by the browser) |
+| Calibri | Carlito |
+| Cambria | Caladea |
+| Arial | Arimo, Liberation Sans |
+| Times New Roman | Tinos, Liberation Serif |
+| Courier New | Cousine, Liberation Mono |
+
+- Use a stand-in rather than the font itself. Segoe UI, Calibri and the others belong to their makers and are not yours to serve from a web page; the stand-ins are published under open licences. Read each one's licence before you ship it.
+- Serve the files from your own application, not from a font service. A request to someone else's server tells them who opened a document and when, is stopped by a strict content security policy, and does not work on a network that is closed to the outside.
+- Give the stand-in its own name, as above, and do not declare it under the name of the font it stands in for. A page that declares `"Segoe UI"` with one regular file takes the place of the installed Segoe UI too, and its bold is then the regular cut drawn thicker.
+- This package loads no fonts and makes no requests. The stylesheet and the files are your page's.
 
 ### Size of selected text
 
@@ -271,6 +327,30 @@ The toolbar has a list of sizes, next to the list of paragraph kinds. A size cho
 - `htmlToRtf` also reads `<font size="1">` to `<font size="7">`, which is how older pages and mail carry sizes, as the sizes a browser shows them at (7.5, 10, 12, 13.5, 18, 24 and 36 pt). They were shown at those sizes and written at the body size.
 
 The font has to be installed on the machine that displays the document. The RTF names it, and a reader without it substitutes one of its own.
+
+### Fonts for selected text
+
+By default a document has one font, `fontFamily`, and the toolbar has no font list. To let users set words in other fonts, name the fonts you offer:
+
+```svelte
+<InkEditor fonts={['Georgia', 'Calibri, Carlito, sans-serif', 'Arial']} bind:this={editor} />
+```
+
+The toolbar then has a font list before the size list: the document font first, then yours. A font chosen there is given to the selected text; with nothing selected, to what is typed next. `editor.setFont(name)` does the same from your own toolbar, and `editor.setFont('')` sets text back to the document font.
+
+Which fonts to offer is decided by the system that receives the RTF, not by what is installed where the document is written or viewed. A font that system cannot show is a choice the user only appears to have: the words come out in whatever it substitutes. So the list is set by whoever integrates the editor, once for each receiving system, and leaving it out is as good a decision as any: one font, and no font list.
+
+The list is the limit. A font that is not on it is not offered, is taken off HTML that is set or pasted, is not written to the RTF and is not read back from one. Keep it with `fontFamily` and `fontSize` in one module of your own, and pass all three wherever a document goes. What your own screens show of a font they do not have is a separate matter: see [A font the screen does not have](#a-font-the-screen-does-not-have).
+
+- An entry is a font name, or a CSS list whose first family is the name. The rest of the list is what a screen without that font shows the text in: `'Calibri, Carlito, sans-serif'` is Calibri in the list and in the RTF, and Carlito on a machine that has no Calibri. A name alone is given `serif`, `sans-serif` or `monospace` after it, whichever suits it.
+- In the RTF, each font the document has text in is one more entry of the font table, and the text is written between `\fN` and the font it was in before. A font that is offered and not used is not in the table.
+- An editor that offers no fonts lets none in. Text pasted from Word or a web page is shown in the document font, as the RTF has it. Through 1.12.0 the font of a paste stayed on the screen and was never written to the RTF: the editor showed Calibri and sent Segoe UI. If you use the editor for its HTML and want pasted fonts kept, name them in `fonts`.
+- Pass the same list wherever the document goes: `<RtfViewer fonts={…}>`, `htmlToRtf(el, { fonts })`, `rtfToHtml(rtf, { fonts, fontFamily })` and `sanitizeHtml(html, { fonts, fontFamily })`. Without it the writer writes one font and the reader gives none. `sanitizeHtml` called without `fonts` leaves fonts as they come, as before; with a list, `[]` included, it keeps those fonts and the document's and takes any other off.
+- An RTF file from another program is read the same way. Text it sets in a font you offer carries that font; text in any other font, and text in the font your screen shows the document in, carries none. TextEdit names each cut of a font (`TimesNewRomanPS-BoldMT`, `Arial-ItalicMT`): those are read as Times New Roman and Arial.
+- The editor uses the browser's own font command, so a change of font is undone and redone with everything else. In the HTML the font is on a `<font>` element (`<font face="Georgia, serif">`); what is read from RTF has it as a style (`<span style="font-family:Georgia, serif">`). Both are written to RTF alike.
+- Set back to the document font, the words lose their `<font>` in Chromium and Safari, and in Firefox are given one that names the document font. The RTF is the same.
+- Code stays in Courier New whatever font is around it. A monospace font you offer is written as that font, and read back as code, which is what a reader makes of text in a monospace font.
+- [Clear formatting](#clear-formatting) takes a font off with the rest.
 
 ### Clear formatting
 
@@ -420,7 +500,11 @@ The components use CSS custom properties with sensible fallbacks, so they work o
   --text:        #2c2520;
   --text-muted:  #8a7e72;
   --surface:     #f2f0ec;
-  --border:      #e5e2dc;
+  --border:      #e5e2dc;        /* also the box around the toolbar's lists */
+  --border-active: #c4b5a0;      /* that box, and the editor's, under the pointer */
+  --bg-select:   transparent;    /* inside the toolbar's lists */
+  --bg-toolbar:  #fff;           /* the toolbar; not see-through, the document passes under it */
+  --ink-toolbar-top: 0px;        /* where the toolbar stays: the height of a header of yours that stays too */
   --ink:         #1a1714;
   --accent:      #6e56cf;
   --accent-soft: #ede9fe;
@@ -439,6 +523,7 @@ The components use CSS custom properties with sensible fallbacks, so they work o
 | `Ctrl+I`   | Italic            |
 | `Ctrl+U`   | Underline         |
 | `Ctrl+K`   | Insert link       |
+| `Ctrl+click` / `Cmd+click` | Open the link under the pointer in a new tab |
 | `Ctrl+S`   | Save (fires `onsave`) |
 | `Backspace` / `Delete` | Remove the selected image |
 | `Ctrl+]` / `Cmd+]` | Increase indent of the selected paragraphs by 0.5 in (RTF `\li720` per step) |

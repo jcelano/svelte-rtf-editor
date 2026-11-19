@@ -25,7 +25,7 @@
  *   of its paragraph, text of no size).
  */
 
-import { linkTarget } from './rtf-writer.js';
+import { cssFontFamily, fontChoices, fontKey, linkTarget, sameFontList } from './rtf-writer.js';
 import { isSafeImageUrl } from './images.js';
 
 /** Elements taken out with everything in them. */
@@ -143,12 +143,28 @@ export interface KeepOptions {
 	keepAttributes?: readonly string[];
 	/** Class names that stay in an element's class list. */
 	keepClasses?: readonly string[];
+	/**
+	 * The fonts text may be set in, beside the document's own (the editor's `fonts`): a font
+	 * name, or a CSS list whose first family is the name. Where this is given, a font that is
+	 * not among them is taken off the text; given as an empty list, every font but the
+	 * document's is. Where it is not given, fonts are left as they come. (The editor always
+	 * gives its list, so an editor that offers no fonts lets none in.)
+	 */
+	fonts?: readonly string[];
+	/** The document's own font (the editor's `fontFamily`), which text may always name. Only read where `fonts` is given. */
+	fontFamily?: string;
 }
 
 /** The same, as the sets the sanitizer reads. */
 export interface Kept {
 	attributes: ReadonlySet<string>;
 	classes: ReadonlySet<string>;
+	/**
+	 * The fonts text may name, by the name each is looked up by, with what is written for it:
+	 * the fonts offered, and the document's own. Not there where no list of fonts was given
+	 * at all: then fonts are left as they come.
+	 */
+	fonts?: ReadonlyMap<string, string>;
 }
 
 /**
@@ -168,7 +184,20 @@ export function keptMarks(options: KeepOptions | undefined): Kept {
 	// `md:flex`, `w-1/2` and `résumé` without saying so, and kept nothing out: a name is only
 	// ever compared with the classes an element has, and one with a space in it is none of them.
 	const classes = new Set(namesIn(options?.keepClasses));
-	return { attributes, classes };
+	if (options?.fonts == null) return { attributes, classes };
+	// The document font last: a list that names it too does not make it a font of the text's own.
+	const fonts = new Map(fontChoices(options.fonts).map((choice) => [choice.key, choice.css]));
+	const own = cssFontFamily(options?.fontFamily);
+	fonts.set(fontKey(own), own);
+	return { attributes, classes, fonts };
+}
+
+/**
+ * A font value as it may stay: what the application wrote for that font. Null where the font is
+ * not one it offers.
+ */
+function offeredFont(value: string | null, keep: Kept): string | null {
+	return keep.fonts?.get(fontKey(value)) ?? null;
 }
 
 /**
@@ -441,7 +470,7 @@ function unreadAlone(text: string, el: HTMLElement): boolean {
 	return !probe.style || probe.style.length === 0;
 }
 
-function sanitizeStyle(el: HTMLElement, tag: string, fonts: FontSizes): void {
+function sanitizeStyle(el: HTMLElement, tag: string, fonts: FontSizes, keep?: Kept): void {
 	const raw = el.getAttribute('style');
 	if (raw === null) return;
 	const style = el.style;
@@ -451,6 +480,8 @@ function sanitizeStyle(el: HTMLElement, tag: string, fonts: FontSizes): void {
 	}
 	const wordHidden = WORD_HIDDEN.test(raw);
 	const drop: string[] = [];
+	/** The font to write in place of the one named, where it is offered under another spelling. */
+	let font: string | null = null;
 	// The size of this element's text first: its other lengths may be counted in it.
 	let fontPx = fontPxAround(el, fonts);
 	const fontSize = style.getPropertyValue('font-size');
@@ -464,6 +495,14 @@ function sanitizeStyle(el: HTMLElement, tag: string, fonts: FontSizes): void {
 		const name = style.item(i);
 		const value = style.getPropertyValue(name);
 		if (name === 'font-size') continue;
+		if (name === 'font-family' && keep?.fonts) {
+			// Only a font the application offers, and written as it wrote it: the name and
+			// what to show where the font is missing.
+			font = offeredFont(value, keep);
+			if (font === null) drop.push(name);
+			else if (sameFontList(font, value)) font = null;
+			continue;
+		}
 		const noPicture = NO_BORDER_IMAGE.get(name);
 		if (noPicture !== undefined) {
 			// `border: 1px solid` also says "no border picture", and a browser lists that with
@@ -502,8 +541,9 @@ function sanitizeStyle(el: HTMLElement, tag: string, fonts: FontSizes): void {
 		new Set(names).size !== names.length ||
 		names.some((name) => !STYLE_PROPERTY.test(name) || !read.some((property) => property === name || property.startsWith(`${name}-`))) ||
 		(shortAndPart && declared.some((declaration) => unreadAlone(declaration.text, el)));
-	if (drop.length === 0 && !unread) return;
+	if (drop.length === 0 && !unread && font === null) return;
 	for (const name of drop) style.removeProperty(name);
+	if (font !== null) style.setProperty('font-family', font);
 	// What Word hid stays hidden, in a way the browser keeps: mso-hide is not a property it
 	// reads, so the text showed on screen while the RTF left it out.
 	if (wordHidden) style.setProperty('display', 'none');
@@ -571,7 +611,13 @@ function sanitizeAttributes(el: HTMLElement, tag: string, fonts: FontSizes, idTa
 	if (tag === 'img' && el.hasAttribute('src') && !isSafeImageUrl(el.getAttribute('src') || '')) {
 		el.removeAttribute('src');
 	}
-	sanitizeStyle(el, tag, fonts);
+	if (tag === 'font' && keep?.fonts && el.hasAttribute('face')) {
+		const face = el.getAttribute('face');
+		const font = offeredFont(face, keep);
+		if (font === null) el.removeAttribute('face');
+		else if (!sameFontList(font, face)) el.setAttribute('face', font);
+	}
+	sanitizeStyle(el, tag, fonts, keep);
 }
 
 /**

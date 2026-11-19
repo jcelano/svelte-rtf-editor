@@ -1,6 +1,14 @@
 import { test, expect, type Page } from '@playwright/test';
 
-type Editor = { getHTML(): string; getRTF(): string; getMarkdown(): string; setHTML(html: string): void; focus(): void; clearFormatting(): void };
+type Editor = {
+	getHTML(): string;
+	getRTF(): string;
+	getMarkdown(): string;
+	setHTML(html: string): void;
+	focus(): void;
+	clearFormatting(): void;
+	setFont(name: string | null): void;
+};
 declare global {
 	interface Window {
 		ed: Editor;
@@ -19,6 +27,136 @@ async function open(page: Page, query: Record<string, string> = {}): Promise<voi
 const html = (page: Page) => page.evaluate(() => window.ed.getHTML());
 const body = (rtf: string) => rtf.slice(rtf.indexOf('\\fs24 ') + 6);
 const content = '.ink-content';
+
+test.describe('opening a link', () => {
+	const link = { content: '<p>before <a href="https://example.com/report?id=7">the report</a> after</p><p>second</p>' };
+	const anchor = `${content} a`;
+	const hint = '.ink-link-hint';
+	const MAC = process.platform === 'darwin';
+	/** The address is answered here: no test goes out to the network. */
+	async function local(page: Page): Promise<void> {
+		await page.context().route('https://example.com/**', (route) => route.fulfill({ contentType: 'text/html', body: '<title>opened</title>there' }));
+	}
+
+	test('a plain click puts the caret in the link and opens nothing', async ({ page }) => {
+		await local(page);
+		await open(page, link);
+		await page.click(anchor);
+		await page.keyboard.type('X');
+		expect(await page.locator(anchor).textContent()).toContain('X');
+		expect(page.context().pages()).toHaveLength(1);
+		expect(page.url()).toContain('/e2e?');
+	});
+
+	test('a click with Ctrl or Cmd opens it in a new tab, which is not handed this page', async ({ page }) => {
+		await local(page);
+		await open(page, link);
+		const before = await html(page);
+		const [opened] = await Promise.all([page.waitForEvent('popup'), page.click(anchor, { modifiers: ['ControlOrMeta'] })]);
+		await opened.waitForLoadState();
+		expect(opened.url()).toBe('https://example.com/report?id=7');
+		expect(await opened.evaluate(() => window.opener)).toBeNull();
+		expect(await opened.evaluate(() => document.referrer)).toBe('');
+		// This page is where it was, and the document as it was.
+		expect(page.url()).toContain('/e2e?');
+		expect(await html(page)).toBe(before);
+		expect(page.context().pages()).toHaveLength(2);
+	});
+
+	test('the pointer over a link shows where it goes and how to open it, and the note is no part of the document', async ({ page }) => {
+		await open(page, link);
+		await expect(page.locator(hint)).toHaveCount(0);
+		await page.hover(anchor);
+		await expect(page.locator(hint)).toBeVisible();
+		await expect(page.locator(hint)).toContainText('https://example.com/report?id=7');
+		await expect(page.locator(hint)).toContainText(MAC ? 'Command-click to open link' : 'Ctrl+click to open link');
+		expect(await page.locator(hint).evaluate((el) => !!el.closest('.ink-content'))).toBe(false);
+		expect(await html(page)).not.toContain('click to open');
+		expect(await page.evaluate(() => window.ed.getRTF())).not.toContain('click to open');
+		// Below the link, and not over its words.
+		const [at, note] = await Promise.all([page.locator(anchor).boundingBox(), page.locator(hint).boundingBox()]);
+		expect(note!.y).toBeGreaterThanOrEqual(at!.y + at!.height);
+		// With the key down, the link shows the hand.
+		await page.keyboard.down('ControlOrMeta');
+		await expect.poll(() => page.locator(anchor).evaluate((el) => getComputedStyle(el).cursor)).toBe('pointer');
+		await page.keyboard.up('ControlOrMeta');
+		await expect.poll(() => page.locator(anchor).evaluate((el) => getComputedStyle(el).cursor)).not.toBe('pointer');
+		// Away from the link, and in typing, the note is gone.
+		await page.hover(`${content} p:last-child`);
+		await expect(page.locator(hint)).toHaveCount(0);
+		await page.hover(anchor);
+		await expect(page.locator(hint)).toBeVisible();
+		await page.keyboard.type('a');
+		await expect(page.locator(hint)).toHaveCount(0);
+	});
+
+	test('a document that cannot be edited opens its link on a plain click, in a new tab and not in place of the page', async ({ page }) => {
+		await local(page);
+		await open(page, { ...link, readonly: '1' });
+		await page.hover(anchor);
+		await page.waitForTimeout(600);
+		await expect(page.locator(hint)).toHaveCount(0);
+		const [opened] = await Promise.all([page.waitForEvent('popup'), page.click(anchor)]);
+		await opened.waitForLoadState();
+		expect(opened.url()).toBe('https://example.com/report?id=7');
+		expect(await opened.evaluate(() => window.opener)).toBeNull();
+		expect(page.url()).toContain('/e2e?');
+	});
+});
+
+test.describe('the toolbar of a long document', () => {
+	const long = { content: Array.from({ length: 80 }, (_, i) => `<p>Paragraph ${i + 1} of a long report.</p>`).join('') };
+	const END = process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End';
+	const where = (page: Page) =>
+		page.evaluate(() => {
+			const bar = document.querySelector('.toolbar')!.getBoundingClientRect();
+			const selection = getSelection()!;
+			const focus = document.createRange();
+			focus.setStart(selection.focusNode!, selection.focusOffset);
+			const caret = focus.getClientRects()[0];
+			return { scrolled: scrollY, top: bar.top, bottom: bar.bottom, caret: caret ? caret.top : null };
+		});
+
+	test('stays in sight when the page is scrolled to the end of the document, and can be used there', async ({ page }) => {
+		await open(page, long);
+		await page.click(`${content} p:first-child`);
+		expect((await where(page)).top).toBeGreaterThan(0);
+		await page.keyboard.press(END);
+		await expect.poll(async () => (await where(page)).scrolled).toBeGreaterThan(500);
+		const at = await where(page);
+		expect(Math.abs(at.top)).toBeLessThan(1);
+		// It is over the document, not in front of a window the document shows through.
+		await expect(page.locator('.toolbar')).toBeInViewport();
+		expect(await page.locator('.ink-head').evaluate((el) => getComputedStyle(el).backgroundColor)).not.toMatch(/rgba\(\d+, \d+, \d+, 0\)|transparent/);
+		// A button on it is the one a click at its place gets, and it does its work.
+		await page.keyboard.press('Shift+ArrowUp');
+		expect(await html(page)).not.toMatch(/<(b|strong)>/);
+		await page.click('.toolbar button[title^="Bold"]');
+		expect(await html(page)).toMatch(/<(b|strong)>[^<]*report\.<\/(b|strong)><\/p>$/);
+		expect(Math.abs((await where(page)).top)).toBeLessThan(1);
+	});
+
+	test('a caret moved up with the keys is not left under it', async ({ page }) => {
+		await open(page, long);
+		await page.click(`${content} p:first-child`);
+		await page.keyboard.press(END);
+		await expect.poll(async () => (await where(page)).scrolled).toBeGreaterThan(500);
+		for (let step = 0; step < 40; step++) {
+			await page.keyboard.press('ArrowUp');
+			const at = await where(page);
+			if (at.caret !== null && at.top < 1) expect(at.caret, `step ${step}`).toBeGreaterThanOrEqual(at.bottom);
+		}
+		expect((await where(page)).scrolled).toBeGreaterThan(0);
+	});
+
+	test('goes with the page where the application asks for that', async ({ page }) => {
+		await open(page, { ...long, stickyToolbar: '0' });
+		await page.click(`${content} p:first-child`);
+		await page.keyboard.press(END);
+		await expect.poll(async () => (await where(page)).scrolled).toBeGreaterThan(500);
+		expect((await where(page)).bottom).toBeLessThan(0);
+	});
+});
 
 test.describe('a new document', () => {
 	test('the first words typed are a paragraph, and two lines typed are two paragraphs in the RTF', async ({ page }) => {
@@ -1143,5 +1281,235 @@ test.describe('Clear formatting', () => {
 		await selectChars(page);
 		await page.evaluate(() => window.ed.clearFormatting());
 		expect(await html(page)).toBe('<p>one bold</p><p>two</p>');
+	});
+});
+
+test.describe('Fonts', () => {
+	// The browser's own font command does the work, and each browser has its own: these run in
+	// all three. The fonts are set apart by "|" in the address, since a font may be a list.
+	const fonts = 'Georgia|Calibri, Carlito, sans-serif|Arial';
+	const MAC = process.platform === 'darwin';
+	const REDO = MAC ? 'Meta+Shift+z' : 'Control+Shift+z';
+	const list = 'select[title="Font"]';
+	const rtfBody = async (page: Page) => body(await page.evaluate(() => window.ed.getRTF()));
+
+	/** Select from the `from`th to the `to`th character of the document's text. */
+	async function selectChars(page: Page, from: number, to: number): Promise<void> {
+		await page.evaluate(
+			({ from, to }) => {
+				const ed = document.querySelector('.ink-content') as HTMLElement;
+				ed.focus();
+				const range = document.createRange();
+				const walker = document.createTreeWalker(ed, NodeFilter.SHOW_TEXT);
+				let at = 0;
+				for (let text = walker.nextNode() as Text | null; text; text = walker.nextNode() as Text | null) {
+					if (from >= at && from <= at + text.data.length) range.setStart(text, from - at);
+					if (to >= at && to <= at + text.data.length) {
+						range.setEnd(text, to - at);
+						break;
+					}
+					at += text.data.length;
+				}
+				getSelection()!.removeAllRanges();
+				getSelection()!.addRange(range);
+			},
+			{ from, to }
+		);
+	}
+	/** What the font list shows. (After a key, so that the toolbar has looked at the selection.) */
+	async function shown(page: Page): Promise<string> {
+		await page.keyboard.press('Shift');
+		return page.locator(list).evaluate((select: HTMLSelectElement) => select.selectedOptions[0]?.textContent ?? '');
+	}
+
+	test('an editor that offers no fonts shows none: not from a document, and not from a paste', async ({ page, browserName }) => {
+		// (They used to stay on the screen, and were never in the RTF.)
+		await open(page, { content: '<p style="font-family: Papyrus; text-align: right;">one <font face="Georgia" color="#ff0000">two</font></p>' });
+		expect(await html(page)).toBe('<p style="text-align: right;">one <font color="#ff0000">two</font></p>');
+		test.skip(browserName !== 'chromium', 'the paste is made through the clipboard, which only Chromium gives a test');
+		await page.evaluate(async () => {
+			const markup = '<span style="font-family: Calibri, sans-serif; font-size: 11pt; font-weight: bold;">from Word</span>';
+			await navigator.clipboard.write([new ClipboardItem({ 'text/html': new Blob([markup], { type: 'text/html' }) })]);
+		});
+		await page.click(`${content} p`);
+		await page.keyboard.press(MAC ? 'Meta+ArrowRight' : 'End');
+		const before = await html(page);
+		await page.keyboard.press('ControlOrMeta+v');
+		await expect.poll(() => html(page)).not.toBe(before);
+		const pasted = await html(page);
+		expect(pasted).not.toMatch(/Calibri|font-family/);
+		expect(pasted).toMatch(/font-weight: (bold|700)/);
+		expect(await page.locator(content).textContent()).toContain('from Word');
+	});
+
+	test('there is no font list unless fonts are offered', async ({ page }) => {
+		await open(page, { content: '<p>one</p>' });
+		await expect(page.locator(list)).toHaveCount(0);
+		await open(page, { content: '<p>one</p>', fonts });
+		expect(await page.locator(`${list} option`).allTextContents()).toEqual(['Segoe UI', 'Georgia', 'Calibri', 'Arial']);
+	});
+
+	test('the list sets the font of the selected words, shows it, and the RTF and the viewer carry it', async ({ page }) => {
+		await open(page, { content: '<p>one two three four</p>', fonts });
+		await selectChars(page, 4, 13);
+		await page.selectOption(list, 'georgia');
+		expect(await html(page)).toBe('<p>one <font face="Georgia, serif">two three</font> four</p>');
+		expect(await shown(page)).toBe('Georgia');
+		// A second font on some of those words: beside the first, not inside it.
+		await selectChars(page, 8, 13);
+		await page.selectOption(list, 'calibri');
+		expect(await html(page)).toBe('<p>one <font face="Georgia, serif">two </font><font face="Calibri, Carlito, sans-serif">three</font> four</p>');
+		expect(await shown(page)).toBe('Calibri');
+		await selectChars(page, 5, 10);
+		expect(await shown(page)).toBe('');
+		await selectChars(page, 0, 2);
+		expect(await shown(page)).toBe('Segoe UI');
+
+		const rtf = await page.evaluate(() => window.ed.getRTF());
+		expect(rtf).toContain('{\\f2\\froman\\fcharset0 Georgia;}{\\f3\\fswiss\\fcharset0 Calibri;}}');
+		expect(body(rtf)).toBe('\\pard one \\f2 two \\f0 \\f3 three\\f0  four\\par }');
+		await page.evaluate((rtf) => window.setViewer(rtf), rtf);
+		await expect(page.locator('#viewer span[style*="Georgia"]')).toHaveText('two');
+		await expect(page.locator('#viewer span[style*="Calibri"]')).toHaveText('three');
+	});
+
+	test('Undo takes the font off again and Redo puts it back', async ({ page }) => {
+		await open(page, { content: '<p>one two three</p>', fonts });
+		const before = await html(page);
+		await selectChars(page, 4, 7);
+		await page.selectOption(list, 'arial');
+		const set = await html(page);
+		expect(set).toBe('<p>one <font face="Arial, sans-serif">two</font> three</p>');
+		await page.keyboard.press('ControlOrMeta+z');
+		await expect.poll(() => html(page)).toBe(before);
+		await page.keyboard.press(REDO);
+		await expect.poll(() => html(page)).toBe(set);
+	});
+
+	test('the document font, chosen from the list, sets words back to it', async ({ page }) => {
+		await open(page, { content: '<p>one <font face="Georgia, serif">two three</font> four</p>', fonts });
+		await selectChars(page, 4, 7);
+		await page.selectOption(list, '');
+		// (Chromium and Safari take the font off the words; Firefox names the document font on
+		// them. Either way they are in the document font: in the RTF, and in the list.)
+		expect(await rtfBody(page)).toBe('\\pard one two\\f2  three\\f0  four\\par }');
+		await selectChars(page, 4, 7);
+		expect(await shown(page)).toBe('Segoe UI');
+		expect(await page.locator(`${content} p`).textContent()).toBe('one two three four');
+	});
+
+	test('a document font given as a list is shown in what follows where the first is missing, and words go back to it', async ({ page }) => {
+		// (A font no machine has, then one the page could have loaded: here Courier New, whose
+		// letters are all one width, so that it shows in the width of a line.)
+		const fontFamily = 'No Such Font 3, Courier New, monospace';
+		await open(page, { content: '<p>iiiiii <font face="Georgia, serif">WWWWWW</font> end</p>', fonts, fontFamily });
+		const widths = await page.evaluate(() => {
+			const paragraph = document.querySelector('.ink-content p') as HTMLElement;
+			const measure = (font: string) => {
+				const probe = document.createElement('span');
+				probe.style.cssText = `font-family: ${font}; font-size: ${getComputedStyle(paragraph).fontSize}; white-space: pre; position: absolute;`;
+				probe.textContent = 'iiiiii';
+				document.body.append(probe);
+				const width = probe.getBoundingClientRect().width;
+				probe.remove();
+				return width;
+			};
+			const range = document.createRange();
+			range.setStart(paragraph.firstChild!, 0);
+			range.setEnd(paragraph.firstChild!, 6);
+			return { shown: range.getBoundingClientRect().width, fallback: measure('"Courier New", monospace'), family: getComputedStyle(paragraph).fontFamily };
+		});
+		expect(widths.family).toMatch(/No Such Font 3.*Courier New.*monospace/);
+		expect(Math.abs(widths.shown - widths.fallback)).toBeLessThan(0.5);
+		// The list names the document font by its first family, and that is what the RTF names.
+		expect(await page.locator(`${list} option`).first().textContent()).toBe('No Such Font 3');
+		await selectChars(page, 7, 13);
+		await page.selectOption(list, '');
+		const rtf = await page.evaluate(() => window.ed.getRTF());
+		expect(rtf).toContain('{\\fonttbl{\\f0\\fswiss\\fcharset0 No Such Font 3;}{\\f1\\fmodern\\fcharset0 Courier New;}}');
+		expect(body(rtf)).toBe('\\pard iiiiii WWWWWW end\\par }');
+		await selectChars(page, 7, 13);
+		expect(await shown(page)).toBe('No Such Font 3');
+	});
+
+	test('the lists show nothing where the selection is in more than one font or size, and are boxes one can see', async ({ page }) => {
+		// The same font and size at both ends, and others in between.
+		await open(page, { content: '<p>plain <font face="Georgia, serif">geo</font> and <font style="font-size: 18pt;">big</font> end</p>', fonts });
+		const size = 'select[title="Font size"]';
+		const all = 'plain geo and big end'.length;
+		await selectChars(page, 0, all);
+		expect(await shown(page)).toBe('');
+		expect(await page.locator(size).evaluate((el) => (el as HTMLSelectElement).selectedOptions[0]?.textContent)).toBe('');
+		for (const box of [list, size, 'select[title="Paragraph style"]']) {
+			const style = await page.locator(box).evaluate((el) => {
+				const css = getComputedStyle(el);
+				return { width: css.borderTopWidth, line: css.borderTopStyle, radius: parseFloat(css.borderTopLeftRadius), color: css.borderTopColor };
+			});
+			expect(style.width, box).toBe('1px');
+			expect(style.line, box).toBe('solid');
+			expect(style.radius, box).toBeGreaterThanOrEqual(6);
+			expect(style.color, box).not.toMatch(/rgba\(\d+, \d+, \d+, 0\)|transparent/);
+		}
+		// Part of it, in one font and one size: the lists say which.
+		await selectChars(page, 0, 5);
+		expect(await shown(page)).toBe('Segoe UI');
+		await selectChars(page, 6, 9);
+		expect(await shown(page)).toBe('Georgia');
+		await selectChars(page, 0, 12);
+		expect(await shown(page)).toBe('');
+		expect(await page.inputValue(size)).toBe('12');
+		// Chosen from the empty list, a font is the font of all of it.
+		await selectChars(page, 0, all);
+		await page.selectOption(list, { label: 'Arial' });
+		await selectChars(page, 0, all);
+		expect(await shown(page)).toBe('Arial');
+		expect(await page.locator(size).evaluate((el) => (el as HTMLSelectElement).selectedOptions[0]?.textContent)).toBe('');
+	});
+
+	test('a font chosen at a caret is the font of what is typed next', async ({ page }) => {
+		await open(page, { content: '<p>one</p>', fonts });
+		await page.click(`${content} p`);
+		await page.keyboard.press(MAC ? 'Meta+ArrowRight' : 'End');
+		await page.selectOption(list, 'georgia');
+		expect(await page.locator(list).evaluate((select: HTMLSelectElement) => select.selectedOptions[0]?.textContent)).toBe('Georgia');
+		await page.keyboard.type('X');
+		expect(await html(page)).toBe('<p>one<font face="Georgia, serif">X</font></p>');
+		expect(await shown(page)).toBe('Georgia');
+	});
+
+	test('the application can set a font, and only one that is offered', async ({ page }) => {
+		await open(page, { content: '<p>one two</p>', fonts });
+		await selectChars(page, 0, 3);
+		await page.evaluate(() => window.ed.setFont('Papyrus'));
+		expect(await html(page)).toBe('<p>one two</p>');
+		await page.evaluate(() => window.ed.setFont('Calibri'));
+		expect(await html(page)).toBe('<p><font face="Calibri, Carlito, sans-serif">one</font> two</p>');
+	});
+
+	test('Clear formatting takes the font off', async ({ page }) => {
+		await open(page, { content: '<p>one <font face="Georgia, serif">two</font> <span style="font-family: Arial, sans-serif;">three</span></p>', fonts });
+		await selectChars(page, 0, 13);
+		await page.getByRole('button', { name: 'Clear formatting' }).click();
+		expect(await html(page)).toBe('<p>one two three</p>');
+	});
+
+	test('a document and a paste keep only the fonts that are offered', async ({ page, browserName }) => {
+		await open(page, { content: '<p style="font-family: Papyrus;">one <font face="GEORGIA">two</font> <font face="Comic Sans MS">three</font></p>', fonts });
+		expect(await html(page)).toBe('<p>one <font face="Georgia, serif">two</font> <font>three</font></p>');
+		// (Firefox and WebKit do not let a page put markup on the clipboard in a test.)
+		test.skip(browserName !== 'chromium', 'the paste is made through the clipboard, which only Chromium gives a test');
+		await page.evaluate(async () => {
+			const markup = '<span style="font-family: Papyrus; font-weight: bold;">papyrus</span><span style="font-family: arial;"> arial</span>';
+			await navigator.clipboard.write([new ClipboardItem({ 'text/html': new Blob([markup], { type: 'text/html' }) })]);
+		});
+		await page.click(`${content} p`);
+		await page.keyboard.press(MAC ? 'Meta+ArrowRight' : 'End');
+		const before = await html(page);
+		await page.keyboard.press('ControlOrMeta+v');
+		await expect.poll(() => html(page)).not.toBe(before);
+		const pasted = await html(page);
+		expect(pasted).not.toMatch(/papyrus,|Papyrus;|Comic/);
+		expect(pasted).toMatch(/font-family: Arial, sans-serif;[^>]*> arial/);
+		expect(await page.locator(`${content}`).textContent()).toContain('papyrus arial');
 	});
 });

@@ -192,10 +192,38 @@ describe('RtfViewer font', () => {
 // ── Review follow-ups ─────────────────────────────────────────────────────────
 
 describe('font names given as a CSS list', () => {
-	it('keeps only the first family', () => {
+	it('the RTF names only the first family', () => {
 		const rtf = htmlToRtf(htmlEl('<p>Text</p>'), { fontFamily: '"Times New Roman", serif' });
 		expect(fontTable(rtf)).toContain('{\\f0\\froman\\fcharset0 Times New Roman;}');
 		expect(cssFontFamily('Arial, sans-serif')).toBe('"Arial", sans-serif');
+		expect(fontTable(htmlToRtf(htmlEl('<p>Text</p>'), { fontFamily: 'Segoe UI, Selawik, sans-serif' }))).toBe(
+			'{\\fonttbl{\\f0\\fswiss\\fcharset0 Segoe UI;}{\\f1\\fmodern\\fcharset0 Courier New;}}'
+		);
+	});
+
+	it('the screen is given the rest of the list, for where the font is missing', () => {
+		expect(cssFontFamily('Segoe UI, Selawik, sans-serif')).toBe('"Segoe UI", "Selawik", sans-serif');
+		expect(cssFontFamily("'Calibri', \"Carlito\", Arial")).toBe('"Calibri", "Carlito", "Arial", sans-serif');
+		// A list that ends in no generic family is given the one that suits the font.
+		expect(cssFontFamily('Times New Roman, Tinos')).toBe('"Times New Roman", "Tinos", serif');
+		expect(cssFontFamily('Georgia, SERIF')).toBe('"Georgia", serif');
+	});
+
+	it('what is no font name is left out of the list', () => {
+		expect(cssFontFamily('Arial, x;color:red, a{b}, url(evil), Good Name, sans-serif')).toBe('"Arial", "Good Name", sans-serif');
+		expect(cssFontFamily('Arial, "</style>"')).toBe('"Arial", sans-serif');
+	});
+
+	it('the editor and the viewer show the list, and the editor writes the first family', () => {
+		const editor = mountInto(InkEditor, { content: '<p>Text</p>', showToolbar: false, fontFamily: 'Segoe UI, Selawik, sans-serif' }) as unknown as { getRTF: () => string };
+		const root = host!.querySelector('.ink-editor') as HTMLElement;
+		expect(root.style.getPropertyValue('--ink-font-family')).toBe('"Segoe UI", "Selawik", sans-serif');
+		expect(fontTable(editor.getRTF())).toContain(' Segoe UI;}');
+		expect(editor.getRTF()).not.toContain('Selawik');
+		if (component) unmount(component);
+		host?.remove();
+		mountInto(RtfViewer, { content: '{\\rtf1\\ansi Text}', fontFamily: 'Segoe UI, Selawik, sans-serif' });
+		expect((host!.querySelector('.rtf-viewer') as HTMLElement).style.fontFamily).toMatch(/Segoe UI.*Selawik.*sans-serif/);
 	});
 });
 

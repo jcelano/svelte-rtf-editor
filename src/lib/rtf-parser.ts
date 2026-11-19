@@ -16,6 +16,9 @@ import {
 	HEADING_SCALE,
 	PRE_SCALE,
 	LINK_COLOR,
+	DEFAULT_FONT_FAMILY,
+	fontChoices,
+	fontKey,
 	isMonospaceFontName,
 	linkTarget,
 	normalizeFontSize
@@ -94,6 +97,8 @@ interface RunFormat {
 	background: string;
 	/** Set in a monospace font that is not the document's own font: code. */
 	mono: boolean;
+	/** The font the text is set in, as CSS, where it is one the application offers; or ''. */
+	font: string;
 	link: string;
 }
 
@@ -650,9 +655,10 @@ function symbolText(text: string): string {
  * ({\f1\fmodern Courier New;}), and TextEdit's run of entries with no groups
  * (\f0\fswiss Helvetica;\f1\fmodern Courier;).
  */
-function readFontTable(group: RtfGroup): { mono: Set<number>; symbol: Set<number> } {
+function readFontTable(group: RtfGroup): { mono: Set<number>; symbol: Set<number>; names: Map<number, string> } {
 	const mono = new Set<number>();
 	const symbol = new Set<number>();
+	const names = new Map<number, string>();
 	let num: number | null = null;
 	let name = '';
 	let fixed = false;
@@ -662,6 +668,7 @@ function readFontTable(group: RtfGroup): { mono: Set<number>; symbol: Set<number
 		if (num != null) {
 			if (fixed || isMonospaceFontName(name)) mono.add(num);
 			if (symbolSet && isSymbolFontName(name)) symbol.add(num);
+			names.set(num, name.trim());
 		}
 		num = null;
 		name = '';
@@ -699,7 +706,21 @@ function readFontTable(group: RtfGroup): { mono: Set<number>; symbol: Set<number
 	read(group.children.filter((n) => n.type !== 'group'));
 	finish();
 
-	return { mono, symbol };
+	return { mono, symbol, names };
+}
+
+/**
+ * A font name as programs that name each cut of a font write it, brought back to the family:
+ * TextEdit's "Helvetica-Bold", "TimesNewRomanPS-ItalicMT" and "ArialMT" are Helvetica, Times New
+ * Roman and Arial. Without spaces or capitals, to be compared with a name taken the same way.
+ */
+function looseFontKey(name: string): string {
+	return name
+		.toLowerCase()
+		.replace(/-(regular|roman|book|light|medium|semibold|demibold|bold|heavy|black|italic|oblique|bolditalic|boldoblique)[a-z]*$/, '')
+		.replace(/(ps)?mt$/, '')
+		.replace(/ps$/, '')
+		.replace(/[\s_-]/g, '');
 }
 
 // ── Links ──
@@ -817,6 +838,19 @@ export interface RtfReadOptions {
 	 * (50 MB). 0 reads a document of any size.
 	 */
 	maxBytes?: number;
+	/**
+	 * The fonts text may be shown in, beside the document's own: the editor's or viewer's
+	 * `fonts`. Text the RTF sets in one of them carries that font; text in any other font is
+	 * shown in the document font, as all text is where this is not given. Each is a font name,
+	 * or a CSS list whose first family is the name. Default: none.
+	 */
+	fonts?: readonly string[];
+	/**
+	 * The document font of the screen the HTML will be shown on: the editor's or viewer's
+	 * `fontFamily`. Text the RTF sets in it carries no font of its own. Only read where `fonts`
+	 * is given. Default: DEFAULT_FONT_FAMILY.
+	 */
+	fontFamily?: string;
 }
 
 /** Twips as a CSS length in points (20 twips), which the writer reads back as the same twips. */
@@ -908,6 +942,7 @@ function sameFormatButSize(a: RunFormat, b: RunFormat): boolean {
 		a.color === b.color &&
 		a.background === b.background &&
 		a.mono === b.mono &&
+		a.font === b.font &&
 		a.link === b.link
 	);
 }
@@ -935,6 +970,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 	let colorTable: string[] = [''];
 	let monoFonts = new Set<number>();
 	let symbolFonts = new Set<number>();
+	let fontNames = new Map<number, string>();
 	let defaultFont = 0;
 
 	/** Where finished paragraphs and tables go: the document, or the footnote or text box being read. */
@@ -1023,7 +1059,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			if (firstControl?.word === 'colortbl') {
 				colorTable = parseColorTable(child);
 			} else if (firstControl?.word === 'fonttbl') {
-				({ mono: monoFonts, symbol: symbolFonts } = readFontTable(child));
+				({ mono: monoFonts, symbol: symbolFonts, names: fontNames } = readFontTable(child));
 			}
 		} else if (child.type === 'control' && child.word === 'deff' && child.param != null) {
 			defaultFont = child.param;
@@ -1032,6 +1068,27 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 
 	// In a document whose own font is monospace, code cannot be told from text by its font.
 	const documentIsMono = monoFonts.has(defaultFont);
+
+	// The fonts the application offers. Text in any other font, and text in the font the screen
+	// shows the document in, carries no font.
+	const offered = fontChoices(options.fonts);
+	const screenFont = fontKey(options.fontFamily) || fontKey(DEFAULT_FONT_FAMILY);
+	const fontCss = new Map<number, string>();
+	/** The font with this number in the font table, as CSS, if it is one text is shown in. */
+	function fontOf(index: number): string {
+		if (offered.length === 0) return '';
+		let css = fontCss.get(index);
+		if (css === undefined) {
+			const name = fontNames.get(index) ?? '';
+			const key = fontKey(name);
+			const loose = looseFontKey(name);
+			const isScreenFont = key === screenFont || loose === looseFontKey(screenFont);
+			const choice = offered.find((font) => font.key === key) ?? offered.find((font) => looseFontKey(font.key) === loose);
+			css = !key || isScreenFont || !choice ? '' : choice.css;
+			fontCss.set(index, css);
+		}
+		return css;
+	}
 	const linkColor = `rgb(${LINK_COLOR.r},${LINK_COLOR.g},${LINK_COLOR.b})`;
 
 	// The screen's body size, in half-points. It is given, not guessed from the
@@ -1093,6 +1150,8 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			// A list marker is set in whatever font the list uses (Word's second-level "o" is in
 			// Courier New): it is not code.
 			mono: !documentIsMono && !state.inList && monoFonts.has(state.fontIndex),
+			// (Not a list marker's, as above: Word sets its bullets in Symbol and Wingdings.)
+			font: state.inList ? '' : fontOf(state.fontIndex),
 			link: state.link
 		};
 	}
@@ -1114,6 +1173,8 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		if (!onlySpaces && fmt.fontSize !== bodySize && fmt.fontSize !== opts.dropSize) {
 			styles.push(`font-size:${fmt.fontSize / 2}pt`);
 		}
+		// (Code is in the code font: a font named for it would be the one it is shown in.)
+		if (!onlySpaces && fmt.font && !fmt.mono && !opts.pre) styles.push(`font-family:${escapeAttribute(fmt.font)}`);
 		if (styles.length > 0) result = `<span style="${styles.join(';')}">${result}</span>`;
 
 		if (fmt.mono && !opts.pre) result = `<code>${result}</code>`;
