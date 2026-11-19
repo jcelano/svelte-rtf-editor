@@ -104,9 +104,12 @@
 
 	<div class="toolbar-divider"></div>
 
-	<!-- Colors -->
+	<!-- Color, and all of the above taken off again -->
 	<div class="toolbar-group">
 		<ColorPicker value="#2C2520" title="Text color" onchange={(c) => exec('foreColor', c)} />
+		<ToolbarButton title="Clear formatting" onclick={() => exec('removeFormat')}>
+			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/><line x1="18" y1="4" x2="4" y2="20" stroke="var(--accent)" stroke-width="2"/></svg>
+		</ToolbarButton>
 	</div>
 
 	<div class="toolbar-divider"></div>
@@ -196,9 +199,6 @@
 		</ToolbarButton>
 		<ToolbarButton title="Redo" onclick={() => exec('redo')}>
 			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 7v6h-6"/><path d="M21 13c0 0-2.03-7-9-7a9 9 0 0 0-9 9 9 9 0 0 0 9 9c3.5 0 6-1.5 7.5-4"/></svg>
-		</ToolbarButton>
-		<ToolbarButton title="Clear formatting" onclick={() => exec('removeFormat')}>
-			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/><line x1="18" y1="4" x2="4" y2="20" stroke="var(--accent)" stroke-width="2"/></svg>
 		</ToolbarButton>
 	</div>
 </div>

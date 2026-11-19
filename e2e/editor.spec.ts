@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 
-type Editor = { getHTML(): string; getRTF(): string; getMarkdown(): string; setHTML(html: string): void; focus(): void };
+type Editor = { getHTML(): string; getRTF(): string; getMarkdown(): string; setHTML(html: string): void; focus(): void; clearFormatting(): void };
 declare global {
 	interface Window {
 		ed: Editor;
@@ -939,5 +939,209 @@ test.describe('what a third review found', () => {
 		await page.keyboard.press('ControlOrMeta+s');
 		expect(await page.evaluate(() => window.saves)).toEqual(['<p>Report!</p>']);
 		expect(await page.evaluate(() => localStorage.length)).toBe(0);
+	});
+});
+
+test.describe('Clear formatting', () => {
+	// The browser's own command does this differently in each browser: these run in all three.
+	const MAC = process.platform === 'darwin';
+	const REDO = MAC ? 'Meta+Shift+z' : 'Control+Shift+z';
+	const FORMATTED =
+		'<h2 style="text-align: center;">Heading <i>one</i></h2>' +
+		'<p style="font-size: 14pt; color: red; text-align: right; margin-left: 48px; text-indent: -24px;">plain <b>bold</b> <u>under</u> <s>strike</s> <font color="#ff0000">red</font> <font style="font-size: 18pt;">big</font></p>' +
+		'<p>Body<span style="color: rgb(0, 0, 0); font-size: 11pt; font-family: Calibri, sans-serif;">from Word <b style="font-weight: 700">bold</b></span></p>' +
+		'<p><span style="white-space:pre">\t</span>tabbed, a <a href="https://example.com/">link <b>in bold</b></a> and a <span data-field="dx" class="mark" style="color: blue;">mark</span></p>' +
+		'<ul><li><b>item</b> one</li></ul>' +
+		'<table><tbody><tr><td style="font-weight: bold; color: blue; background-color: rgb(238, 238, 238);">cell</td></tr></tbody></table><p>end</p>';
+	const marks = { keepAttributes: 'data-field', keepClasses: 'mark' };
+
+	/** Select from the `from`th to the `to`th character of the document's text, or all of it. */
+	async function selectChars(page: Page, from = 0, to = Infinity): Promise<void> {
+		await page.evaluate(
+			({ from, to }) => {
+				const ed = document.querySelector('.ink-content') as HTMLElement;
+				ed.focus();
+				const range = document.createRange();
+				range.selectNodeContents(ed);
+				const walker = document.createTreeWalker(ed, NodeFilter.SHOW_TEXT);
+				let at = 0;
+				for (let text = walker.nextNode() as Text | null; text; text = walker.nextNode() as Text | null) {
+					if (from >= at && from <= at + text.data.length) range.setStart(text, from - at);
+					if (to !== null && to >= at && to <= at + text.data.length) {
+						range.setEnd(text, to - at);
+						break;
+					}
+					at += text.data.length;
+				}
+				getSelection()!.removeAllRanges();
+				getSelection()!.addRange(range);
+			},
+			{ from, to: Number.isFinite(to) ? to : null }
+		);
+	}
+	const clear = (page: Page) => page.getByRole('button', { name: 'Clear formatting' }).click();
+
+	test('takes the looks off the selected text, and leaves what the text is', async ({ page }) => {
+		await open(page, { content: FORMATTED, ...marks });
+		const words = await page.locator(content).textContent();
+		await selectChars(page);
+		await clear(page);
+		const found = await page.evaluate(() => {
+			const ed = document.querySelector('.ink-content')!;
+			const styled = (el: HTMLElement) => ['color', 'font-size', 'font-family', 'font-weight', 'font-style', 'text-decoration-line'].filter((prop) => el.style.getPropertyValue(prop));
+			const [styledParagraph] = Array.from(ed.querySelectorAll('p'));
+			const cell = ed.querySelector('td')!;
+			const mark = ed.querySelector<HTMLElement>('span[data-field="dx"].mark');
+			const tab = Array.from(ed.querySelectorAll('span')).find((span) => span.textContent === '\t');
+			return {
+				formatting: Array.from(ed.querySelectorAll('b, strong, i, em, u, s, strike, font[color], font[size], font[face]')).map((el) => el.tagName.toLowerCase()),
+				looksWritten: Array.from(ed.querySelectorAll<HTMLElement>('*')).flatMap(styled),
+				structure: Array.from(ed.children).map((el) => el.tagName.toLowerCase()).join(' '),
+				heading: (ed.querySelector('h2') as HTMLElement).style.textAlign,
+				layout: [styledParagraph.style.textAlign, styledParagraph.style.marginLeft, styledParagraph.style.textIndent],
+				link: ed.querySelector('a')?.getAttribute('href'),
+				tab: tab ? getComputedStyle(tab).whiteSpaceCollapse || getComputedStyle(tab).whiteSpace : 'gone',
+				mark: mark ? mark.textContent : 'gone',
+				cell: [cell.style.backgroundColor, getComputedStyle(cell).fontWeight]
+			};
+		});
+		expect(found.formatting).toEqual([]);
+		expect(found.looksWritten).toEqual([]);
+		// What the text is, where it stands, and whose it is: as before.
+		expect(found.structure).toBe('h2 p p p ul table p');
+		expect(found.heading).toBe('center');
+		expect(found.layout).toEqual(['right', '48px', '-24px']);
+		expect(found.link).toBe('https://example.com/');
+		expect(found.tab).toMatch(/^(pre|preserve)$/);
+		expect(found.mark).toBe('mark');
+		expect(found.cell).toEqual(['rgb(238, 238, 238)', '400']);
+		expect(await page.locator(content).textContent()).toBe(words);
+	});
+
+	test('Undo puts everything back, and Redo takes it off again', async ({ page }) => {
+		await open(page, { content: FORMATTED, ...marks });
+		const before = await html(page);
+		await selectChars(page);
+		await clear(page);
+		const cleared = await html(page);
+		expect(cleared).not.toBe(before);
+		await page.keyboard.press('ControlOrMeta+z');
+		await expect.poll(() => html(page)).toBe(before);
+		await page.keyboard.press(REDO);
+		await expect.poll(() => html(page)).toBe(cleared);
+		// And from the toolbar.
+		await page.getByRole('button', { name: 'Undo (Ctrl+Z)' }).click();
+		await expect.poll(() => html(page)).toBe(before);
+		await page.getByRole('button', { name: 'Redo' }).click();
+		await expect.poll(() => html(page)).toBe(cleared);
+	});
+
+	test('clears only the words selected of a run in bold', async ({ page }) => {
+		await open(page, { content: '<p>one <b>bold words here</b> two</p>' });
+		await selectChars(page, 9, 14);
+		await clear(page);
+		expect(await html(page)).toBe('<p>one <b>bold </b>words<b> here</b> two</p>');
+	});
+
+	test('a mark of the application stays whole, whatever part of it is selected', async ({ page }) => {
+		// (Firefox's command cuts the element in two around the selected words, and takes it
+		// out where all of it is selected.)
+		const content = '<p>a <span data-field="dx" style="color: red;">marked <b>words</b> here</span> b <i>end</i></p>';
+		for (const [from, to] of [[9, 14], [0, 6], [12, 25], [0, 25]]) {
+			await open(page, { content, ...marks });
+			await selectChars(page, from, to);
+			await clear(page);
+			const found = await page.evaluate(() => {
+				const ed = document.querySelector('.ink-content')!;
+				return {
+					marks: Array.from(ed.querySelectorAll('span[data-field="dx"]')).map((el) => el.textContent),
+					leftBehind: ed.querySelectorAll('[data-ink-keep], [contenteditable]').length,
+					text: ed.textContent
+				};
+			});
+			expect(found, `${from} to ${to}`).toEqual({ marks: ['marked words here'], leftBehind: 0, text: 'a marked words here b end' });
+		}
+		// And what is selected outside the mark is cleared, also where the selection ends inside it.
+		await open(page, { content: '<p><b>bold</b> a <span data-field="dx">marked words</span></p>', ...marks });
+		await selectChars(page, 0, 13);
+		await clear(page);
+		expect(await html(page)).toBe('<p>bold a <span data-field="dx">marked words</span></p>');
+	});
+
+	test('after more is typed, Undo still loses no words', async ({ page }) => {
+		// (An editor that takes the <b> out itself leaves the browser's history pointing at
+		// what is no longer there: in Safari the next Undo then emptied the document.)
+		await open(page, { content: '<p>keep this <b>bold</b> and <i>this</i> text</p><p>second paragraph</p>' });
+		await selectChars(page, 0, 28);
+		await clear(page);
+		expect(await html(page)).toBe('<p>keep this bold and this text</p><p>second paragraph</p>');
+		await page.evaluate(() => {
+			const range = document.createRange();
+			range.selectNodeContents(document.querySelectorAll('.ink-content p')[1]);
+			range.collapse(false);
+			getSelection()!.removeAllRanges();
+			getSelection()!.addRange(range);
+		});
+		await page.keyboard.type(' typed');
+		for (let i = 0; i < 4; i++) {
+			await page.keyboard.press('ControlOrMeta+z');
+			await page.waitForTimeout(100);
+			expect(await page.locator(content).textContent()).toContain('keep this bold and this text');
+			expect(await page.locator(content).textContent()).toContain('second paragraph');
+		}
+		// And the formatting came back with the browser's own Undo.
+		expect(await html(page)).toBe('<p>keep this <b>bold</b> and <i>this</i> text</p><p>second paragraph</p>');
+	});
+
+	test('after more is typed, Undo brings the color back with the bold, and Redo clears both again', async ({ page }) => {
+		// The browser undoes its own command and knows nothing of the color the editor took off
+		// the paragraph: bold was back and the color was not.
+		for (const content of [
+			'<p style="color: red; text-align: center;">red <b>bold</b> <font color="#0000ff">blue</font></p><p>second</p>',
+			// (Here the editor does all of it: the browser's command finds nothing to take out.)
+			'<p style="color: red; text-align: center;">red paragraph</p><p>second</p>'
+		]) {
+			await open(page, { content });
+			const before = await html(page);
+			await page.evaluate(() => {
+				const range = document.createRange();
+				range.selectNodeContents(document.querySelector('.ink-content p')!);
+				getSelection()!.removeAllRanges();
+				getSelection()!.addRange(range);
+			});
+			await clear(page);
+			const cleared = await html(page);
+			expect(cleared).toContain('<p style="text-align: center;">red ');
+			expect(cleared).not.toMatch(/color|<b>|<font/);
+			await page.evaluate(() => {
+				const range = document.createRange();
+				range.selectNodeContents(document.querySelectorAll('.ink-content p')[1]);
+				range.collapse(false);
+				getSelection()!.removeAllRanges();
+				getSelection()!.addRange(range);
+			});
+			await page.keyboard.type(' typed');
+			// (Safari takes what was typed and the command back in one step, the others in two.)
+			const pressUntil = async (keys: string, wanted: string) => {
+				for (let i = 0; i < 3 && (await html(page)) !== wanted; i++) {
+					await page.keyboard.press(keys);
+					await page.waitForTimeout(100);
+				}
+				expect(await html(page)).toBe(wanted);
+			};
+			await pressUntil('ControlOrMeta+z', before);
+			await pressUntil(REDO, cleared.replace('second', 'second typed'));
+		}
+	});
+
+	test('the application can ask for it, and with nothing selected nothing is changed', async ({ page }) => {
+		await open(page, { content: '<p style="color: red;">one <b>bold</b></p><p>two</p>' });
+		const before = await html(page);
+		await page.click(`${content} p:nth-of-type(2)`);
+		await page.evaluate(() => window.ed.clearFormatting());
+		expect(await html(page)).toBe(before);
+		await selectChars(page);
+		await page.evaluate(() => window.ed.clearFormatting());
+		expect(await html(page)).toBe('<p>one bold</p><p>two</p>');
 	});
 });

@@ -162,6 +162,7 @@ editor.focus()            // → void    — focus the editor
 editor.exportFile(format) // → void    — download as 'html' | 'md' | 'rtf'
 editor.importRtf()        // → void    — open the file picker to import .rtf
 editor.setFontSize(14)    // → void    — size, in points, of the selected text, or of what is typed next
+editor.clearFormatting()  // → void    — take bold, italic, underline, strike, color, size and font off the selected text
 ```
 
 #### Auto-save
@@ -270,6 +271,24 @@ The toolbar has a list of sizes, next to the list of paragraph kinds. A size cho
 - `htmlToRtf` also reads `<font size="1">` to `<font size="7">`, which is how older pages and mail carry sizes, as the sizes a browser shows them at (7.5, 10, 12, 13.5, 18, 24 and 36 pt). They were shown at those sizes and written at the body size.
 
 The font has to be installed on the machine that displays the document. The RTF names it, and a reader without it substitutes one of its own.
+
+### Clear formatting
+
+The toolbar's Clear formatting button, next to the text color, takes the formatting off the selected text. `editor.clearFormatting()` does the same from your own toolbar. With nothing selected it changes nothing in the document.
+
+| Taken off | Stays |
+| --- | --- |
+| Bold, italic, underline, strikethrough | Headings, lists, block quotes, code blocks, tables |
+| Text color and highlight | Links |
+| Size and font | Alignment, indents, hanging indents, tabs |
+| Superscript, subscript, inline code | Pictures, their size and captions |
+| The same written as a style on a paragraph, a table cell or a pasted `<span>` | A table cell's shading |
+| | Elements carrying your `keepAttributes` or `keepClasses` |
+
+- Only the selected words change: clearing two words of a bold sentence leaves the rest bold.
+- The result is the same HTML in Chromium, Firefox and Safari. The browsers' own command is not: one takes a paragraph's alignment with its color, another leaves the color on the paragraph, a third takes out the element your mark is on.
+- Undo puts the formatting back and Redo takes it off again, from the keyboard and from the toolbar, also after more has been typed and undone. In Safari one Undo may take back the step before it as well.
+- A mark stays whole in all three browsers, whatever part of it is selected. In Firefox the words inside it keep the bold or italic they have there: its command cannot clear them without cutting the mark in two.
 
 ---
 

@@ -64,6 +64,10 @@
 	 *   focus()        — Focuses the editor.
 	 *   exportFile(format) — Downloads as 'html', 'md', or 'rtf'.
 	 *   importRtf()    — Opens the file picker to import an RTF file.
+	 *   setFontSize(points) — Sets the size of the selected text, or of what is typed next.
+	 *   clearFormatting()   — Takes bold, italic, underline, strike, color, size and font off
+	 *                    the selected text. Headings, lists, links, alignment, indents and
+	 *                    the application's own marks stay.
 	 */
 
 	import { onMount } from 'svelte';
@@ -496,6 +500,7 @@
 		broughtIn.clear();
 		pastesWithWords.length = 0;
 		hiddenTaken.length = 0;
+		clearUndo = clearRedo = clearPast = null;
 		stopCopyFormat();
 	}
 
@@ -761,6 +766,10 @@
 
 	// ── Exec command ──
 	function exec(cmd: string, value: string | null = null): void {
+		if (cmd === 'removeFormat') {
+			clearFormatting();
+			return;
+		}
 		restoreSelection();
 		editorEl?.focus();
 		// Color commands require an actual text selection — a collapsed cursor
@@ -778,10 +787,294 @@
 			hangAtCaret();
 			return;
 		}
-		if (cmd === 'undo' && undoIndent()) return;
+		if (cmd === 'undo' && (undoIndent() || undoClear())) return;
+		if (cmd === 'redo' && redoClear()) return;
 		document.execCommand(cmd, false, value ?? undefined);
 		if (cmd === 'undo' || cmd === 'redo') afterHistory();
 		updateToolbarState();
+	}
+
+	// ── Clear formatting ──
+	// The browser's own command does this, and each browser does it differently. Chromium and
+	// Safari take a paragraph's alignment and first-line indent with its color; Firefox leaves
+	// the color on the paragraph, and takes out the element an application's mark is on; Safari
+	// leaves a size where it is. So the command is used for what only it can do, which is to
+	// take the <b>, <i> and <font> elements out with an entry in the browser's own history
+	// (taken out by the editor instead, the next Undo in Safari empties the document). What is
+	// written on the elements is the editor's to change: before the command, the looks of the
+	// text are taken off every element whose text is all selected, and after it, whatever the
+	// command took off that is not a look of the text is written back.
+
+	/** What is written on an element for the looks of its text. */
+	const CHARACTER_STYLES = [
+		'color', 'background', 'background-color', 'font', 'font-family', 'font-size', 'font-weight', 'font-style',
+		'font-variant', 'font-stretch', 'text-decoration', 'text-decoration-line', 'text-decoration-color',
+		'text-decoration-style', 'text-decoration-thickness', 'letter-spacing', 'text-transform', 'text-shadow',
+		'vertical-align', '-webkit-text-stroke-width', '-webkit-text-fill-color'
+	];
+	const isLook = (prop: string) =>
+		CHARACTER_STYLES.includes(prop) || /^(font|text-decoration|background|-webkit-text)-/.test(prop);
+	/** In a table these are the table's design, not the looks of its text. */
+	const TABLE_PARTS = 'table, thead, tbody, tfoot, tr, td, th, col, colgroup';
+	const TABLE_DESIGN = new Set(['background', 'background-color', 'vertical-align']);
+	/** The attributes that carry looks: `style`, and on a <font> its own. */
+	const LOOKS = ['style', 'color', 'size', 'face'] as const;
+	type Looks = Record<(typeof LOOKS)[number], string | null>;
+
+	/** One Clear formatting: what was written on each element before and after, to put back. */
+	interface ClearStep {
+		before: Map<Element, Looks>;
+		after: Map<Element, Looks>;
+		/** The browser's command changed something, and has an entry in its history. */
+		native: boolean;
+		/** The document as the editor handed it to the command: where the browser's Undo of the command leads back to. */
+		pre: string;
+		/** The document as the step left it. */
+		cleared: string;
+		/** The document as it is now, the step done or undone: it is undone, or redone, only from there. */
+		html: string;
+	}
+	let clearUndo: ClearStep | null = null;
+	let clearRedo: ClearStep | null = null;
+	/** The last one made, also after more was typed: the browser's Undo may yet lead back to it. */
+	let clearPast: ClearStep | null = null;
+	/** The input events of the editor's own commands, while it clears: what they leave is not yet the document. */
+	let clearing = false;
+
+	/**
+	 * After the browser's own Undo. A Clear formatting is the editor's to undo only while nothing
+	 * else has been done. After that the browser undoes its command with everything else, and
+	 * knows nothing of what the editor took off the elements: bold was back, and the color was
+	 * not. Where its Undo has led back to the document as the command was given it, the rest is
+	 * put back here. A step the command left nothing of (a paragraph's color and no more) has no
+	 * such place to be led back to: it is the editor's to undo again once the document is as
+	 * that step left it, which is when what was typed after it has been undone.
+	 */
+	function afterUndoOfClear(): void {
+		const step = clearPast;
+		if (!step || !editorEl || clearing) return;
+		const now = editorEl.innerHTML;
+		if (step.native && step.pre !== step.cleared) {
+			if (now !== step.pre) return;
+			writeLooks(step.before);
+			clearUndo = null;
+			clearRedo = { ...step, html: editorEl.innerHTML };
+		} else if (now === step.cleared) {
+			clearUndo = { ...step, html: now };
+		}
+	}
+
+	const looksOf = (el: Element): Looks => ({
+		style: el.getAttribute('style'),
+		color: el.getAttribute('color'),
+		size: el.getAttribute('size'),
+		face: el.getAttribute('face')
+	});
+
+	function writeLooks(looks: Map<Element, Looks>): void {
+		for (const [el, wanted] of looks) {
+			if (!el.isConnected) continue;
+			for (const name of LOOKS) {
+				if (el.getAttribute(name) === wanted[name]) continue;
+				if (wanted[name] === null) el.removeAttribute(name);
+				else el.setAttribute(name, wanted[name]);
+			}
+		}
+	}
+
+	/** Whether all the text of an element is selected. (One with no text is, if it is in the selection.) */
+	function allSelected(range: Range, el: Element): boolean {
+		const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+		for (let text = walker.nextNode() as Text | null; text; text = walker.nextNode() as Text | null) {
+			if (text.data === '') continue;
+			if (range.comparePoint(text, 0) !== 0 || range.comparePoint(text, text.data.length) !== 0) return false;
+		}
+		return true;
+	}
+
+	/**
+	 * A <span> that is there for the looks of its text and nothing else. The command takes such
+	 * a one out whole, in every browser, and its Undo puts it back as it was: it is left to it.
+	 */
+	function onlyLooks(el: HTMLElement): boolean {
+		return el.tagName === 'SPAN' && el.attributes.length === 1 && el.style.length > 0 && Array.from(el.style).every(isLook);
+	}
+
+	/** An element that says something of its text other than how it looks: a mark of the application's, a tab. */
+	function isMark(el: HTMLElement): boolean {
+		return (
+			Array.from(el.attributes).some((attr) => !(LOOKS as readonly string[]).includes(attr.name)) ||
+			Array.from(el.style).some((prop) => !isLook(prop))
+		);
+	}
+
+	/** Take the looks of its text off one element: the element stays, and so does its layout. */
+	function plain(el: HTMLElement): void {
+		const tablePart = el.matches(TABLE_PARTS);
+		for (const prop of [...CHARACTER_STYLES, ...Array.from(el.style).filter(isLook)]) {
+			if (tablePart && TABLE_DESIGN.has(prop)) continue;
+			el.style.removeProperty(prop);
+		}
+		if (!el.getAttribute('style')) el.removeAttribute('style');
+		if (el.tagName === 'FONT') for (const name of ['color', 'size', 'face']) el.removeAttribute(name);
+	}
+
+	/**
+	 * Take the formatting off the selected text: bold, italic, underline, strike, color, size and
+	 * font, wherever it is written. What the text is stays: a heading is still a heading, a list
+	 * a list, a link a link, and a paragraph keeps its alignment and its indents. So do the
+	 * marks the application named (keepAttributes, keepClasses). Undo puts it back.
+	 */
+	export function clearFormatting(): void {
+		if (readonly || !editorEl) return;
+		restoreSelection();
+		editorEl.focus();
+		const sel = window.getSelection();
+		if (!sel || sel.rangeCount === 0 || !selectionInEditor()) return;
+		if (sel.isCollapsed) {
+			// At a caret there is nothing to clear but what was chosen for the words typed next.
+			pendingSize = null;
+			document.execCommand('removeFormat');
+			updateToolbarState();
+			return;
+		}
+		// The document changes outside an input event: earlier indent steps no longer undo.
+		indentUndo = [];
+		const range = sel.getRangeAt(0);
+		const touched = Array.from(editorEl.querySelectorAll<HTMLElement>('*')).filter((el) => range.intersectsNode(el));
+		const before = new Map(touched.map((el) => [el, looksOf(el)]));
+		const whole = touched.filter((el) => allSelected(range, el));
+		for (const el of whole) if (!onlyLooks(el)) plain(el);
+		const wanted = new Map(touched.map((el) => [el, el.getAttribute('style')]));
+		const html = editorEl.innerHTML;
+		// An element that says something of its text other than how it looks is not there for the
+		// command to take out: it is the application's mark, or the space a tab takes. Safari
+		// takes out a <span> that has nothing but a style, and Firefox every <span> there is; and
+		// where only some words of a mark are selected, Firefox cuts the mark in two around them.
+		// So each such element is marked for the command as one to keep, which is enough for
+		// Safari; and where one is taken out or cut all the same, the command is taken back and
+		// done again with those elements closed to it. (What is bold inside one of them then
+		// stays bold.)
+		const marks = new Map(touched.filter(isMark).map((el) => [el, el.textContent]));
+		const kept = Array.from(marks.keys());
+		const selected = range.cloneRange();
+		clearing = true;
+		try {
+			let closed = spansAreTakenOut ? kept.filter((el) => el.tagName === 'SPAN') : [];
+			removeFormat(selected, kept, closed);
+			const lost = kept.filter((el) => !el.isConnected || el.textContent !== marks.get(el));
+			if (lost.length > 0) {
+				document.execCommand('undo');
+				if (lost.some((el) => el.tagName === 'SPAN')) spansAreTakenOut = true;
+				closed = Array.from(new Set([...closed, ...lost])).filter((el) => el.isConnected);
+				removeFormat(selected, kept.filter((el) => el.isConnected), closed);
+			}
+		} finally {
+			clearing = false;
+		}
+		const native = editorEl.innerHTML !== html;
+		// What the command took off that is not a look of the text goes back on.
+		const probe = document.createElement('span');
+		for (const el of touched) {
+			if (!el.isConnected) continue;
+			probe.setAttribute('style', wanted.get(el) ?? '');
+			for (const prop of Array.from(probe.style)) {
+				if (isLook(prop) && !(el.matches(TABLE_PARTS) && TABLE_DESIGN.has(prop))) continue;
+				const value = probe.style.getPropertyValue(prop);
+				if (el.style.getPropertyValue(prop) !== value) el.style.setProperty(prop, value, probe.style.getPropertyPriority(prop));
+			}
+			if (!el.getAttribute('style')) el.removeAttribute('style');
+		}
+		// (And a <span> left to the command that it did not take out after all.)
+		for (const el of whole) if (el.isConnected) plain(el);
+		const after = new Map(touched.map((el) => [el, looksOf(el)]));
+		const changed = native || touched.some((el) => LOOKS.some((name) => before.get(el)![name] !== after.get(el)![name]));
+		const cleared = editorEl.innerHTML;
+		clearUndo = clearPast = changed ? { before, after, native, pre: html, cleared, html: cleared } : null;
+		clearRedo = null;
+		updateToolbarState();
+		if (!changed) return;
+		fireChange();
+		if (autosave) scheduleAutoSave();
+	}
+
+	/** Whether this browser's command has been seen to take out a <span> that was to stay. */
+	let spansAreTakenOut = false;
+	/** Written on an element while the command runs, so that it is not one with only a style. */
+	const KEEP_MARK = 'data-ink-keep';
+
+	/**
+	 * The browser's command on what was selected, with the elements in `kept` marked to stay and
+	 * those in `closed` out of its reach. Where the selection begins or ends inside a closed
+	 * element, the command would do nothing at all: it is given the part outside it.
+	 */
+	function removeFormat(selected: Range, kept: HTMLElement[], closed: HTMLElement[]): void {
+		const selection = window.getSelection();
+		if (!selection) return;
+		if (closed.length > 0 && selected.startContainer.isConnected && selected.endContainer.isConnected) {
+			const outside = selected.cloneRange();
+			for (const el of closed) {
+				if (el.contains(outside.startContainer)) outside.setStartAfter(el);
+				if (el.contains(outside.endContainer)) outside.setEndBefore(el);
+			}
+			if (outside.collapsed) return;
+			selection.removeAllRanges();
+			selection.addRange(outside);
+		}
+		const was = closed.map((el) => el.getAttribute('contenteditable'));
+		for (const el of kept) el.setAttribute(KEEP_MARK, '');
+		for (const el of closed) el.setAttribute('contenteditable', 'false');
+		document.execCommand('removeFormat');
+		// (Also off the copy the command makes of an element it cuts in two.)
+		for (const el of [...kept, ...Array.from(editorEl?.querySelectorAll(`[${KEEP_MARK}]`) ?? [])]) el.removeAttribute(KEEP_MARK);
+		closed.forEach((el, i) => {
+			if (was[i] === null) el.removeAttribute('contenteditable');
+			else el.setAttribute('contenteditable', was[i]!);
+		});
+	}
+
+	/** Undo the last Clear formatting, if nothing has changed since. */
+	function undoClear(): boolean {
+		const step = clearUndo;
+		clearUndo = null;
+		if (!step || !editorEl || editorEl.innerHTML !== step.html) return false;
+		clearing = true;
+		try {
+			if (step.native) document.execCommand('undo');
+		} finally {
+			clearing = false;
+		}
+		writeLooks(step.before);
+		// (Safari may take the step before back with it, and that may be a change of size.)
+		afterHistory();
+		clearRedo = { ...step, html: editorEl.innerHTML };
+		clearChanged();
+		return true;
+	}
+
+	/** Do it again, if nothing has changed since it was undone. */
+	function redoClear(): boolean {
+		const step = clearRedo;
+		clearRedo = null;
+		if (!step || !editorEl || editorEl.innerHTML !== step.html) return false;
+		// (In the order it was done: the command read the elements as the editor had left them.)
+		writeLooks(step.after);
+		clearing = true;
+		try {
+			if (step.native) document.execCommand('redo');
+		} finally {
+			clearing = false;
+		}
+		writeLooks(step.after);
+		clearUndo = { ...step, html: editorEl.innerHTML };
+		clearChanged();
+		return true;
+	}
+
+	function clearChanged(): void {
+		updateToolbarState();
+		fireChange();
+		if (autosave) scheduleAutoSave();
 	}
 
 	// ── Indent ──
@@ -1501,8 +1794,13 @@
 		followPastes(kind === 'historyUndo');
 		indentUndo = [];
 		if (history) {
-			afterHistory();
+			// (Not in the middle of a Clear formatting or of its Undo: the sizes are then not
+			// yet back on the elements. And what the editor puts back first, for the same reason.)
+			if (kind === 'historyUndo') afterUndoOfClear();
+			if (!clearing) afterHistory();
 		} else {
+			// (And a Clear formatting before this edit is the browser's to undo from here on.)
+			clearUndo = clearRedo = null;
 			// An edit: what was undone can no longer be redone.
 			sizeSteps = sizeSteps.slice(0, sizeStepsApplied);
 			// What was typed at a caret after a size was chosen came in marked: give it the size.
@@ -1514,6 +1812,8 @@
 		// selection here keeps Backspace editing that text instead of deleting a
 		// still-selected image somewhere else in the document.
 		selectedImage = null;
+		// (Clear formatting says so itself, when the document is as it leaves it.)
+		if (clearing) return;
 		fireChange();
 		if (autosave && shown) scheduleAutoSave();
 	}
@@ -1970,7 +2270,10 @@
 		if (mod && e.key === 'u') { e.preventDefault(); exec('underline'); }
 		if (mod && e.key === 'k') { e.preventDefault(); openLinkModal(); }
 		if (mod && e.key === 's') { e.preventDefault(); saveNow(); }
-		if (mod && !e.shiftKey && e.key.toLowerCase() === 'z' && undoIndent()) { e.preventDefault(); return; }
+		if (mod && !e.shiftKey && e.key.toLowerCase() === 'z' && (undoIndent() || undoClear())) { e.preventDefault(); return; }
+		// (Redo is Ctrl+Y as well, but not Cmd+Y.)
+		const redoKey = (e.shiftKey && e.key.toLowerCase() === 'z') || (e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'y');
+		if (mod && redoKey && redoClear()) { e.preventDefault(); return; }
 		if (mod && e.key === ']') { e.preventDefault(); indentBlocks('indent'); return; }
 		if (mod && e.key === '[') { e.preventDefault(); indentBlocks('outdent'); return; }
 
