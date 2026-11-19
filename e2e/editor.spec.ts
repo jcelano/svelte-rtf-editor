@@ -28,6 +28,82 @@ const html = (page: Page) => page.evaluate(() => window.ed.getHTML());
 const body = (rtf: string) => rtf.slice(rtf.indexOf('\\fs24 ') + 6);
 const content = '.ink-content';
 
+test.describe('opening a link', () => {
+	const link = { content: '<p>before <a href="https://example.com/report?id=7">the report</a> after</p><p>second</p>' };
+	const anchor = `${content} a`;
+	const hint = '.ink-link-hint';
+	const MAC = process.platform === 'darwin';
+	/** The address is answered here: no test goes out to the network. */
+	async function local(page: Page): Promise<void> {
+		await page.context().route('https://example.com/**', (route) => route.fulfill({ contentType: 'text/html', body: '<title>opened</title>there' }));
+	}
+
+	test('a plain click puts the caret in the link and opens nothing', async ({ page }) => {
+		await local(page);
+		await open(page, link);
+		await page.click(anchor);
+		await page.keyboard.type('X');
+		expect(await page.locator(anchor).textContent()).toContain('X');
+		expect(page.context().pages()).toHaveLength(1);
+		expect(page.url()).toContain('/e2e?');
+	});
+
+	test('a click with Ctrl or Cmd opens it in a new tab, which is not handed this page', async ({ page }) => {
+		await local(page);
+		await open(page, link);
+		const before = await html(page);
+		const [opened] = await Promise.all([page.waitForEvent('popup'), page.click(anchor, { modifiers: ['ControlOrMeta'] })]);
+		await opened.waitForLoadState();
+		expect(opened.url()).toBe('https://example.com/report?id=7');
+		expect(await opened.evaluate(() => window.opener)).toBeNull();
+		expect(await opened.evaluate(() => document.referrer)).toBe('');
+		// This page is where it was, and the document as it was.
+		expect(page.url()).toContain('/e2e?');
+		expect(await html(page)).toBe(before);
+		expect(page.context().pages()).toHaveLength(2);
+	});
+
+	test('the pointer over a link shows where it goes and how to open it, and the note is no part of the document', async ({ page }) => {
+		await open(page, link);
+		await expect(page.locator(hint)).toHaveCount(0);
+		await page.hover(anchor);
+		await expect(page.locator(hint)).toBeVisible();
+		await expect(page.locator(hint)).toContainText('https://example.com/report?id=7');
+		await expect(page.locator(hint)).toContainText(MAC ? 'Command-click to open link' : 'Ctrl+click to open link');
+		expect(await page.locator(hint).evaluate((el) => !!el.closest('.ink-content'))).toBe(false);
+		expect(await html(page)).not.toContain('click to open');
+		expect(await page.evaluate(() => window.ed.getRTF())).not.toContain('click to open');
+		// Below the link, and not over its words.
+		const [at, note] = await Promise.all([page.locator(anchor).boundingBox(), page.locator(hint).boundingBox()]);
+		expect(note!.y).toBeGreaterThanOrEqual(at!.y + at!.height);
+		// With the key down, the link shows the hand.
+		await page.keyboard.down('ControlOrMeta');
+		await expect.poll(() => page.locator(anchor).evaluate((el) => getComputedStyle(el).cursor)).toBe('pointer');
+		await page.keyboard.up('ControlOrMeta');
+		await expect.poll(() => page.locator(anchor).evaluate((el) => getComputedStyle(el).cursor)).not.toBe('pointer');
+		// Away from the link, and in typing, the note is gone.
+		await page.hover(`${content} p:last-child`);
+		await expect(page.locator(hint)).toHaveCount(0);
+		await page.hover(anchor);
+		await expect(page.locator(hint)).toBeVisible();
+		await page.keyboard.type('a');
+		await expect(page.locator(hint)).toHaveCount(0);
+	});
+
+	test('a document that cannot be edited opens its link on a plain click, in a new tab and not in place of the page', async ({ page }) => {
+		await local(page);
+		await open(page, { ...link, readonly: '1' });
+		await page.hover(anchor);
+		await page.waitForTimeout(600);
+		await expect(page.locator(hint)).toHaveCount(0);
+		const [opened] = await Promise.all([page.waitForEvent('popup'), page.click(anchor)]);
+		await opened.waitForLoadState();
+		expect(opened.url()).toBe('https://example.com/report?id=7');
+		expect(await opened.evaluate(() => window.opener)).toBeNull();
+		expect(page.url()).toContain('/e2e?');
+	});
+});
+
 test.describe('a new document', () => {
 	test('the first words typed are a paragraph, and two lines typed are two paragraphs in the RTF', async ({ page }) => {
 		await open(page);
@@ -1300,6 +1376,40 @@ test.describe('Fonts', () => {
 		expect(body(rtf)).toBe('\\pard iiiiii WWWWWW end\\par }');
 		await selectChars(page, 7, 13);
 		expect(await shown(page)).toBe('No Such Font 3');
+	});
+
+	test('the lists show nothing where the selection is in more than one font or size, and are boxes one can see', async ({ page }) => {
+		// The same font and size at both ends, and others in between.
+		await open(page, { content: '<p>plain <font face="Georgia, serif">geo</font> and <font style="font-size: 18pt;">big</font> end</p>', fonts });
+		const size = 'select[title="Font size"]';
+		const all = 'plain geo and big end'.length;
+		await selectChars(page, 0, all);
+		expect(await shown(page)).toBe('');
+		expect(await page.locator(size).evaluate((el) => (el as HTMLSelectElement).selectedOptions[0]?.textContent)).toBe('');
+		for (const box of [list, size, 'select[title="Paragraph style"]']) {
+			const style = await page.locator(box).evaluate((el) => {
+				const css = getComputedStyle(el);
+				return { width: css.borderTopWidth, line: css.borderTopStyle, radius: parseFloat(css.borderTopLeftRadius), color: css.borderTopColor };
+			});
+			expect(style.width, box).toBe('1px');
+			expect(style.line, box).toBe('solid');
+			expect(style.radius, box).toBeGreaterThanOrEqual(6);
+			expect(style.color, box).not.toMatch(/rgba\(\d+, \d+, \d+, 0\)|transparent/);
+		}
+		// Part of it, in one font and one size: the lists say which.
+		await selectChars(page, 0, 5);
+		expect(await shown(page)).toBe('Segoe UI');
+		await selectChars(page, 6, 9);
+		expect(await shown(page)).toBe('Georgia');
+		await selectChars(page, 0, 12);
+		expect(await shown(page)).toBe('');
+		expect(await page.inputValue(size)).toBe('12');
+		// Chosen from the empty list, a font is the font of all of it.
+		await selectChars(page, 0, all);
+		await page.selectOption(list, { label: 'Arial' });
+		await selectChars(page, 0, all);
+		expect(await shown(page)).toBe('Arial');
+		expect(await page.locator(size).evaluate((el) => (el as HTMLSelectElement).selectedOptions[0]?.textContent)).toBe('');
 	});
 
 	test('a font chosen at a caret is the font of what is typed next', async ({ page }) => {

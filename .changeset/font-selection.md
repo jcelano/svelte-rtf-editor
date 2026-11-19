@@ -38,6 +38,21 @@ has. An application that uses the editor for its HTML and wants pasted fonts kep
 `fonts`. `sanitizeHtml` called without `fonts` is unchanged; `sanitizeHtml(html, { fonts: [] })`
 takes every font off but the document's.
 
+**A link opens on Ctrl+click (Cmd+click on a Mac)**
+
+A click on a link in the editor puts the caret in it, and until now only the browser's own menu
+opened it. A click with Ctrl or Cmd opens it in a new tab, as in Word, and the pointer over a
+link shows a note with the address and how to open it. The note is not in the HTML or the RTF.
+With `readonly`, a plain click opens the link in a new tab; it used to open in place of the page.
+
+**The toolbar's lists are boxes one can see**
+
+The lists of paragraph kinds, fonts and sizes have a rounded border, so a list that shows nothing
+is still there to be chosen from. A list shows nothing where the selected text is in more than one
+font, or more than one size, as in Word: this is now so for a font or size anywhere in the
+selection, and not only at its two ends. New theme variable `--bg-select` (default transparent);
+the border is `--border`, and `--border-active` under the pointer.
+
 **A stand-in for a font the screen does not have**
 
 `fontFamily` may be a CSS list: `fontFamily="Segoe UI, Selawik, sans-serif"`. The first family is

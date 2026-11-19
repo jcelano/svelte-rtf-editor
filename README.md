@@ -262,6 +262,15 @@ Segoe UI is installed with Windows. On a system without it (macOS, Linux, a phon
 - `fontSize` is rounded to the nearest half-point, which is what RTF measures in, and kept between 1 and 1638 pt.
 - If you show RTF in an editor or viewer set to another size, pass the same `fontSize` to `rtfToHtml`. Text at that size then carries no size of its own, text at any other size keeps it, and headings are recognized by the same ratios the writer uses. `InkEditor`'s RTF import and `RtfViewer` do this themselves. A heading must also be bold, at every body size, as every heading the writer emits is.
 
+### Opening a link
+
+A click on a link in the editor puts the caret in it, as anywhere else in the text, so that its words can be changed. To open the link, click it with `Ctrl` held down (`Cmd` on a Mac), as in Word. The pointer over a link shows a note with the address and that instruction. The note is the editor's own: it is not in the HTML or the RTF.
+
+- The link opens in a new tab, which is given no access to your page and is not told where it was opened from.
+- Only an address `isSafeLinkUrl` accepts is opened: a web, mail or phone address.
+- With `readonly` there is no caret to place, so a plain click opens the link, in a new tab like the viewer's. It used to open in place of your application.
+- How a link opens for the reader of the RTF is the receiving system's own affair. The RTF holds the address and the words (a `HYPERLINK` field), and says nothing of clicks.
+
 ### A font the screen does not have
 
 The RTF names a font; it does not carry one. Whoever opens the document sees it in that font only if their machine has it, and that goes for your users' browsers too. On a Mac, a document in Segoe UI is shown in Helvetica, which is hard to tell from Arial, and lines break in other places than they will for the reader on Windows.
@@ -482,7 +491,9 @@ The components use CSS custom properties with sensible fallbacks, so they work o
   --text:        #2c2520;
   --text-muted:  #8a7e72;
   --surface:     #f2f0ec;
-  --border:      #e5e2dc;
+  --border:      #e5e2dc;        /* also the box around the toolbar's lists */
+  --border-active: #c4b5a0;      /* that box, and the editor's, under the pointer */
+  --bg-select:   transparent;    /* inside the toolbar's lists */
   --ink:         #1a1714;
   --accent:      #6e56cf;
   --accent-soft: #ede9fe;
@@ -501,6 +512,7 @@ The components use CSS custom properties with sensible fallbacks, so they work o
 | `Ctrl+I`   | Italic            |
 | `Ctrl+U`   | Underline         |
 | `Ctrl+K`   | Insert link       |
+| `Ctrl+click` / `Cmd+click` | Open the link under the pointer in a new tab |
 | `Ctrl+S`   | Save (fires `onsave`) |
 | `Backspace` / `Delete` | Remove the selected image |
 | `Ctrl+]` / `Cmd+]` | Increase indent of the selected paragraphs by 0.5 in (RTF `\li720` per step) |

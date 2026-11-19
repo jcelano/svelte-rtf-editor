@@ -92,6 +92,7 @@
 		htmlToRtf,
 		estimateRtfBytes,
 		isSafeLinkUrl,
+		linkTarget,
 		cssFontFamily,
 		fontChoices,
 		fontKey,
@@ -757,7 +758,7 @@
 		if (autosave) scheduleAutoSave();
 	}
 
-	/** The size of the text at the selection, for the toolbar: null where it starts and ends in different sizes. */
+	/** The size of the text at the selection, for the toolbar: null where the text selected is in more than one. */
 	function sizeAtSelection(): number | null {
 		if (pendingSize !== null) return pendingSize;
 		const selection = window.getSelection();
@@ -775,7 +776,9 @@
 		const first = start ? shownSize(start) : null;
 		if (range.collapsed) return first;
 		const end = holder(range.endContainer, range.endOffset, true);
-		return end && shownSize(end) === first ? first : null;
+		if (!end || shownSize(end) !== first) return null;
+		// The same at both ends, and another in between: the list shows none, as for two.
+		return throughout(range, (el) => shownSize(el) ?? 0) === null ? null : first;
 	}
 
 	// ── Font ──
@@ -825,7 +828,7 @@
 		return '';
 	}
 
-	/** The font of the text at the selection, for the toolbar: null where it starts and ends in different fonts. */
+	/** The font of the text at the selection, for the toolbar: null where the text selected is in more than one. */
 	function fontAtSelection(): string | null {
 		if (pendingFont !== null) return pendingFont;
 		const selection = window.getSelection();
@@ -836,13 +839,42 @@
 			const at = range.startContainer;
 			return fontOfElement(at.nodeType === Node.ELEMENT_NODE ? (at as Element) : at.parentElement);
 		}
-		// The first text selected and the last. A selection often starts at the end of the text
-		// before it (Safari leaves it there after the command), which is in another font.
+		const font = throughout(range, fontOfElement);
+		return font === undefined ? '' : font;
+	}
+
+	/** Lists, tables and the document itself: white space between their parts is not text one sees. */
+	const HOLDS_BLOCKS = new Set(['UL', 'OL', 'TABLE', 'THEAD', 'TBODY', 'TFOOT', 'TR']);
+
+	/**
+	 * What all the text selected has in common, as `of` reads it from the element a text is in:
+	 * its font, its size. null where two texts differ, so that the toolbar's list shows none
+	 * rather than the one the selection happens to start in. undefined where no text is selected.
+	 *
+	 * From the first text selected to the last: a selection often starts at the end of the text
+	 * before it (Safari leaves it there after the command), which is in another font.
+	 */
+	function throughout<T>(range: Range, of: (el: Element) => T): T | null | undefined {
 		const first = textAtEdge(range, false);
 		const last = textAtEdge(range, true);
-		if (!first || !last) return '';
-		const font = fontOfElement(first.parentElement);
-		return fontOfElement(last.parentElement) === font ? font : null;
+		if (!editorEl || !first || !last) return undefined;
+		if (first !== last && !(first.compareDocumentPosition(last) & Node.DOCUMENT_POSITION_FOLLOWING)) return undefined;
+		const walker = document.createTreeWalker(editorEl, NodeFilter.SHOW_TEXT);
+		walker.currentNode = first;
+		let seen: Element | null = null;
+		let value: T | undefined;
+		for (let text: Text | null = first; text; text = walker.nextNode() as Text | null) {
+			const parent = text.parentElement;
+			const unseen = (parent === editorEl || HOLDS_BLOCKS.has(parent?.tagName ?? '')) && text.data.trim() === '';
+			if (parent && parent !== seen && text.data !== '' && !unseen) {
+				const here = of(parent);
+				if (seen && here !== value) return null;
+				value = here;
+				seen = parent;
+			}
+			if (text === last) break;
+		}
+		return value;
 	}
 
 	/** The first text a range has a character of, or the last. */
@@ -1802,6 +1834,7 @@
 
 	/** The editing area was scrolled sideways (a wide table): what is drawn over it moves with it. */
 	function contentScrolled(): void {
+		hideLinkHint();
 		overlayRef?.reposition();
 		placeCopySourceBox();
 	}
@@ -2239,12 +2272,101 @@
 	}
 
 	// ── Image selection / editing ──
+	// ── Opening a link ──
+	// A click in text one can edit puts the caret there, in a link as anywhere else, so that the
+	// link's words can be changed: the browser follows no link in it. As in Word, a click with
+	// Ctrl (Cmd on a Mac) opens the link, in a new tab, and a note at the link under the pointer
+	// says so. The note is the editor's own and no part of the document.
+
+	const ON_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+	const OPEN_HINT = ON_MAC ? '\u2318 Command-click to open link' : 'Ctrl+click to open link';
+	/** Room kept for the note beside the link, so that it is not cut off at the right. */
+	const HINT_WIDTH = 320;
+
+	let linkHint: { top: number; left: number; above: boolean; href: string } | null = $state(null);
+	/**
+	 * Ctrl or Cmd is down: the link under the pointer shows the hand it will be opened with.
+	 * (Only with the pointer at a link: the keys are down for every shortcut, and the document's
+	 * element is not to change its class with each.)
+	 */
+	let linkArmed = $state(false);
+	let hintedLink: Element | null = null;
+
+	/** The link an event is at, where it has an address a link may have. */
+	function linkAt(e: Event): Element | null {
+		const link = e.target instanceof Element ? e.target.closest('a[href]') : null;
+		return link && editorEl?.contains(link) && linkTarget(link.getAttribute('href') ?? '') !== null ? link : null;
+	}
+
+	function hideLinkHint(): void {
+		hintedLink = null;
+		linkHint = null;
+	}
+
+	function linkHovered(e: MouseEvent): void {
+		linkArmed = !readonly && (e.metaKey || e.ctrlKey);
+		// (Not with a button down: the pointer is selecting text, and the note would be in its way.)
+		if (readonly || copyFormat !== 'off' || e.buttons !== 0 || !contentWrapEl) return;
+		const link = linkAt(e);
+		if (!link || link === hintedLink) return;
+		hintedLink = link;
+		const wrap = contentWrapEl.getBoundingClientRect();
+		// The line of the link the pointer is on: a link may run over two.
+		const line = Array.from(link.getClientRects()).find((r) => e.clientY >= r.top && e.clientY <= r.bottom) ?? link.getBoundingClientRect();
+		// Below the line, or above it where there is no room left in the window.
+		const above = line.bottom + 64 > window.innerHeight;
+		linkHint = {
+			top: (above ? line.top - 6 : line.bottom + 6) - wrap.top,
+			left: Math.max(0, Math.min(line.left - wrap.left, wrap.width - HINT_WIDTH)),
+			above,
+			href: link.getAttribute('href') ?? ''
+		};
+	}
+
+	function linkLeft(e: MouseEvent): void {
+		if (!hintedLink) return;
+		const to = e.relatedTarget;
+		if (!(to instanceof Node) || !hintedLink.contains(to)) hideLinkHint();
+	}
+
+	/** Open a link in a tab of its own, which is not handed this page. */
+	function openLink(address: string): void {
+		const target = linkTarget(address);
+		if (target === null) return;
+		const link = document.createElement('a');
+		link.href = target;
+		link.target = '_blank';
+		link.rel = 'noopener noreferrer';
+		link.click();
+	}
+
+	/**
+	 * A click on a link: with Ctrl or Cmd it is opened. Where the document cannot be edited a
+	 * plain click opens it, as in the viewer, and in a new tab too: the browser would open it
+	 * in this one, in place of the application. True where the click was the link's.
+	 */
+	function followLink(e: MouseEvent): boolean {
+		const modified = e.metaKey || e.ctrlKey;
+		// (Read only, a click with a key down is the browser's own: a new tab, a new window.)
+		if (readonly ? modified || e.shiftKey || e.altKey : !modified) return false;
+		const link = e.target instanceof Element ? e.target.closest('a[href]') : null;
+		if (!link || !editorEl?.contains(link)) return false;
+		e.preventDefault();
+		hideLinkHint();
+		openLink(link.getAttribute('href') ?? '');
+		return true;
+	}
+
 	function handleContentClick(e: MouseEvent): void {
-		if (readonly) return;
+		if (readonly) {
+			followLink(e);
+			return;
+		}
 		if (copyFormat !== 'off') {
 			handleCopyFormatClick(e);
 			return;
 		}
+		if (followLink(e)) return;
 		const target = e.target as HTMLElement | null;
 		selectedImage = target?.tagName === 'IMG' ? (target as HTMLImageElement) : null;
 	}
@@ -3087,8 +3209,19 @@
 <svelte:window
 	onkeydown={(e) => {
 		if (copyFormat !== 'off' && e.key === 'Escape') stopCopyFormat();
+		linkArmed = !readonly && (e.metaKey || e.ctrlKey);
+		// Typing: the note at a link is in the way of the words.
+		if (linkHint && e.key !== 'Meta' && e.key !== 'Control') hideLinkHint();
 	}}
-	onresize={placeCopySourceBox}
+	onkeyup={(e) => (linkArmed = !readonly && (e.metaKey || e.ctrlKey))}
+	onblur={() => {
+		linkArmed = false;
+		hideLinkHint();
+	}}
+	onresize={() => {
+		placeCopySourceBox();
+		hideLinkHint();
+	}}
 />
 
 <div
@@ -3133,11 +3266,14 @@
 	{/if}
 
 	<div class="ink-content-wrap" bind:this={contentWrapEl}>
-		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<!-- (The pointer over a link shows a note of how the pointer opens it: there is nothing
+		     in it for the keyboard, which opens a link from the browser's own menu.) -->
+		<!-- svelte-ignore a11y_no_static_element_interactions, a11y_mouse_events_have_key_events -->
 		<div
 			class="ink-content"
 			class:copy-format-pick={copyFormat === 'pick'}
 			class:copy-format-apply={copyFormat === 'apply'}
+			class:links-open={linkArmed && linkHint !== null}
 			contenteditable={!readonly}
 			role="textbox"
 			tabindex="0"
@@ -3151,7 +3287,12 @@
 			onkeyup={caretMoved}
 			onscroll={contentScrolled}
 			onkeydown={handleKeydown}
-			onmousedown={() => (tabLeavesEditor = false)}
+			onmousedown={() => {
+				tabLeavesEditor = false;
+				hideLinkHint();
+			}}
+			onmouseover={linkHovered}
+			onmouseout={linkLeft}
 			onblur={() => (tabLeavesEditor = false)}
 			onpaste={handlePaste}
 			onclick={handleContentClick}
@@ -3170,6 +3311,19 @@
 				style:width="{copySourceBox.width}px"
 				style:height="{copySourceBox.height}px"
 			></div>
+		{/if}
+
+		{#if linkHint && !readonly}
+			<div
+				class="ink-link-hint"
+				class:above={linkHint.above}
+				role="tooltip"
+				style:top="{linkHint.top}px"
+				style:left="{linkHint.left}px"
+			>
+				<span class="ink-link-hint-address">{linkHint.href}</span>
+				<span class="ink-link-hint-how">{OPEN_HINT}</span>
+			</div>
 		{/if}
 
 		{#if !readonly}
@@ -3385,6 +3539,64 @@
 		border: 1.5px dashed var(--accent, #6e56cf);
 		border-radius: 3px;
 		pointer-events: none;
+	}
+
+	/* The note at a link under the pointer: where it goes, and how to open it. */
+	.ink-link-hint {
+		position: absolute;
+		z-index: 5;
+		box-sizing: border-box;
+		max-width: min(320px, 100%);
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		padding: 6px 10px;
+		border-radius: 8px;
+		background: var(--ink, #1a1714);
+		color: #fff;
+		font-family: 'DM Sans', system-ui, sans-serif;
+		font-size: 12px;
+		line-height: 1.35;
+		box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+		pointer-events: none;
+		/* Not at once: the pointer crosses links on its way elsewhere. */
+		animation: ink-link-hint-in 120ms ease 350ms both;
+	}
+
+	.ink-link-hint.above {
+		transform: translateY(-100%);
+	}
+
+	.ink-link-hint-address {
+		overflow: hidden;
+		white-space: nowrap;
+		text-overflow: ellipsis;
+		opacity: 0.75;
+	}
+
+	.ink-link-hint-how {
+		font-weight: 600;
+		white-space: nowrap;
+	}
+
+	@keyframes ink-link-hint-in {
+		from {
+			opacity: 0;
+		}
+		to {
+			opacity: 1;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.ink-link-hint {
+			animation-duration: 1ms;
+		}
+	}
+
+	/* Ctrl or Cmd is down: a click will open the link. */
+	.ink-content.links-open :global(a[href]) {
+		cursor: pointer;
 	}
 
 	/* Placeholder */

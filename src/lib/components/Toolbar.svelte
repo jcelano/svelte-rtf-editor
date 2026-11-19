@@ -60,6 +60,8 @@
 	<div class="toolbar-group">
 		<select
 			class="tb-select"
+			title="Paragraph style"
+			aria-label="Paragraph style"
 			value={blockType}
 			onchange={(e) => onblock?.((e.target as HTMLSelectElement).value)}
 		>
@@ -267,38 +269,52 @@
 		flex-shrink: 0;
 	}
 
+	/* The lists are boxes one can see: a list that shows nothing (a selection in two fonts, or
+	   in two sizes) is still there to be chosen from. */
 	.tb-select {
-		height: 34px;
-		padding: 0 10px;
-		border: none;
-		background: transparent;
-		border-radius: var(--radius-sm);
+		height: 32px;
+		margin: 0 3px;
+		padding: 0 26px 0 11px;
+		border: 1px solid var(--border, #d9d4cc);
+		border-radius: 8px;
+		background-color: var(--bg-select, transparent);
 		font-family: 'DM Sans', sans-serif;
 		font-size: 13px;
 		font-weight: 500;
 		color: var(--text-muted);
 		cursor: pointer;
-		transition: all var(--transition);
+		transition:
+			border-color var(--transition, 150ms ease),
+			background-color var(--transition, 150ms ease),
+			box-shadow var(--transition, 150ms ease);
 		appearance: none;
 		-webkit-appearance: none;
-		padding-right: 22px;
 		background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238A7E72' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
 		background-repeat: no-repeat;
-		background-position: right 6px center;
+		background-position: right 8px center;
+	}
+
+	/* Wide enough for a font's name, and no narrower when it shows none. */
+	.tb-font {
+		min-width: 9em;
+		max-width: 12em;
 	}
 
 	/* Two or three digits: narrower than the list of paragraph kinds. */
-	.tb-font {
-		max-width: 11em;
-	}
-
 	.tb-size {
-		min-width: 52px;
-		padding-left: 8px;
+		min-width: 62px;
 	}
 
+	/* (The color alone: `background` would take the arrow off with it.) */
 	.tb-select:hover {
-		background: var(--surface);
+		background-color: var(--surface, #f6f4f0);
+		border-color: var(--border-active, #b8ab98);
 		color: var(--text);
+	}
+
+	.tb-select:focus-visible {
+		outline: none;
+		border-color: var(--accent, #6e56cf);
+		box-shadow: 0 0 0 3px var(--accent-soft, #ede9fe);
 	}
 </style>
