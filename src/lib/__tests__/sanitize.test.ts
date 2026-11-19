@@ -996,3 +996,26 @@ describe('sanitizeHtml: what a second review found', () => {
 		});
 	});
 });
+
+describe('a paste that holds a frame', () => {
+	// (A frame taken out of a page after it was put in makes Safari forget what it could undo:
+	// see pasteWithoutFrames. So it is taken out of the paste before.)
+	it('is given without the frame, and with all else as it came', async () => {
+		const { pasteWithoutFrames } = await import('../sanitize.js');
+		expect(pasteWithoutFrames('<p>came in</p><iframe src="https://example.com/frame"></iframe><p>after</p>')).toBe('<p>came in</p><p>after</p>');
+		expect(pasteWithoutFrames('<div><p>one</p><IFRAME srcdoc="<p>inside</p>"></IFRAME></div>')).toBe('<div><p>one</p></div>');
+		// Nothing else is made safe here: that is done to what comes in.
+		expect(pasteWithoutFrames('<form action="https://example.com/"><iframe></iframe><input value="typed"></form>')).toBe(
+			'<form action="https://example.com/"><input value="typed"></form>'
+		);
+	});
+
+	it('is null where there is no frame: nearly every paste, which the browser then makes', async () => {
+		const { pasteWithoutFrames } = await import('../sanitize.js');
+		expect(pasteWithoutFrames('')).toBeNull();
+		expect(pasteWithoutFrames('<p>plain <b>words</b></p>')).toBeNull();
+		// The letters as text are no frame.
+		expect(pasteWithoutFrames('<p>write &lt;iframe src="x"&gt; to embed</p>')).toBeNull();
+		expect(pasteWithoutFrames('<p>the iframe element</p>')).toBeNull();
+	});
+});

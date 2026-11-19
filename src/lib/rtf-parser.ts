@@ -21,8 +21,10 @@ import {
 	fontKey,
 	isMonospaceFontName,
 	linkTarget,
-	normalizeFontSize
+	normalizeFontSize,
+	hardToReadOnWhite
 } from './rtf-writer.js';
+import { letterReadings, listTypeAttribute, type LetterReading, type NumberStyle } from './list-markers.js';
 
 // ── Types ──
 
@@ -56,6 +58,13 @@ interface RenderState {
 	fontSize: number;
 	colorIndex: number;
 	highlightIndex: number;
+	/**
+	 * The background of the text, as an index of the color table: \cb and \chcbpat (character
+	 * shading), and \cbpat, the shading of the paragraph, which holds until \pard. Shading is
+	 * not shown; it is read to know which words were colored to stand on it (see readsOnWhite).
+	 */
+	backIndex: number;
+	paragraphBackIndex: number;
 	fontIndex: number;
 	ucSkip: number;
 	inList: boolean;
@@ -117,6 +126,8 @@ interface ListMarker {
 	kind: 'ul' | 'ol';
 	/** The number of a numbered item. */
 	number: number;
+	/** The marker of an item numbered in letters, without its period: "C", "iv". */
+	letters?: string;
 	/** Index of the first run after the marker and its tab. */
 	end: number;
 }
@@ -155,10 +166,14 @@ interface CellDef {
 	/** \clmgf and \clmrg, the same for a horizontal merge. */
 	hmgf: boolean;
 	hmrg: boolean;
+	/** \clcbpat: the shading of the cell as CSS, or ''. It is not shown (see readsOnWhite). */
+	shade: string;
 }
 
 interface RowCell {
 	html: string;
+	/** The same with the colors left out that cannot be read on white, where it has any: what a shaded cell shows. */
+	onWhite?: string;
 	align: string;
 }
 
@@ -220,6 +235,9 @@ const TAB_HTML = '<span style="white-space:pre">\t</span>';
 
 /** Text so far holding only a list marker: a bullet, or a number and a period. */
 const LIST_MARKER = /^\s*(?:\u2022|(\d+)\.)\s*$/;
+
+/** The same for an item numbered in letters or Roman numerals: "C.", "iv.". */
+const LETTER_MARKER = /^\s*([A-Z]{1,15}|[a-z]{1,15})\.\s*$/;
 
 /**
  * The bullet Word writes inside {\listtext …} and {\pntext …}: byte B7 of the Symbol font, which
@@ -363,6 +381,40 @@ function renderPicture(group: RtfGroup): string {
 	const style = styles.length ? ` style="${styles.join(';')}"` : '';
 
 	return `<img src="data:${mime};base64,${base64}"${style} alt="">`;
+}
+
+/**
+ * The pictures of an RTF document, in the order they are in it: each as the data address a
+ * browser shows (PNG or JPEG), or null for one it cannot show (a metafile).
+ *
+ * Word copies a picture to the clipboard twice: in its HTML as the address of a file on the
+ * writer's own disk, which no page may open, and in its RTF as the picture itself. So the
+ * pictures of a paste are read from here (see pastePictures). The second copy Word writes of
+ * each for older readers (\nonshppict, and a shape's \shprslt) is not counted.
+ */
+export function rtfPictures(rtf: string): (string | null)[] {
+	let tree: RtfGroup;
+	try {
+		tree = parseTree(rtf);
+	} catch {
+		return [];
+	}
+	const pictures: (string | null)[] = [];
+	const todo: RtfGroup[] = [tree];
+	while (todo.length > 0) {
+		const group = todo.pop()!;
+		const first = group.children.find((n): n is RtfControl => n.type === 'control' && n.word !== '*');
+		if (first?.word === 'nonshppict' || first?.word === 'shprslt') continue;
+		if (first?.word === 'pict') {
+			pictures.push(/ src="([^"]+)"/.exec(renderPicture(group))?.[1] ?? null);
+			continue;
+		}
+		for (let i = group.children.length - 1; i >= 0; i--) {
+			const child = group.children[i];
+			if (child.type === 'group') todo.push(child);
+		}
+	}
+	return pictures;
 }
 
 // ── Tokenizer ──
@@ -955,6 +1007,8 @@ interface RenderOptions {
 	dropBold?: boolean;
 	/** Inside <pre>: no <code>, a line break is a newline and a tab is a tab. */
 	pre?: boolean;
+	/** Leave out a color that cannot be read on white: the text of a shaded cell (see readsOnWhite). */
+	onWhite?: boolean;
 }
 
 export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): string {
@@ -1035,7 +1089,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 	let nestTabPending = false;
 
 	function newCellDef(): CellDef {
-		return { right: 0, header: false, vmgf: false, vmrg: false, hmgf: false, hmrg: false };
+		return { right: 0, header: false, vmgf: false, vmrg: false, hmgf: false, hmrg: false, shade: '' };
 	}
 
 	// The document is the first group. A byte-order mark or blank lines before it (a file saved
@@ -1109,6 +1163,8 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			fontSize: 24, // 12pt default
 			colorIndex: 0,
 			highlightIndex: 0,
+			backIndex: 0,
+			paragraphBackIndex: 0,
 			fontIndex: defaultFont,
 			ucSkip: 1,
 			inList: false,
@@ -1132,8 +1188,27 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		return { ...currentState() };
 	}
 
+	/** A color of the table as the background it is: none for the automatic color, and none for white, which the page is. */
+	function shadeAt(index: number): string {
+		const color = index > 0 && index < colorTable.length ? colorTable[index] : '';
+		return color === 'rgb(255,255,255)' ? '' : color;
+	}
+
+	/**
+	 * Shading is not shown: every word is on the white of the page. A color given to words so
+	 * that they could be read on their shading (the white header of a table whose header row is
+	 * dark, a white title on a shaded bar) cannot be read without it, and the cell or the line
+	 * looked empty. Such words are shown in the page's own color. A color that can be read on
+	 * white stays, shaded or not.
+	 */
+	function readsOnWhite(color: string): boolean {
+		const parts = color.match(/^rgb\((\d+),(\d+),(\d+)\)$/);
+		return !parts || !hardToReadOnWhite({ r: +parts[1], g: +parts[2], b: +parts[3] });
+	}
+
 	function formatOf(state: RenderState): RunFormat {
 		let color = state.colorIndex > 0 && state.colorIndex < colorTable.length ? colorTable[state.colorIndex] : '';
+		if (color && (shadeAt(state.backIndex) || shadeAt(state.paragraphBackIndex)) && !readsOnWhite(color)) color = '';
 		// Black is the color text has anyway, and a link's own color is the <a>'s to give.
 		if (color === 'rgb(0,0,0)' || (state.link && color === linkColor)) color = '';
 		return {
@@ -1168,7 +1243,8 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		let result = escapeText(text);
 
 		const styles: string[] = [];
-		if (fmt.color) styles.push(`color:${fmt.color}`);
+		// (A highlight is shown, and its words are read on it.)
+		if (fmt.color && (!opts.onWhite || fmt.background || readsOnWhite(fmt.color))) styles.push(`color:${fmt.color}`);
 		if (fmt.background) styles.push(`background-color:${fmt.background}`);
 		if (!onlySpaces && fmt.fontSize !== bodySize && fmt.fontSize !== opts.dropSize) {
 			styles.push(`font-size:${fmt.fontSize / 2}pt`);
@@ -1363,6 +1439,12 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 	}
 
 	/** The text of the line being read, back to the last line break, if text is all it holds. */
+	/** The cell being read, with the colors left out that cannot be read on white; undefined where it has none. */
+	function cellOnWhite(): string | undefined {
+		if (!runs.some((run) => run.fmt.color && !run.fmt.background && !readsOnWhite(run.fmt.color))) return undefined;
+		return trimSpaces(renderRuns(runs, { onWhite: true }));
+	}
+
 	function lineText(): string | null {
 		let text = '';
 		for (let i = runs.length - 1; i >= 0; i--) {
@@ -1394,6 +1476,22 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 					? { kind: 'ol', number: Number(listed[1]), end: runs.length }
 					: { kind: 'ul', number: 0, end: runs.length };
 			}
+			return;
+		}
+		// "C." or "iv.", which is a marker only on a paragraph set as the writer sets a list
+		// item: on any other line it is what someone typed ("A.", a tab, the specimen), and
+		// the tab after it stays a tab.
+		const lettered = opensParagraph && lead != null ? lead.match(LETTER_MARKER) : null;
+		if (
+			lettered &&
+			state.firstLineIndent === -LIST_HANG &&
+			state.leftIndent >= LIST_HANG &&
+			state.rightIndent === 0 &&
+			(state.align || 'left') === 'left' &&
+			letterReadings(lettered[1]).length > 0
+		) {
+			pushHtml('gap', '&emsp;', state);
+			marker = { kind: 'ol', number: 0, letters: lettered[1], end: runs.length };
 			return;
 		}
 		pushHtml('tab', TAB_HTML, state);
@@ -1434,13 +1532,15 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			for (let ci = 0; ci < row.cells.length; ci++) {
 				const def = row.defs[ci] ?? { ...newCellDef(), right: prevRight + (step || 1440) };
 				const cell = row.cells[ci];
+				// The words of a shaded cell, as they can be read without the shading.
+				const cellHtml = def.shade && cell.onWhite !== undefined ? cell.onWhite : cell.html;
 				const last = placed[placed.length - 1];
 				if (def.hmrg && last) {
 					last.right = Math.max(last.right, def.right);
-					if (cell.html) last.html += (last.html ? ' ' : '') + cell.html;
+					if (cellHtml) last.html += (last.html ? ' ' : '') + cellHtml;
 				} else {
 					placed.push({
-						html: cell.html, align: cell.align, def,
+						html: cellHtml, align: cell.align, def,
 						left: prevRight, right: Math.max(def.right, prevRight),
 						start: 0, end: 0, rowspan: 1, merged: false
 					});
@@ -1842,7 +1942,15 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 					if (p != null) state.colorIndex = p;
 					break;
 				case 'cb':
-					break; // \cb not rendered on import
+				case 'chcbpat':
+					state.backIndex = p ?? 0;
+					break;
+				case 'cbpat':
+					state.paragraphBackIndex = p ?? 0;
+					break;
+				case 'clcbpat':
+					pendingDef.shade = shadeAt(p ?? 0);
+					break;
 				case 'highlight':
 					if (p != null) state.highlightIndex = p;
 					break;
@@ -1992,6 +2100,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 					}
 					currentRowCells.push({
 						html: trimSpaces(renderRuns(runs)),
+						onWhite: cellOnWhite(),
 						// The alignment of the cell's last paragraph, also where that paragraph
 						// was ended inside a group ({\pard\intbl\qr 1.0\par}\cell, as this writer
 						// wrote cells up to 1.9.0).
@@ -2015,7 +2124,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 					// Text after the row's last \cell is a cell that was not closed, not the
 					// start of the paragraph after the table.
 					if (trimSpaces(renderRuns(runs))) {
-						currentRowCells.push({ html: trimSpaces(renderRuns(runs)), align: alignHere(state) });
+						currentRowCells.push({ html: trimSpaces(renderRuns(runs)), onWhite: cellOnWhite(), align: alignHere(state) });
 						newRuns();
 					}
 					// A row with no definition of its own repeats the one before it.
@@ -2049,6 +2158,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 					// \pard resets the paragraph, not the characters: bold, italic, underline
 					// and strikethrough carry on until \plain or their own \b0. Word relies on it.
 					state.align = 'left';
+					state.paragraphBackIndex = 0;
 					resetIndents(state);
 					// Being in a table is a paragraph property too. Without this, one \intbl with
 					// no \row made a single cell of the rest of the document. The marker group
@@ -2124,6 +2234,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 					state.fontSize = 24;
 					state.colorIndex = 0;
 					state.highlightIndex = 0;
+					state.backIndex = 0;
 					state.fontIndex = defaultFont;
 					state.hidden = false;
 					state.deleted = false;
@@ -2202,11 +2313,13 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 	 * A list item as the writer sends one: a bullet or "N.", a tab, and a paragraph that hangs by
 	 * 360 twips with nothing else set. Only that shape is rebuilt as <ul> or <ol>, because only
 	 * that shape is written back the same. A line someone typed with a dash or a bullet, a list
-	 * hung by another distance, lettered or centered, stays the paragraph it is, marker and all.
+	 * hung by another distance or centered, stays the paragraph it is, marker and all. An item
+	 * numbered in letters ("C.", "iv.") is one of a list that counts so (<ol type="A">).
 	 */
 	interface ListItem {
 		kind: 'ul' | 'ol';
 		number: number;
+		letters?: string;
 		left: number;
 		html: string;
 	}
@@ -2216,6 +2329,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		return {
 			kind: b.marker.kind,
 			number: b.marker.number,
+			letters: b.marker.letters,
 			left: b.left,
 			html: trimSpaces(renderRuns(b.runs.slice(b.marker.end)))
 		};
@@ -2225,7 +2339,33 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 	function renderLists(list: ListItem[]): string[] {
 		const out: string[] = [];
 		let html = '';
-		const open: { kind: 'ul' | 'ol'; left: number; next: number }[] = [];
+		const open: { kind: 'ul' | 'ol'; left: number; next: number; style: NumberStyle }[] = [];
+		/**
+		 * The number an item has and the way its list counts. Letters can be read two ways: "C"
+		 * is the third letter and the Roman 100. It is the one that goes on with the list the
+		 * item is in; where it opens a list, the one the next item at its level goes on with
+		 * ("D." or "CI."); and with neither to go by, a Roman numeral for "I" and for several
+		 * letters, a letter for any other.
+		 */
+		const readingOf = (at: number, top: (typeof open)[number] | undefined): LetterReading => {
+			const item = list[at];
+			if (!item.letters) return { style: 'decimal', number: item.number };
+			const readings = letterReadings(item.letters);
+			if (top && top.kind === 'ol' && item.left === top.left) {
+				const goesOn = readings.find((r) => r.style === top.style && r.number === top.next);
+				if (goesOn) return goesOn;
+			}
+			if (readings.length === 1) return readings[0];
+			for (let i = at + 1; i < list.length && list[i].left >= item.left; i++) {
+				if (list[i].left > item.left) continue;
+				const after = list[i].letters ? letterReadings(list[i].letters!) : [];
+				const led = readings.find((r) => after.some((a) => a.style === r.style && a.number === r.number + 1));
+				if (led) return led;
+				break;
+			}
+			const roman = item.letters.length > 1 || /^[Ii]$/.test(item.letters);
+			return readings.find((r) => r.style.endsWith(roman ? 'roman' : 'alpha')) ?? readings[0];
+		};
 		const closeList = () => {
 			const done = open.pop()!;
 			html += `</li></${done.kind}>`;
@@ -2234,13 +2374,14 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 				html = '';
 			}
 		};
-		for (const item of list) {
+		for (const [at, item] of list.entries()) {
 			// A smaller indent ends the lists nested deeper than it.
 			while (open.length > 0 && item.left < open[open.length - 1].left) closeList();
 			const top = open[open.length - 1];
-			if (top && item.left === top.left && item.kind === top.kind && (item.kind === 'ul' || item.number === top.next)) {
+			const { style, number } = readingOf(at, top);
+			if (top && item.left === top.left && item.kind === top.kind && (item.kind === 'ul' || (number === top.next && style === top.style))) {
 				html += '</li><li>';
-				top.next = item.number + 1;
+				top.next = number + 1;
 			} else {
 				// A change from bullets to numbers, or a number out of sequence, is a new list
 				// in the same place.
@@ -2248,10 +2389,10 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 				const parent = open[open.length - 1];
 				// What the indent adds to the half inch a list level has by itself.
 				const margin = item.left - (parent ? parent.left : 0) - LIST_STEP;
-				const style = margin !== 0 ? ` style="margin-left:${twipsToPt(margin)}"` : '';
-				const start = item.kind === 'ol' && item.number !== 1 ? ` start="${item.number}"` : '';
-				html += `<${item.kind}${start}${style}><li>`;
-				open.push({ kind: item.kind, left: item.left, next: item.number + 1 });
+				const start = item.kind === 'ol' && number !== 1 ? ` start="${number}"` : '';
+				const type = item.kind === 'ol' && style !== 'decimal' ? ` type="${listTypeAttribute(style)}"` : '';
+				html += `<${item.kind}${type}${start}${margin !== 0 ? ` style="margin-left:${twipsToPt(margin)}"` : ''}><li>`;
+				open.push({ kind: item.kind, left: item.left, next: number + 1, style });
 			}
 			html += item.html || '<br>';
 		}

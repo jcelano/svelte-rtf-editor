@@ -238,6 +238,9 @@ const TAG_ATTRIBUTES = table<string[]>({
 	details: ['open']
 });
 
+/** A color as `bgcolor` gives one: hex digits with or without "#", a name, rgb(). Nothing else is made a style of. */
+const BGCOLOR = /^(#?[0-9a-f]{3,8}|[a-z]{3,30}|rgba?\([\d\s,.%]+\))$/i;
+
 /**
  * The one class that means something here: Safari's wrapper around a typed tab. Any other class
  * would take on whatever the page's own stylesheet gives that name.
@@ -572,6 +575,13 @@ function namesAGlobal(id: string): boolean {
 
 function sanitizeAttributes(el: HTMLElement, tag: string, fonts: FontSizes, idTaken?: (id: string) => boolean, keep?: Kept): void {
 	const own = TAG_ATTRIBUTES.get(tag);
+	// `bgcolor`, as older pages and mail shade a table and its cells, is not kept. The shading
+	// is, as the style it stands for: without it, words set in white to stand on it were white
+	// on the white of the page, and the writer could not tell that they had had a background.
+	const shade = (el.getAttribute('bgcolor') ?? '').trim();
+	if (BGCOLOR.test(shade) && el.style && !el.style.backgroundColor) {
+		el.style.backgroundColor = /^[0-9a-f]{6}$/i.test(shade) ? `#${shade}` : shade;
+	}
 	for (const attr of Array.from(el.attributes)) {
 		const name = attr.name.toLowerCase();
 		if (name === 'class') {
@@ -827,6 +837,32 @@ export function pasteHasWords(html: string): boolean {
 	const body = new DOMParser().parseFromString(html, 'text/html').body;
 	for (const el of Array.from(body.querySelectorAll(Array.from(NOT_PAGE_TEXT).join(',')))) el.remove();
 	return (body.textContent ?? '').trim() !== '';
+}
+
+/** A frame in a paste's HTML: `<iframe>`, and the `<frame>` of an older page. */
+const FRAME = /<i?frame[\s>/]/i;
+
+/**
+ * A paste's HTML without the frames in it, or null where it has none, which is nearly every
+ * paste.
+ *
+ * A frame is not kept in a document, and until 1.12.0 it was taken out after the browser had
+ * pasted it, with all else that is not safe. But a frame put in a page is a page being loaded,
+ * and Safari forgets every step it could undo when one is taken out again: after a paste that
+ * held a frame (a part of a web page with a video or an advertisement in it) nothing done
+ * before the paste could be undone, and after Undo and Redo of it, not the paste either. So a
+ * paste that holds a frame is put in by the editor, without it. Nothing of what is left is made
+ * safe here: that is done to what comes in, as to any paste.
+ */
+export function pasteWithoutFrames(html: string): string | null {
+	if (!FRAME.test(html) || typeof DOMParser === 'undefined') return null;
+	// (Parsed into a document of its own, where nothing is loaded and no script is run.)
+	const body = new DOMParser().parseFromString(html, 'text/html').body;
+	const frames = Array.from(body.querySelectorAll('iframe, frame, frameset'));
+	// (None after all: the letters were text, in a line of code or in a comment.)
+	if (frames.length === 0) return null;
+	for (const frame of frames) frame.remove();
+	return body.innerHTML;
 }
 
 /**

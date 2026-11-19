@@ -22,7 +22,7 @@ jobs:
       # Nothing is published that does not pass what CI runs on every push (ci.yml).
       - run: npm run check
       - run: npm run test:coverage
-      - run: npx playwright install --with-deps chromium
+      - run: npx playwright install --with-deps chromium firefox webkit
       - run: npm run test:e2e
       - run: npm run prepack
 

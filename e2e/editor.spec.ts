@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { readFileSync } from 'node:fs';
 
 type Editor = {
 	getHTML(): string;
@@ -155,6 +156,158 @@ test.describe('the toolbar of a long document', () => {
 		await page.keyboard.press(END);
 		await expect.poll(async () => (await where(page)).scrolled).toBeGreaterThan(500);
 		expect((await where(page)).bottom).toBeLessThan(0);
+	});
+});
+
+test.describe('what an outside review of 1.12.0 found', () => {
+	// In a browser, which reads a list's type and a cell's background its own way. Invented text.
+	const viewer = '#viewer .rtf-viewer';
+
+	test('a list lettered A, B, C is written A, B, C, and read back as a lettered list', async ({ page }) => {
+		// As a mail program writes one, and as Google Docs does: the style on each item.
+		for (const list of [
+			'<ol type="A"><li>Left breast, biopsy</li><li>Right breast, biopsy</li><li>Sentinel node</li></ol>',
+			'<ol><li style="list-style-type:upper-alpha">Left breast, biopsy</li><li style="list-style-type:upper-alpha">Right breast, biopsy</li><li style="list-style-type:upper-alpha">Sentinel node</li></ol>'
+		]) {
+			await open(page, { content: `${list}<p>See part B.</p>` });
+			// The screen shows letters.
+			expect(await page.locator(`${content} li`).nth(1).evaluate((el) => getComputedStyle(el).listStyleType)).toBe('upper-alpha');
+			const rtf = await page.evaluate(() => window.ed.getRTF());
+			expect(body(rtf)).toBe(
+				'\\pard\\li720\\fi-360 A.\\tab Left breast, biopsy\\par \\pard\\li720\\fi-360 B.\\tab Right breast, biopsy\\par \\pard\\li720\\fi-360 C.\\tab Sentinel node\\par \\pard See part B.\\par }'
+			);
+			expect(await page.evaluate(() => window.lib.htmlToMarkdown(document.querySelector('.ink-content') as HTMLElement))).toContain('- B. Right breast, biopsy');
+			// And the reader of that RTF shows letters too.
+			await page.evaluate((rtf) => window.setViewer(rtf), rtf);
+			await expect(page.locator(`${viewer} ol[type="A"] li`)).toHaveCount(3);
+			expect(await page.locator(`${viewer} li`).nth(1).evaluate((el) => getComputedStyle(el).listStyleType)).toBe('upper-alpha');
+		}
+	});
+
+	test('Roman numerals the same, small and from a start', async ({ page }) => {
+		await open(page, { content: '<ol type="i" start="3"><li>three</li><li>four</li><li>five</li></ol>' });
+		const rtf = await page.evaluate(() => window.ed.getRTF());
+		expect(body(rtf)).toContain(' iii.\\tab three\\par \\pard\\li720\\fi-360 iv.\\tab four\\par \\pard\\li720\\fi-360 v.\\tab five');
+		await page.evaluate((rtf) => window.setViewer(rtf), rtf);
+		await expect(page.locator(`${viewer} ol[type="i"][start="3"] li`)).toHaveCount(3);
+	});
+
+	test('the white header of a dark header row is in the RTF in a color that can be read', async ({ page }) => {
+		// As Word puts a shaded header row on the clipboard.
+		const header = ['Marker', 'Patient result', 'Control']
+			.map((word) => `<td style="background:#1F3864"><p><b><span style="color:white">${word}</span></b></p></td>`)
+			.join('');
+		await open(page, { content: `<table><tr>${header}</tr><tr><td>HER2</td><td>Negative (1+)</td><td><span style="color:#C00000">Positive (3+)</span></td></tr></table>` });
+		// On the screen the header is as Word had it: white on its shading.
+		const shown = await page.locator(`${content} td`).first().evaluate((cell) => ({
+			back: getComputedStyle(cell).backgroundColor,
+			color: getComputedStyle(cell.querySelector('span')!).color
+		}));
+		expect(shown).toEqual({ back: 'rgb(31, 56, 100)', color: 'rgb(255, 255, 255)' });
+		// The RTF carries no shading, and so no white.
+		const rtf = await page.evaluate(() => window.ed.getRTF());
+		expect(rtf).not.toContain('\\red255\\green255\\blue255;');
+		for (const word of ['Marker', 'Patient result', 'Control']) expect(rtf).toContain(`\\b ${word}\\b0 `);
+		expect(rtf).toMatch(/\\cf\d Positive \(3\+\)\\cf0 /);
+		// What reads that RTF shows the header words.
+		await page.evaluate((rtf) => window.setViewer(rtf), rtf);
+		const cell = page.locator(`${viewer} td, ${viewer} th`).first();
+		await expect(cell).toHaveText('Marker');
+		expect(await cell.evaluate((el) => getComputedStyle(el.querySelector('strong, b') ?? el).color)).not.toBe('rgb(255, 255, 255)');
+	});
+
+	/**
+	 * A paste as Word makes one, with the RTF Word puts beside its HTML. A script cannot put RTF
+	 * on the clipboard, so the paste event is made here with both, and the browser's own paste
+	 * of the HTML, which follows such an event, is stood in for by the command that inserts it.
+	 */
+	const pasteFromWord = (page: Page, html: string, rtf: string) =>
+		page.evaluate(
+			({ html, rtf }) => {
+				const data = new DataTransfer();
+				data.setData('text/html', html);
+				if (rtf) data.setData('text/rtf', rtf);
+				const paste = new Event('paste', { bubbles: true, cancelable: true });
+				Object.defineProperty(paste, 'clipboardData', { value: data });
+				document.querySelector('.ink-content')!.dispatchEvent(paste);
+				document.execCommand('insertHTML', false, html);
+			},
+			{ html, rtf }
+		);
+	const pictures = (page: Page) =>
+		page.locator(`${content} img`).evaluateAll((imgs) => imgs.map((img) => `${(img as HTMLImageElement).alt} ${(img as HTMLImageElement).naturalWidth}x${(img as HTMLImageElement).naturalHeight}`));
+
+	test('the pictures of a paste from Word are in the document and in the RTF, read from the RTF Word copies beside its HTML', async ({ page }) => {
+		// (Word's HTML names a picture by a file on the writer's disk, which a page may not
+		// open: the picture was broken on the screen, and "[Image: micrograph]" in the RTF.)
+		// Two paragraphs with a picture after each, as Word copies them: see test-files.
+		const copied = readFileSync('test-files/word-paste-two-pictures.html', 'utf8');
+		const rtf = readFileSync('test-files/word-paste-two-pictures.rtf', 'utf8');
+		await open(page, { content: '<p>Body</p>' });
+		await page.click(`${content} p`);
+		await pasteFromWord(page, copied, rtf);
+		await expect(page.locator(content)).toContainText('Between.');
+		// Each image shows its own picture: the red one of 16 by 12, the blue one of 10 by 10.
+		await expect.poll(() => pictures(page)).toEqual(['micrograph 16x12', 'second field 10x10']);
+		const written = await page.evaluate(() => window.ed.getRTF());
+		expect(written).not.toContain('[Image');
+		expect(written.match(/\\pngblip/g)).toHaveLength(2);
+		expect(await page.locator(`${content} img`).evaluateAll((imgs) => imgs.every((img) => (img.getAttribute('src') ?? '').startsWith('data:image/png;base64,')))).toBe(true);
+	});
+
+	test('a paste from Word with no RTF beside it is as it was: the picture is named, and said to be missing', async ({ page }) => {
+		const copied = readFileSync('test-files/word-paste-two-pictures.html', 'utf8');
+		await open(page, { content: '<p>Body</p>' });
+		await page.click(`${content} p`);
+		await pasteFromWord(page, copied, '');
+		await expect(page.locator(content)).toContainText('Between.');
+		await expect(page.locator(`${content} img`)).toHaveCount(2);
+		const written = await page.evaluate(() => window.ed.getRTF());
+		expect(written).toContain('[Image: micrograph]');
+		expect(written).not.toContain('\\pngblip');
+		// No image keeps the address of a file on a disk.
+		expect(await page.locator(`${content} img`).evaluateAll((imgs) => imgs.map((img) => img.getAttribute('src')))).toEqual([null, null]);
+	});
+
+	test('the comments that come in with markup are emptied: the address of a file on the writer\'s disk is not kept in the HTML', async ({ page, browserName }) => {
+		// (Word writes the address of each copied picture in a comment, with the name of the
+		// writer's account in it. A browser's paste leaves comments out; markup put in another
+		// way, and what is dropped in Firefox, keeps them, and they were saved with the HTML.)
+		const copied = readFileSync('test-files/word-paste-two-pictures.html', 'utf8');
+		expect(copied).toMatch(/<!--\[if gte vml 1\]>[^]*file:\/\/\/\/Users\/someone\//);
+		// A comment of the application's own is not the editor's to judge.
+		await open(page, { content: '<p>Body<!--kept by the application--></p>' });
+		await page.click(`${content} p`);
+		await pasteFromWord(page, copied, readFileSync('test-files/word-paste-two-pictures.rtf', 'utf8'));
+		await expect(page.locator(content)).toContainText('Between.');
+		const clean = async () => {
+			const now = await html(page);
+			expect(now).not.toContain('file:');
+			expect(now).not.toContain('someone');
+			expect(now).not.toContain('msohtmlclip');
+			expect(now).toContain('<!--kept by the application-->');
+		};
+		await clean();
+		// Emptied, not taken out: Undo and Redo of what came in are the browser's still.
+		// (Not in Firefox, which cannot undo a paste the editor took an element out of, as it
+		// takes Word's style sheet out of this one. A drop with a comment is undone there too:
+		// see 'a comment in what is dragged in is emptied'.)
+		if (browserName === 'firefox') return;
+		await page.keyboard.press('ControlOrMeta+z');
+		await expect(page.locator(content)).not.toContainText('Between.');
+		await page.keyboard.press(process.platform === 'darwin' ? 'Meta+Shift+z' : 'Control+Shift+z');
+		await expect(page.locator(content)).toContainText('Between.');
+		await clean();
+	});
+
+	test('a sentence from a page with a dark theme, and a color the writer chose on white', async ({ page }) => {
+		await open(page, {
+			content:
+				'<p><span style="color: rgb(230, 237, 243); background-color: rgb(13, 17, 23);">Margins are positive for carcinoma.</span></p><p><span style="color: rgb(255, 255, 0);">chosen</span></p>'
+		});
+		const rtf = await page.evaluate(() => window.ed.getRTF());
+		expect(body(rtf)).toBe('\\pard Margins are positive for carcinoma.\\par \\pard \\cf2 chosen\\cf0 \\par }');
+		expect(rtf).toContain('{\\colortbl;\\red0\\green0\\blue0;\\red255\\green255\\blue0;}');
 	});
 });
 
@@ -496,10 +649,22 @@ test.describe('what a second review found', () => {
 		expect(box!.height).toBeGreaterThan(8);
 	});
 
-	test('a pasted span that only Word hid is not pasted as words', async ({ page }) => {
+	// These pastes are made through the clipboard, by a script. Safari's engine rewrites the HTML
+	// a script puts there (it takes off the style it does not know, and the text box): what it
+	// then pastes is not what Word copies, so there is nothing of Word's to test with. A copy
+	// made in Word itself is checked by hand in Safari.
+	const REWRITTEN = 'WebKit rewrites the HTML a script puts on the clipboard: Word\'s mark and the text box are gone before the paste';
+	/**
+	 * Firefox keeps the empty line a paste of whole paragraphs was made in, after them. It is the
+	 * browser's own paste, in any editable page, and its Undo takes the line back with the rest.
+	 */
+	const lineKept = (browserName: string) => (browserName === 'firefox' ? '<p><br></p>' : '');
+
+	test('a pasted span that only Word hid is not pasted as words', async ({ page, browserName }) => {
+		test.skip(browserName === 'webkit', REWRITTEN);
 		await paste(page, '<p>one <span style="mso-hide:all">HID ONE</span> two</p><p style="mso-hide:all">whole para</p><p>three</p>');
 		await expect(page.locator(content)).toContainText('three');
-		expect(await html(page)).toBe('<p>one two</p><p>three</p>');
+		expect(await html(page)).toBe(`<p>one two</p><p>three</p>${lineKept(browserName)}`);
 		// As Word writes a copy: styles in the head, the copied part marked.
 		await paste(
 			page,
@@ -509,12 +674,16 @@ test.describe('what a second review found', () => {
 		expect(await page.locator(content).textContent()).toBe('Shown text');
 	});
 
-	test('after such a paste the caret is where the paste ended', async ({ page }) => {
+	test('after such a paste the caret is where the paste ended', async ({ page, browserName }) => {
+		test.skip(browserName === 'webkit', REWRITTEN);
+		// (Firefox pastes the hidden words as an element that is not displayed and leaves the
+		// caret in it: the "y" typed next was typed where it is not seen, and was not written.)
 		await paste(page, '<span style="mso-hide:all">all hidden</span>', 'x');
 		await page.waitForTimeout(100);
 		expect(await html(page)).toBe('<p>x</p>');
 		await page.keyboard.type('y');
 		expect(await html(page)).toBe('<p>xy</p>');
+		expect(await page.locator(content).evaluate((el) => (el as HTMLElement).innerText.trim())).toBe('xy');
 		// And inside a line, between what was there.
 		await paste(page, 'in<span style="mso-hide:all">HIDDEN</span>side', 'ab');
 		await expect(page.locator(content)).toContainText('side');
@@ -524,19 +693,22 @@ test.describe('what a second review found', () => {
 		// with the caret in it.
 		await paste(page, '<p>one</p><p style="mso-hide:all">whole para</p>');
 		await expect(page.locator(content)).toContainText('one');
-		await expect.poll(() => html(page)).toBe('<p>one</p><p><br></p>');
+		await expect.poll(() => html(page)).toBe(`<p>one</p><p><br></p>${lineKept(browserName)}`);
 		await page.keyboard.type('two');
-		expect(await html(page)).toBe('<p>one</p><p>two</p>');
+		expect(await html(page)).toBe(`<p>one</p><p>two</p>${lineKept(browserName)}`);
 		await paste(page, '<p style="mso-hide:all">all hidden</p>');
-		await expect.poll(() => html(page)).toBe('<p><br></p>');
+		await expect.poll(() => html(page)).toBe(`<p><br></p>${lineKept(browserName)}`);
 		await page.keyboard.type('typed');
-		expect(await html(page)).toBe('<p>typed</p>');
+		expect(await html(page)).toBe(`<p>typed</p>${lineKept(browserName)}`);
+		// Whatever the browser, what was typed can be seen.
+		expect(await page.locator(content).evaluate((el) => (el as HTMLElement).innerText.trim())).toBe('typed');
 	});
 
-	test('a text box pasted last keeps its words', async ({ page }) => {
+	test('a text box pasted last keeps its words', async ({ page, browserName }) => {
+		test.skip(browserName === 'webkit', REWRITTEN);
 		await paste(page, '<p>note <textarea>margins clear</textarea></p>');
 		await expect(page.locator(content)).toContainText('note');
-		expect(await html(page)).toBe('<p>note margins clear</p>');
+		expect(await html(page)).toBe(`<p>note margins clear</p>${lineKept(browserName)}`);
 	});
 
 	test('a link with padding does not cover the lines above it', async ({ page }) => {
@@ -782,6 +954,18 @@ test.describe('what a third review found', () => {
 		expect(await page.locator(`${content} [id]`).count()).toBe(1);
 	});
 
+	test('a comment in what is dragged in is emptied, and the drop can still be undone', async ({ page }) => {
+		// (Firefox keeps the comments of dropped markup, where a paste has none. Word writes in
+		// one the address of a copied picture, on the writer's own disk.)
+		await open(page, { content: '<p>Line to drop on</p>' });
+		await draggable(page, '<p>dropped<!-- file:////Users/someone/Library/msohtmlclip/clip_image001.png --> words</p>');
+		await page.dragAndDrop('#drag-source', `${content} p`);
+		await expect(page.locator(content)).toContainText('dropped');
+		expect(await html(page)).not.toMatch(/file:|someone|clip_image/);
+		await page.keyboard.press('ControlOrMeta+z');
+		await expect(page.locator(content)).not.toContainText('dropped');
+	});
+
 	test('words Word hid are not shown when they are dragged in, as when they are pasted', async ({ page }) => {
 		// (Only a paste was read for them: the same markup dragged in showed them as words.)
 		await open(page, { content: '<p>Line to drop on</p>' });
@@ -801,13 +985,44 @@ test.describe('what a third review found', () => {
 		await page.keyboard.press('ControlOrMeta+v');
 		await expect(page.locator(content)).toContainText('came in');
 		expect((await left(page)).risky).toEqual([]);
-		for (const redo of REDO_KEYS) {
+		// Twice with each key. (Safari forgot the paste after its first Redo: the frame the paste
+		// held was put back and taken out again, and with a frame goes all that could be undone.
+		// On a Mac, where there is one key for Redo, it was done once and that was not seen.)
+		for (const redo of [...REDO_KEYS, ...REDO_KEYS]) {
 			await page.keyboard.press('ControlOrMeta+z');
 			await expect(page.locator(content)).not.toContainText('came in');
 			await page.keyboard.press(redo);
 			await expect(page.locator(content)).toContainText('came in');
 			expect(await left(page), redo).toEqual({ risky: [], overPosition: 'static', overColor: 'red' });
 		}
+	});
+
+	test('a paste that holds a frame leaves what was done before it to be undone', async ({ page, browserName }) => {
+		// (In Safari the words typed before such a paste could not be taken back after it.)
+		await open(page, { content: '<p>Body</p>' });
+		await page.evaluate(async (markup) => {
+			await navigator.clipboard.write([new ClipboardItem({ 'text/html': new Blob([markup], { type: 'text/html' }) })]);
+		}, '<p>came in</p><iframe src="https://example.com/frame"></iframe>');
+		await page.click(`${content} p`);
+		await page.keyboard.press(LINE_END);
+		await page.keyboard.type(' typed');
+		await expect(page.locator(content)).toContainText('Body typed');
+		// (A pause, as a writer makes one: keys pressed at once are one step to a browser.)
+		await page.waitForTimeout(700);
+		await page.keyboard.press('ControlOrMeta+v');
+		await expect(page.locator(content)).toContainText('came in');
+		expect(await page.locator(`${content} iframe`).count()).toBe(0);
+		await page.keyboard.press('ControlOrMeta+z');
+		await expect(page.locator(content)).not.toContainText('came in');
+		// (Safari's engine may take the step before a paste back with it, whatever is pasted.)
+		if (browserName !== 'webkit') await expect(page.locator(content)).toContainText('Body typed');
+		// And the words typed before it can still be taken back.
+		await expect
+			.poll(async () => {
+				await page.keyboard.press('ControlOrMeta+z');
+				return page.locator(content).textContent();
+			})
+			.toBe('Body');
 	});
 
 	/** Paste markup at the end of the first paragraph, and give the document as it then is. */
@@ -1322,11 +1537,10 @@ test.describe('Fonts', () => {
 		return page.locator(list).evaluate((select: HTMLSelectElement) => select.selectedOptions[0]?.textContent ?? '');
 	}
 
-	test('an editor that offers no fonts shows none: not from a document, and not from a paste', async ({ page, browserName }) => {
+	test('an editor that offers no fonts shows none: not from a document, and not from a paste', async ({ page }) => {
 		// (They used to stay on the screen, and were never in the RTF.)
 		await open(page, { content: '<p style="font-family: Papyrus; text-align: right;">one <font face="Georgia" color="#ff0000">two</font></p>' });
 		expect(await html(page)).toBe('<p style="text-align: right;">one <font color="#ff0000">two</font></p>');
-		test.skip(browserName !== 'chromium', 'the paste is made through the clipboard, which only Chromium gives a test');
 		await page.evaluate(async () => {
 			const markup = '<span style="font-family: Calibri, sans-serif; font-size: 11pt; font-weight: bold;">from Word</span>';
 			await navigator.clipboard.write([new ClipboardItem({ 'text/html': new Blob([markup], { type: 'text/html' }) })]);
@@ -1493,11 +1707,10 @@ test.describe('Fonts', () => {
 		expect(await html(page)).toBe('<p>one two three</p>');
 	});
 
-	test('a document and a paste keep only the fonts that are offered', async ({ page, browserName }) => {
+	test('a document and a paste keep only the fonts that are offered', async ({ page }) => {
 		await open(page, { content: '<p style="font-family: Papyrus;">one <font face="GEORGIA">two</font> <font face="Comic Sans MS">three</font></p>', fonts });
 		expect(await html(page)).toBe('<p>one <font face="Georgia, serif">two</font> <font>three</font></p>');
 		// (Firefox and WebKit do not let a page put markup on the clipboard in a test.)
-		test.skip(browserName !== 'chromium', 'the paste is made through the clipboard, which only Chromium gives a test');
 		await page.evaluate(async () => {
 			const markup = '<span style="font-family: Papyrus; font-weight: bold;">papyrus</span><span style="font-family: arial;"> arial</span>';
 			await navigator.clipboard.write([new ClipboardItem({ 'text/html': new Blob([markup], { type: 'text/html' }) })]);
@@ -1509,7 +1722,8 @@ test.describe('Fonts', () => {
 		await expect.poll(() => html(page)).not.toBe(before);
 		const pasted = await html(page);
 		expect(pasted).not.toMatch(/papyrus,|Papyrus;|Comic/);
-		expect(pasted).toMatch(/font-family: Arial, sans-serif;[^>]*> arial/);
-		expect(await page.locator(`${content}`).textContent()).toContain('papyrus arial');
+		// (Safari's engine pastes the space between the two as one that does not break.)
+		expect(pasted).toMatch(/font-family: Arial, sans-serif;[^>]*>(?: |&nbsp;)arial/);
+		expect(((await page.locator(`${content}`).textContent()) ?? '').replace(/\s/g, ' ')).toContain('papyrus arial');
 	});
 });

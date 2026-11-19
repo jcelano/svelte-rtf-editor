@@ -54,19 +54,15 @@
 			e.preventDefault();
 			return;
 		}
-		const active = document.activeElement;
-		const first = items[0];
-		const last = items[items.length - 1];
-		if (!dialogEl.contains(active)) {
-			e.preventDefault();
-			first.focus();
-		} else if (e.shiftKey && active === first) {
-			e.preventDefault();
-			last.focus();
-		} else if (!e.shiftKey && active === last) {
-			e.preventDefault();
-			first.focus();
-		}
+		// Every step is made here, not only the turn at the ends. Safari's Tab goes to text
+		// fields alone unless the user has asked for more, so from the last field it went past
+		// the dialog's buttons and out of the dialog, into the page behind it.
+		e.preventDefault();
+		const at = items.indexOf(document.activeElement as HTMLElement);
+		const next = at === -1 ? items[e.shiftKey ? items.length - 1 : 0] : items[(at + (e.shiftKey ? -1 : 1) + items.length) % items.length];
+		next.focus();
+		// As Tab into a field does: what it holds is selected, to be typed over.
+		if (next instanceof HTMLInputElement && /^(text|url|search|email|tel|password|number)$/.test(next.type)) next.select();
 	}
 </script>
 

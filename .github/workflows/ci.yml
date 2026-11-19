@@ -28,7 +28,8 @@ jobs:
       - run: npm run prepack
 
   # What a test DOM cannot show: where the caret goes, what a key does after a dialog closes,
-  # what a real paste brings in.
+  # what a real paste brings in. In Chromium, Firefox and WebKit (Safari's engine): the README
+  # says what the editor does in each, and this is where that is held to.
   e2e:
     runs-on: ubuntu-latest
     steps:
@@ -40,5 +41,5 @@ jobs:
           cache: npm
 
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
+      - run: npx playwright install --with-deps chromium firefox webkit
       - run: npm run test:e2e
