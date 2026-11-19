@@ -383,6 +383,40 @@ function renderPicture(group: RtfGroup): string {
 	return `<img src="data:${mime};base64,${base64}"${style} alt="">`;
 }
 
+/**
+ * The pictures of an RTF document, in the order they are in it: each as the data address a
+ * browser shows (PNG or JPEG), or null for one it cannot show (a metafile).
+ *
+ * Word copies a picture to the clipboard twice: in its HTML as the address of a file on the
+ * writer's own disk, which no page may open, and in its RTF as the picture itself. So the
+ * pictures of a paste are read from here (see pastePictures). The second copy Word writes of
+ * each for older readers (\nonshppict, and a shape's \shprslt) is not counted.
+ */
+export function rtfPictures(rtf: string): (string | null)[] {
+	let tree: RtfGroup;
+	try {
+		tree = parseTree(rtf);
+	} catch {
+		return [];
+	}
+	const pictures: (string | null)[] = [];
+	const todo: RtfGroup[] = [tree];
+	while (todo.length > 0) {
+		const group = todo.pop()!;
+		const first = group.children.find((n): n is RtfControl => n.type === 'control' && n.word !== '*');
+		if (first?.word === 'nonshppict' || first?.word === 'shprslt') continue;
+		if (first?.word === 'pict') {
+			pictures.push(/ src="([^"]+)"/.exec(renderPicture(group))?.[1] ?? null);
+			continue;
+		}
+		for (let i = group.children.length - 1; i >= 0; i--) {
+			const child = group.children[i];
+			if (child.type === 'group') todo.push(child);
+		}
+	}
+	return pictures;
+}
+
 // ── Tokenizer ──
 
 /**

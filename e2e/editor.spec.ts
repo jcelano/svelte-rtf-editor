@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { readFileSync } from 'node:fs';
 
 type Editor = {
 	getHTML(): string;
@@ -213,6 +214,90 @@ test.describe('what an outside review of 1.12.0 found', () => {
 		const cell = page.locator(`${viewer} td, ${viewer} th`).first();
 		await expect(cell).toHaveText('Marker');
 		expect(await cell.evaluate((el) => getComputedStyle(el.querySelector('strong, b') ?? el).color)).not.toBe('rgb(255, 255, 255)');
+	});
+
+	/**
+	 * A paste as Word makes one, with the RTF Word puts beside its HTML. A script cannot put RTF
+	 * on the clipboard, so the paste event is made here with both, and the browser's own paste
+	 * of the HTML, which follows such an event, is stood in for by the command that inserts it.
+	 */
+	const pasteFromWord = (page: Page, html: string, rtf: string) =>
+		page.evaluate(
+			({ html, rtf }) => {
+				const data = new DataTransfer();
+				data.setData('text/html', html);
+				if (rtf) data.setData('text/rtf', rtf);
+				const paste = new Event('paste', { bubbles: true, cancelable: true });
+				Object.defineProperty(paste, 'clipboardData', { value: data });
+				document.querySelector('.ink-content')!.dispatchEvent(paste);
+				document.execCommand('insertHTML', false, html);
+			},
+			{ html, rtf }
+		);
+	const pictures = (page: Page) =>
+		page.locator(`${content} img`).evaluateAll((imgs) => imgs.map((img) => `${(img as HTMLImageElement).alt} ${(img as HTMLImageElement).naturalWidth}x${(img as HTMLImageElement).naturalHeight}`));
+
+	test('the pictures of a paste from Word are in the document and in the RTF, read from the RTF Word copies beside its HTML', async ({ page }) => {
+		// (Word's HTML names a picture by a file on the writer's disk, which a page may not
+		// open: the picture was broken on the screen, and "[Image: micrograph]" in the RTF.)
+		// Two paragraphs with a picture after each, as Word copies them: see test-files.
+		const copied = readFileSync('test-files/word-paste-two-pictures.html', 'utf8');
+		const rtf = readFileSync('test-files/word-paste-two-pictures.rtf', 'utf8');
+		await open(page, { content: '<p>Body</p>' });
+		await page.click(`${content} p`);
+		await pasteFromWord(page, copied, rtf);
+		await expect(page.locator(content)).toContainText('Between.');
+		// Each image shows its own picture: the red one of 16 by 12, the blue one of 10 by 10.
+		await expect.poll(() => pictures(page)).toEqual(['micrograph 16x12', 'second field 10x10']);
+		const written = await page.evaluate(() => window.ed.getRTF());
+		expect(written).not.toContain('[Image');
+		expect(written.match(/\\pngblip/g)).toHaveLength(2);
+		expect(await page.locator(`${content} img`).evaluateAll((imgs) => imgs.every((img) => (img.getAttribute('src') ?? '').startsWith('data:image/png;base64,')))).toBe(true);
+	});
+
+	test('a paste from Word with no RTF beside it is as it was: the picture is named, and said to be missing', async ({ page }) => {
+		const copied = readFileSync('test-files/word-paste-two-pictures.html', 'utf8');
+		await open(page, { content: '<p>Body</p>' });
+		await page.click(`${content} p`);
+		await pasteFromWord(page, copied, '');
+		await expect(page.locator(content)).toContainText('Between.');
+		await expect(page.locator(`${content} img`)).toHaveCount(2);
+		const written = await page.evaluate(() => window.ed.getRTF());
+		expect(written).toContain('[Image: micrograph]');
+		expect(written).not.toContain('\\pngblip');
+		// No image keeps the address of a file on a disk.
+		expect(await page.locator(`${content} img`).evaluateAll((imgs) => imgs.map((img) => img.getAttribute('src')))).toEqual([null, null]);
+	});
+
+	test('the comments that come in with markup are emptied: the address of a file on the writer\'s disk is not kept in the HTML', async ({ page, browserName }) => {
+		// (Word writes the address of each copied picture in a comment, with the name of the
+		// writer's account in it. A browser's paste leaves comments out; markup put in another
+		// way, and what is dropped in Firefox, keeps them, and they were saved with the HTML.)
+		const copied = readFileSync('test-files/word-paste-two-pictures.html', 'utf8');
+		expect(copied).toMatch(/<!--\[if gte vml 1\]>[^]*file:\/\/\/\/Users\/someone\//);
+		// A comment of the application's own is not the editor's to judge.
+		await open(page, { content: '<p>Body<!--kept by the application--></p>' });
+		await page.click(`${content} p`);
+		await pasteFromWord(page, copied, readFileSync('test-files/word-paste-two-pictures.rtf', 'utf8'));
+		await expect(page.locator(content)).toContainText('Between.');
+		const clean = async () => {
+			const now = await html(page);
+			expect(now).not.toContain('file:');
+			expect(now).not.toContain('someone');
+			expect(now).not.toContain('msohtmlclip');
+			expect(now).toContain('<!--kept by the application-->');
+		};
+		await clean();
+		// Emptied, not taken out: Undo and Redo of what came in are the browser's still.
+		// (Not in Firefox, which cannot undo a paste the editor took an element out of, as it
+		// takes Word's style sheet out of this one. A drop with a comment is undone there too:
+		// see 'a comment in what is dragged in is emptied'.)
+		if (browserName === 'firefox') return;
+		await page.keyboard.press('ControlOrMeta+z');
+		await expect(page.locator(content)).not.toContainText('Between.');
+		await page.keyboard.press(process.platform === 'darwin' ? 'Meta+Shift+z' : 'Control+Shift+z');
+		await expect(page.locator(content)).toContainText('Between.');
+		await clean();
 	});
 
 	test('a sentence from a page with a dark theme, and a color the writer chose on white', async ({ page }) => {
@@ -867,6 +952,18 @@ test.describe('what a third review found', () => {
 		await expect(page.locator(`${content} p`).nth(0)).not.toContainText('beta');
 		expect(await page.locator(`${content} p:nth-of-type(3) b#mark1`).count()).toBe(1);
 		expect(await page.locator(`${content} [id]`).count()).toBe(1);
+	});
+
+	test('a comment in what is dragged in is emptied, and the drop can still be undone', async ({ page }) => {
+		// (Firefox keeps the comments of dropped markup, where a paste has none. Word writes in
+		// one the address of a copied picture, on the writer's own disk.)
+		await open(page, { content: '<p>Line to drop on</p>' });
+		await draggable(page, '<p>dropped<!-- file:////Users/someone/Library/msohtmlclip/clip_image001.png --> words</p>');
+		await page.dragAndDrop('#drag-source', `${content} p`);
+		await expect(page.locator(content)).toContainText('dropped');
+		expect(await html(page)).not.toMatch(/file:|someone|clip_image/);
+		await page.keyboard.press('ControlOrMeta+z');
+		await expect(page.locator(content)).not.toContainText('dropped');
 	});
 
 	test('words Word hid are not shown when they are dragged in, as when they are pasted', async ({ page }) => {

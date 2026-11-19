@@ -91,6 +91,7 @@
 	import ImageOverlay from './ImageOverlay.svelte';
 	import { htmlToMarkdown, downloadFile } from '../utils.js';
 	import { keptMarks, pasteHasWords, pasteNotes, pasteWithoutFrames, removeWordHidden, sanitizedNodes, sanitizeTree, type PasteNotes } from '../sanitize.js';
+	import { givePastedPictures, pastePictures, type PastePictures } from '../paste-pictures.js';
 	import { readRtfFile, DEFAULT_MAX_RTF_BYTES } from '../rtf-parser.js';
 	import {
 		htmlToRtf,
@@ -521,6 +522,8 @@
 		indentUndo = [];
 		pastedOver = null;
 		pastedLoss = null;
+		pastedPictures = null;
+		commentsBefore = null;
 		// (A selection kept from the document before points at nothing in the new one.)
 		savedSelection = null;
 		dialogSelection = null;
@@ -2467,6 +2470,7 @@
 			expectInsertion(draggedFromHere);
 			// What the browser may lose of it, as of a paste: it begins where it is dropped.
 			const dropped = e.dataTransfer?.getData?.('text/html') ?? '';
+			pastedPictures = pastePictures(dropped, e.dataTransfer?.getData?.('text/rtf') ?? '');
 			const notes = pasteNotes(dropped);
 			const at = notes ? rangeAtPoint(e.clientX, e.clientY) : null;
 			pastedLoss = notes && at && editorEl?.contains(at.startContainer) ? { notes, from: shownCharsBefore(at.startContainer, at.startOffset), dropped: true } : null;
@@ -2760,6 +2764,8 @@
 				notes && start && editorEl.contains(start.startContainer)
 					? { notes, from: shownCharsBefore(start.startContainer, start.startOffset) }
 					: null;
+			// The pictures Word's HTML only names, from its RTF (see pastePictures).
+			pastedPictures = pastePictures(html, e.clipboardData?.getData('text/rtf') ?? '');
 			// What holds a frame is put in here, without it (see pasteWithoutFrames).
 			const unframed = pasteWithoutFrames(html);
 			if (unframed !== null) {
@@ -2780,6 +2786,8 @@
 		pastedOver = snapshot;
 		pastedOwn = own;
 		pastedLoss = null;
+		pastedPictures = null;
+		commentsBefore = new Set(commentsIn(editorEl));
 		// A paste that inserts nothing (an empty clipboard, a host that cancels it) raises no
 		// input event. Left set, the snapshot would make the next keystroke treat the whole
 		// document as pasted.
@@ -2787,6 +2795,8 @@
 			if (pastedOver === snapshot) {
 				pastedOver = null;
 				pastedLoss = null;
+				pastedPictures = null;
+				commentsBefore = null;
 			}
 		}, 0);
 	}
@@ -2908,6 +2918,26 @@
 	const broughtIn = new Map<Element, { style: string | null; own: boolean }>();
 	/** What the paste or the drop under way may lose, and how much text the document had before it. */
 	let pastedLoss: { notes: PasteNotes; from: number; dropped?: boolean } | null = null;
+	/** The pictures of the paste that is coming in, where its HTML only names them (see pastePictures). */
+	let pastedPictures: PastePictures | null = null;
+
+	// ── Comments that come in ──
+	// HTML copied in another program may hold comments. What is in one is not shown and not
+	// written to the RTF, but it is kept in the HTML that is saved, and Word writes in one the
+	// address of each copied picture: a file on the writer's own disk, with the name of the
+	// writer's account in it. A browser leaves comments out of a paste; Firefox keeps those of
+	// markup that is dropped. So a comment that comes in is emptied. It is not taken out: Firefox
+	// cannot undo a drop from which a node is gone, and an empty comment says nothing. Those the
+	// application's own HTML has are not the editor's to judge, and stay as they are.
+	/** The comments in the document just before a paste or a drop; what is not among them came with it. */
+	let commentsBefore: Set<Comment> | null = null;
+
+	function commentsIn(root: Node): Comment[] {
+		const found: Comment[] = [];
+		const walker = document.createTreeWalker(root, NodeFilter.SHOW_COMMENT);
+		for (let node = walker.nextNode(); node; node = walker.nextNode()) found.push(node as Comment);
+		return found;
+	}
 
 	/**
 	 * Take off the elements `came` accepts, the ones a paste or a drop brought in, their id and
@@ -2956,8 +2986,23 @@
 		for (const el of Array.from(editorEl.querySelectorAll('style, script, template, title'))) {
 			if (!before.has(el)) el.remove();
 		}
+		if (commentsBefore) {
+			for (const comment of commentsIn(editorEl)) {
+				if (!commentsBefore.has(comment) && comment.data !== '') comment.data = '';
+			}
+		}
+		commentsBefore = null;
 		if (pastedLoss) restorePasteLoss(before, pastedLoss);
 		pastedLoss = null;
+		// Before what came in is made safe: an image that names a file on a disk loses that
+		// address there, and is then an image of nothing.
+		if (pastedPictures) {
+			givePastedPictures(
+				Array.from(editorEl.querySelectorAll('img')).filter((img) => !before.has(img)),
+				pastedPictures
+			);
+		}
+		pastedPictures = null;
 		// What the paste brought is made safe as HTML from anywhere else is: a browser takes the
 		// scripts out of a paste itself, but leaves a form, an <iframe>, or a block with
 		// position: fixed that covers the page.
