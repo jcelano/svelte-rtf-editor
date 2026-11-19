@@ -238,6 +238,9 @@ const TAG_ATTRIBUTES = table<string[]>({
 	details: ['open']
 });
 
+/** A color as `bgcolor` gives one: hex digits with or without "#", a name, rgb(). Nothing else is made a style of. */
+const BGCOLOR = /^(#?[0-9a-f]{3,8}|[a-z]{3,30}|rgba?\([\d\s,.%]+\))$/i;
+
 /**
  * The one class that means something here: Safari's wrapper around a typed tab. Any other class
  * would take on whatever the page's own stylesheet gives that name.
@@ -572,6 +575,13 @@ function namesAGlobal(id: string): boolean {
 
 function sanitizeAttributes(el: HTMLElement, tag: string, fonts: FontSizes, idTaken?: (id: string) => boolean, keep?: Kept): void {
 	const own = TAG_ATTRIBUTES.get(tag);
+	// `bgcolor`, as older pages and mail shade a table and its cells, is not kept. The shading
+	// is, as the style it stands for: without it, words set in white to stand on it were white
+	// on the white of the page, and the writer could not tell that they had had a background.
+	const shade = (el.getAttribute('bgcolor') ?? '').trim();
+	if (BGCOLOR.test(shade) && el.style && !el.style.backgroundColor) {
+		el.style.backgroundColor = /^[0-9a-f]{6}$/i.test(shade) ? `#${shade}` : shade;
+	}
 	for (const attr of Array.from(el.attributes)) {
 		const name = attr.name.toLowerCase();
 		if (name === 'class') {

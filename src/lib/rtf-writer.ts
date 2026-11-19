@@ -12,9 +12,12 @@
  *
  * Background color is intentionally not written — RTF highlight support
  * is inconsistent across viewers (TextEdit uses \AppleHighlight, not \highlight).
+ * So a text color that can be read only on its background is not written either: see
+ * lostWithoutItsBackground.
  */
 
 import { tableModel, columnShares, tableRowsInOrder, rowCells, type GridCell } from './table-model.js';
+import { itemNumber, listStart, markerText, numberStyleOf } from './list-markers.js';
 
 // ── Types ──
 
@@ -89,6 +92,8 @@ export const LINK_COLOR = { r: 0, g: 0, b: 255 } as const;
 
 interface WalkContext {
 	colorIndex: Map<string, number>;
+	/** The color each index of the color table stands for (\cfN). */
+	colorAt: Map<number, RGB>;
 	/** Body text size in RTF half-points (\fsN). */
 	bodySize: number;
 	inPre: boolean;
@@ -208,6 +213,82 @@ const NAMED_COLORS: ReadonlyMap<string, RGB> = new Map(
 
 function colorKey(c: RGB): string {
 	return `${c.r},${c.g},${c.b}`;
+}
+
+// ── Text that needs its background ──
+// A background is not written (see the top of this file), so the reader shows every word on
+// white. White words on a dark table header, or a sentence copied from a page with a dark
+// theme, were written white all the same: the header of a results table, or "Margins are
+// positive for carcinoma.", was in the report and could not be seen. A color that can be read
+// on its background and not on white is left out, and the words are in the reader's own color.
+
+const WHITE: RGB = { r: 255, g: 255, b: 255 };
+
+/** Below this contrast with white (WCAG's measure, 1 to 21) words are hard to read: its floor for large text. */
+const READABLE_ON_WHITE = 3;
+
+function luminance(c: RGB): number {
+	const part = (value: number) => {
+		const s = value / 255;
+		return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+	};
+	return 0.2126 * part(c.r) + 0.7152 * part(c.g) + 0.0722 * part(c.b);
+}
+
+/** The contrast of two colors as WCAG counts it: 1 for the same color, 21 for black on white. */
+export function colorContrast(a: RGB, b: RGB): number {
+	const [light, dark] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+	return (light + 0.05) / (dark + 0.05);
+}
+
+/** Whether words in a color are hard to read on a white page. */
+export function hardToReadOnWhite(color: RGB): boolean {
+	return colorContrast(color, WHITE) < READABLE_ON_WHITE;
+}
+
+/** A background that shows nothing: none, or one with no opacity. */
+const NO_BACKGROUND = /^(|transparent|none|initial|inherit|unset|revert|currentcolor|rgba\([^)]*,\s*0(\.0+)?\s*\)|#[0-9a-f]{3}0|#[0-9a-f]{6}00)$/;
+
+/**
+ * The background an element sets by itself: its color, 'some' for one that is set and not read
+ * (a color by a name this file does not know, a picture), or null. From its style, and from the
+ * `bgcolor` older pages and mail put on a table and its cells.
+ */
+function ownBackground(el: Element): RGB | 'some' | null {
+	const style = (el as HTMLElement).style;
+	const color = (style?.backgroundColor || '').trim().toLowerCase();
+	if (color && !NO_BACKGROUND.test(color)) return parseColor(color) ?? 'some';
+	const image = (style?.backgroundImage || '').trim().toLowerCase();
+	if (image && image !== 'none' && image !== 'initial') return 'some';
+	// (Not every DOM spreads `background` over the properties it stands for.)
+	const short = color ? '' : (style?.getPropertyValue?.('background') || '').trim().toLowerCase();
+	if (short && !NO_BACKGROUND.test(short)) return parseColor(short.split(/\s+(?![^(]*\))/)[0]) ?? 'some';
+	const attribute = (el.getAttribute('bgcolor') ?? '').trim().toLowerCase();
+	if (attribute && !NO_BACKGROUND.test(attribute)) return parseColor(attribute) ?? parseColor(`#${attribute}`) ?? 'some';
+	return null;
+}
+
+/** The background the words of an element stand on: its own, or the nearest one around it in the document. */
+function backgroundBehind(el: Element, root: Node | null): RGB | 'some' | null {
+	for (let at: Element | null = el; at; at = at.parentElement) {
+		const own = ownBackground(at);
+		if (own) return own;
+		if (at === root) break;
+	}
+	return null;
+}
+
+/**
+ * Whether a text color is one that only its background makes readable: hard to read on white,
+ * and on a background in the document that it reads better on. A color with no background
+ * behind it is the writer's own choice, as the screen shows it, and is written whatever it is.
+ */
+function lostWithoutItsBackground(color: RGB, el: Element, root: Node | null): boolean {
+	const onWhite = colorContrast(color, WHITE);
+	if (onWhite >= READABLE_ON_WHITE) return false;
+	const behind = backgroundBehind(el, root);
+	// (Better by more than a shade: white on ivory is as hard to read as white on white.)
+	return behind === 'some' || (behind !== null && colorContrast(color, behind) > onWhite + 0.5);
 }
 
 // ── RTF text escaping ──
@@ -813,10 +894,16 @@ export function estimateRtfBytes(editorEl: HTMLElement, options: RtfWriteOptions
 		}
 		// A paragraph inside a list item is written at the item's indent (\liN, up to 7).
 		if ((tag === 'p' || tag === 'div') && el.parentElement?.tagName === 'LI') total += 8;
-		// A numbered item's number is counted as one digit; a list that starts high has more.
+		// A numbered item's number is counted as one character; a list that starts high has
+		// more, and so has one in Roman numerals ("xviii.").
 		if (tag === 'ol') {
-			const last = (parseInt(el.getAttribute('start') ?? '', 10) || 1) + el.children.length;
-			total += el.children.length * Math.max(0, String(last).length - 1);
+			let counter = listStart(el);
+			for (const item of Array.from(el.children)) {
+				if (item.tagName !== 'LI') continue;
+				counter = itemNumber(item, counter);
+				total += Math.max(0, markerText(counter, numberStyleOf(el, item)).length - 1);
+				counter++;
+			}
 		}
 		// A figure with no picture is a paragraph of what it holds: "\pard\intbl\qc\liN " and
 		// "\par " (at most 30).
@@ -1085,6 +1172,7 @@ export function htmlToRtf(editorEl: HTMLElement, options: RtfWriteOptions = {}):
 
 	const body = walkChildren(editorEl, {
 		colorIndex,
+		colorAt: new Map(colors.map((c, i) => [i + 1, c])),
 		bodySize,
 		inPre: false,
 		listCounter: 0,
@@ -1130,19 +1218,20 @@ export function htmlToRtf(editorEl: HTMLElement, options: RtfWriteOptions = {}):
 	return rtf.replace(/[\r\n]+/g, ' ');
 }
 
-function addColor(colorStr: string | null | undefined, colorMap: Map<string, RGB>): void {
+function addColor(colorStr: string | null | undefined, colorMap: Map<string, RGB>, el: Element, root: Node): void {
 	if (!colorStr) return;
 	const c = parseColor(colorStr);
-	if (c) colorMap.set(colorKey(c), c);
+	// (A color that is not written is not in the table either.)
+	if (c && !lostWithoutItsBackground(c, el, root)) colorMap.set(colorKey(c), c);
 }
 
 function collectColors(root: HTMLElement, colorMap: Map<string, RGB>): void {
 	// (In document order, as the color table has always been written, and without a call per
 	// level of nesting.)
 	for (const el of [root, ...Array.from(root.querySelectorAll<HTMLElement>('*'))]) {
-		addColor(el.style?.color, colorMap);
+		addColor(el.style?.color, colorMap, el, root);
 		// <font color="..."> is produced by execCommand('foreColor')
-		if (el.tagName?.toLowerCase() === 'font') addColor(el.getAttribute('color'), colorMap);
+		if (el.tagName?.toLowerCase() === 'font') addColor(el.getAttribute('color'), colorMap, el, root);
 	}
 }
 
@@ -1585,7 +1674,8 @@ const LIST_HANG = 360;
 /**
  * A <ul> or <ol>: one hanging paragraph per item, opened by a bullet or the item's number and a
  * tab. A list inside an item, or straight inside the list (<ul><ul>, as some editors nest), is
- * indented one level further. Numbers start at the list's `start`.
+ * indented one level further. Numbers start at the list's `start` and are written as the list
+ * shows them: in digits, in letters, in Roman numerals.
  */
 function listRtf(list: HTMLElement, ctx: WalkContext): string {
 	// A list straight inside a list is written from here, not through walkNode, so the depth is
@@ -1605,8 +1695,7 @@ function listRtfAt(list: HTMLElement, ctx: WalkContext): string {
 	// is negative for a list nested by less than half an inch.
 	const margin = lengthTwips(list.style?.marginLeft, true) ?? 0;
 	const left = Math.max(LIST_HANG, ctx.indent + margin + LIST_STEP);
-	const start = parseInt(list.getAttribute('start') ?? '', 10);
-	let counter = ordered && Number.isFinite(start) ? start : 1;
+	let counter = ordered ? listStart(list) : 1;
 
 	const itemCtx = { ...ctx, indent: left, cellAlign: listAlign(ctx) };
 	const paragraph = `\\pard${inCell(ctx)}${listAlign(ctx)}${liControl(left)}`;
@@ -1623,7 +1712,9 @@ function listRtfAt(list: HTMLElement, ctx: WalkContext): string {
 		if (tag && isHidden(child as Element)) continue;
 		if (tag === 'li') {
 			flushLoose();
-			const marker = ordered ? ` ${counter}.\\tab ` : '\\bullet\\tab ';
+			// The number as the list shows it: "3.", "C.", "iii." (see list-markers.ts).
+			if (ordered) counter = itemNumber(child as Element, counter);
+			const marker = ordered ? ` ${markerText(counter, numberStyleOf(list, child as Element))}.\\tab ` : '\\bullet\\tab ';
 			// The item's own color and the like; its marker takes them too, as on screen.
 			const own = charFormat(child as HTMLElement, tag, itemCtx, true);
 			rtf += `${own.on}${flowRtf(Array.from(child.childNodes), own.ctx, `${paragraph}\\fi-${LIST_HANG}${marker}`, `${paragraph} `)}${own.off}`;
@@ -2186,14 +2277,23 @@ function isPageBreak(el: HTMLElement): boolean {
 	return value('break-after') === 'page' || value('page-break-after') === 'always';
 }
 
-/** Color-table index of the element's own color, or null when it sets none. */
+/**
+ * Color-table index of the color an element's text is written in, or null where that is the
+ * color around it. An element's own color; or the reader's own (0) where the color it has, its
+ * own or the one around it, is one only its background made readable (lostWithoutItsBackground).
+ */
 function colorIndexOf(el: HTMLElement, ctx: WalkContext): number | null {
 	// Support both inline style.color (spans) and the color attribute (<font>)
 	const color = el.style?.color ||
 		(el.tagName.toLowerCase() === 'font' ? (el.getAttribute('color') ?? '') : '');
-	if (!color) return null;
-	const c = parseColor(color);
-	if (!c) return null;
+	const c = color ? parseColor(color) : null;
+	if (!c) {
+		// No color of its own: the one around it, on a background this element or one
+		// between them sets (<div style="color:white"><p style="background:navy">).
+		const around = ctx.color === 0 ? undefined : ctx.colorAt.get(ctx.color);
+		return around && lostWithoutItsBackground(around, el, ctx.root) ? 0 : null;
+	}
+	if (lostWithoutItsBackground(c, el, ctx.root)) return ctx.color === 0 ? null : 0;
 	return ctx.colorIndex.get(colorKey(c)) ?? null;
 }
 

@@ -2803,9 +2803,19 @@
 		if (!sel || sel.rangeCount === 0 || !editorEl.contains(sel.anchorNode) || !editorEl.contains(sel.focusNode)) return;
 		if (!sel.isCollapsed && !loss.dropped) return;
 		const range = sel.getRangeAt(0);
-		const from = sel.isCollapsed ? loss.from : shownCharsBefore(range.startContainer, range.startOffset);
-		const to = shownCharsBefore(range.endContainer, range.endOffset);
+		let from = sel.isCollapsed ? loss.from : shownCharsBefore(range.startContainer, range.startOffset);
+		let to = shownCharsBefore(range.endContainer, range.endOffset);
 		const came = new Set(Array.from(editorEl.querySelectorAll('*')).filter((el) => !before.has(el)));
+		// Firefox leaves the caret before a whole page it has pasted (a copy made in Word, with
+		// its <head>), not after it. The paste is then the elements that came in, from the
+		// first to the end of the last. (Text that is not the paste's own, to the character,
+		// is left alone as ever: see removeWordHidden.)
+		if (sel.isCollapsed && to <= from && came.size > 0) {
+			const outer = Array.from(came).filter((el) => el.parentElement && !came.has(el.parentElement));
+			const index = (el: Element) => Array.prototype.indexOf.call(el.parentNode!.childNodes, el);
+			from = Math.min(...outer.map((el) => shownCharsBefore(el.parentNode!, index(el))));
+			to = Math.max(...outer.map((el) => shownCharsBefore(el.parentNode!, index(el) + 1)));
+		}
 		if (takeHidden(from, to, loss.notes, (el) => came.has(el))) {
 			hiddenTaken.push({ notes: loss.notes, from, came, emptied: Array.from(came).filter((el) => !el.isConnected) });
 		}
@@ -2816,6 +2826,9 @@
 	 * character shown, or with null for `to`, the paste Redo has put back from the `from`th on
 	 * (see removeWordHidden). Returns whether anything was taken out.
 	 */
+	/** Word's mark on text it hides, as a paste carries it in a style. */
+	const WORD_HIDES = /mso-hide\s*:\s*all/i;
+
 	function takeHidden(from: number, to: number | null, notes: PasteNotes, came: (el: Element) => boolean): boolean {
 		if (!editorEl) return false;
 		// A pasted element left with nothing in it goes, but not the one the caret is in: that
@@ -2823,7 +2836,34 @@
 		// alone left the caret in no line at all, and the next words typed were in none.)
 		const sel = window.getSelection();
 		const at = sel && sel.rangeCount > 0 && editorEl.contains(sel.anchorNode) ? sel.anchorNode : null;
-		const held = at instanceof Element ? at : (at?.parentElement ?? null);
+		let held = at instanceof Element ? at : (at?.parentElement ?? null);
+		// Firefox pastes Word's hidden text as an element that is not displayed, and leaves the
+		// caret inside it: what was typed next was typed where it is not seen, and what is not
+		// seen is not written. The caret is put before a hidden piece of a line, which then
+		// goes with its text; a hidden paragraph the caret is in becomes the empty line, shown.
+		let unseen: HTMLElement | null = null;
+		for (let el = held; el && el !== editorEl; el = el.parentElement) {
+			// (Word's own mark is still on it as the style it came with: the browser knows no
+			// such property, and what came in has not been made safe yet.)
+			const hidden = el instanceof HTMLElement && (WORD_HIDES.test(el.getAttribute('style') ?? '') || el.style.display === 'none' || el.style.visibility === 'hidden' || el.hasAttribute('hidden'));
+			if (hidden && came(el)) unseen = el as HTMLElement;
+		}
+		if (unseen && sel) {
+			if (/^(P|DIV|LI|H[1-6]|BLOCKQUOTE|PRE|TD|TH)$/.test(unseen.tagName)) {
+				unseen.setAttribute('style', (unseen.getAttribute('style') ?? '').replace(new RegExp(`${WORD_HIDES.source}\\s*;?`, 'gi'), ''));
+				unseen.style.removeProperty('display');
+				unseen.style.removeProperty('visibility');
+				unseen.removeAttribute('hidden');
+				if (!unseen.getAttribute('style')?.trim()) unseen.removeAttribute('style');
+			} else {
+				const before = document.createRange();
+				before.setStartBefore(unseen);
+				before.collapse(true);
+				sel.removeAllRanges();
+				sel.addRange(before);
+				held = unseen.parentElement;
+			}
+		}
 		if (!removeWordHidden(editorEl, from, to, notes, (el) => came(el) && !(held !== null && el.contains(held)))) return false;
 		if (held && held !== editorEl && held.isConnected && held.childNodes.length === 0) held.appendChild(document.createElement('br'));
 		return true;
@@ -2894,6 +2934,13 @@
 
 	function tidyPasted(before: Set<Element>): void {
 		if (!editorEl) return;
+		// Firefox pastes the <style> of a copied page into the document with its words. It is
+		// taken out below with all that is not safe; here first, because its rules count as text
+		// of the paste, and Word's hidden words are found by the paste's text, to the character:
+		// with a style sheet among them they were not found, and stayed in the document, unseen.
+		for (const el of Array.from(editorEl.querySelectorAll('style, script, template, title'))) {
+			if (!before.has(el)) el.remove();
+		}
 		if (pastedLoss) restorePasteLoss(before, pastedLoss);
 		pastedLoss = null;
 		// What the paste brought is made safe as HTML from anywhere else is: a browser takes the

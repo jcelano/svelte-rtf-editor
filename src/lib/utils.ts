@@ -1,5 +1,6 @@
 import { linkTarget } from './rtf-writer.js';
 import { tableModel, type GridCell } from './table-model.js';
+import { itemNumber, listStart, markerText, numberStyleOf } from './list-markers.js';
 
 /** Where the converter is: Markdown means different things in code, in a table cell and in a heading. */
 interface MarkdownContext {
@@ -124,6 +125,9 @@ function imageToMarkdown(alt: string, src: string, ctx: MarkdownContext): string
  * A list item's Markdown under its marker: later lines are indented to the item's text, so a
  * table, a code block or a list inside the item stays in it.
  */
+/** A block of Markdown that is not a paragraph of words: a list, a quotation, a heading, code, a table, a rule. */
+const BLOCK_START = /^(?:```|~~~|>|#{1,6}(?: |$)|[-+*](?: |$)|\d{1,9}[.)](?: |$)|\||(?:-{3,}|\*{3,}|_{3,})\s*$| {4})/;
+
 function listItem(marker: string, body: string): string {
 	// (Spaces and line breaks only are taken off its ends: other white space is the document's.)
 	return `${marker}${body.replace(/^[ \n]+|[ \n]+$/g, '').replace(/\n(?=[^\n])/g, `\n${' '.repeat(marker.length)}`)}`;
@@ -590,6 +594,10 @@ function listToMarkdown(list: HTMLElement, ordered: boolean, ctx: MarkdownContex
 	// block: the list starts as near to its own number as Markdown can count from.
 	const itemCount = Array.from(list.children).filter((child) => child.tagName === 'LI').length;
 	let number = Number.isFinite(start) ? Math.max(0, Math.min(start, 1_000_000_000 - Math.max(itemCount, 1))) : 1;
+	// The number the screen shows, for an item numbered in letters or Roman numerals. Markdown
+	// numbers a list in digits only, and "see part B" has to find an item that says "B.": such
+	// an item is written as a bullet with its marker as the first words, "- B. Left breast".
+	let shownNumber = listStart(list);
 	let items: { marker: string; blocks: string[] }[] = [];
 	let loose: Node[] = [];
 
@@ -612,8 +620,19 @@ function listToMarkdown(list: HTMLElement, ordered: boolean, ctx: MarkdownContex
 			const inside = shown(node as HTMLElement, ctx);
 			if (!inside) return;
 			const blocks = blocksOf(node.childNodes, inside);
+			const style = ordered ? numberStyleOf(list, node as Element) : 'decimal';
+			shownNumber = itemNumber(node as Element, shownNumber);
+			const label = style === 'decimal' ? '' : `${markerText(shownNumber, style)}.`;
+			shownNumber++;
+			if (label) {
+				// Before the words of the item; on a line of its own before a block that is not
+				// words (a list, a code block, a table, a quotation).
+				if (blocks.length && !BLOCK_START.test(blocks[0])) blocks[0] = `${label} ${blocks[0]}`;
+				else blocks.unshift(label);
+			}
 			// An item whose text is hidden shows no marker either.
-			if (blocks.length || !inside.unseen) items.push({ marker: ordered ? `${number++}. ` : '- ', blocks });
+			if (blocks.length || !inside.unseen) items.push({ marker: ordered && !label ? `${number++}. ` : '- ', blocks });
+			else if (label) blocks.shift();
 		} else if (['ul', 'ol', 'menu', 'dir'].includes(tag)) {
 			endLoose();
 			if (items.length) items[items.length - 1].blocks.push(...blocksOf([node], ctx));

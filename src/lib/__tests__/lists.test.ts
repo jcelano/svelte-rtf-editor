@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { htmlToRtf, estimateRtfBytes } from '../rtf-writer.js';
 import { rtfToHtml } from '../rtf-parser.js';
+import { htmlToMarkdown } from '../utils.js';
+import { letterReadings, markerText } from '../list-markers.js';
 
 /**
  * Lists, both ways (issue #3, items 6 and 13). RTF as this library writes it has no list
@@ -317,8 +319,11 @@ describe('rtfToHtml: what is not a list stays the paragraph it is', () => {
 		expect(paragraph(R`\pard\li360\fi-180 1.\tab hang\par`)).toContain('1.&emsp;hang');
 	});
 
-	it('a marker the writer does not send: a letter, a parenthesis, a dash', () => {
-		expect(paragraph(R`\pard\li720\fi-360 a.\tab letter\par`)).toContain('a.');
+	it('a marker the writer does not send: a parenthesis, a dash, letters that are no number', () => {
+		expect(paragraph(R`\pard\li720\fi-360 a)\tab letter\par`)).toContain('a)');
+		expect(paragraph(R`\pard\li720\fi-360 Note.\tab mixed case\par`)).toContain('Note.');
+		expect(paragraph(R`\pard\li720\fi-360 see.\tab a word\par`)).toContain('see.');
+		expect(paragraph(R`\pard\li720\fi-360 IIII.\tab no numeral\par`)).toContain('IIII.');
 		expect(paragraph(R`\pard\li720\fi-360 1)\tab paren\par`)).toContain('1)');
 		expect(paragraph(R`\pard\li720\fi-360 -\tab dash\par`)).toContain('-');
 	});
@@ -358,5 +363,140 @@ describe('rtfToHtml: what is not a list stays the paragraph it is', () => {
 		expect(saved).toContain('\\pard\\li720\\fi-720 \\u8226\\\'3f\\u8195\\\'3fhang\\par ');
 		expect(saved).toContain('\\pard\\li720\\fi-360 a.\\tab letter\\par ');
 		expect(htmlToRtf(el(rtfToHtml(saved)))).toBe(saved);
+	});
+});
+
+/**
+ * A list numbered in letters or Roman numerals (an outside review of 1.12.0, finding 2). A list
+ * pasted as A, B, C showed A, B, C in the editor and was written 1, 2, 3 to the RTF and the
+ * Markdown. Specimen parts are lettered in pathology: "see part B" in the diagnosis pointed at an
+ * item labelled "2.". What is written is the marker the screen shows.
+ */
+describe('a list numbered in letters or Roman numerals', () => {
+	const parts = '<ol type="A"><li>Left breast, biopsy</li><li>Right breast, biopsy</li><li>Sentinel node</li></ol>';
+	const item = (marker: string, text: string, left = 720) => `\\pard\\li${left}\\fi-360 ${marker}.\\tab ${text}`;
+
+	it('markerText counts as a browser does', () => {
+		expect([1, 2, 26, 27, 28, 52, 53, 702].map((n) => markerText(n, 'upper-alpha'))).toEqual(['A', 'B', 'Z', 'AA', 'AB', 'AZ', 'BA', 'ZZ']);
+		expect([1, 4, 9, 14, 40, 90, 400, 1994, 3999].map((n) => markerText(n, 'upper-roman'))).toEqual(['I', 'IV', 'IX', 'XIV', 'XL', 'XC', 'CD', 'MCMXCIV', 'MMMCMXCIX']);
+		expect(markerText(3, 'lower-alpha')).toBe('c');
+		expect(markerText(18, 'lower-roman')).toBe('xviii');
+		expect(markerText(7, 'decimal')).toBe('7');
+		// What the style cannot write is shown in digits, as a browser shows it.
+		expect(markerText(0, 'upper-alpha')).toBe('0');
+		expect(markerText(-2, 'lower-roman')).toBe('-2');
+		expect(markerText(4000, 'upper-roman')).toBe('4000');
+	});
+
+	it('letterReadings says what letters can mean', () => {
+		expect(letterReadings('B')).toEqual([{ style: 'upper-alpha', number: 2 }]);
+		expect(letterReadings('C')).toEqual([{ style: 'upper-alpha', number: 3 }, { style: 'upper-roman', number: 100 }]);
+		expect(letterReadings('iv')).toEqual([{ style: 'lower-alpha', number: 256 }, { style: 'lower-roman', number: 4 }]);
+		expect(letterReadings('xviii')).toEqual([{ style: 'lower-roman', number: 18 }]);
+		expect(letterReadings('IIII')).toEqual([]);
+		expect(letterReadings('Ab')).toEqual([]);
+		expect(letterReadings('see')).toEqual([]);
+		expect(letterReadings('')).toEqual([]);
+	});
+
+	it('is written with the letters the screen shows, by the type attribute', () => {
+		expect(paragraphs(parts)).toEqual([item('A', 'Left breast, biopsy'), item('B', 'Right breast, biopsy'), item('C', 'Sentinel node')].map((p) => p.replace(/\\\\/g, '\\')));
+		expect(body('<ol type="a"><li>x</li><li>y</li></ol>')).toContain(' a.\\tab x\\par \\pard\\li720\\fi-360 b.\\tab y');
+		expect(body('<ol type="I"><li>x</li><li>y</li><li>z</li><li>w</li></ol>')).toMatch(/ I\.\\tab x.* II\.\\tab y.* III\.\\tab z.* IV\.\\tab w/);
+		expect(body('<ol type="i" start="9"><li>x</li><li>y</li></ol>')).toMatch(/ ix\.\\tab x.* x\.\\tab y/);
+	});
+
+	it('by list-style-type, on the list or on each item as Google Docs writes it', () => {
+		expect(body('<ol style="list-style-type: upper-alpha"><li>x</li><li>y</li></ol>')).toMatch(/ A\.\\tab x.* B\.\\tab y/);
+		expect(body('<ol style="list-style-type: lower-latin"><li>x</li></ol>')).toContain(' a.\\tab x');
+		expect(body('<ol><li style="list-style-type:upper-roman">x</li><li style="list-style-type:upper-roman">y</li></ol>')).toMatch(/ I\.\\tab x.* II\.\\tab y/);
+		// The style wins over the attribute, as it does on screen.
+		expect(body('<ol type="A" style="list-style-type: decimal"><li>x</li></ol>')).toContain(' 1.\\tab x');
+		// A way of counting that is not written in its own signs is written in digits.
+		expect(body('<ol style="list-style-type: lower-greek"><li>x</li></ol>')).toContain(' 1.\\tab x');
+	});
+
+	it('counts from the list\'s start, and from an item\'s own value', () => {
+		expect(body('<ol type="A" start="3"><li>x</li><li>y</li></ol>')).toMatch(/ C\.\\tab x.* D\.\\tab y/);
+		expect(body('<ol><li>x</li><li value="5">y</li><li>z</li></ol>')).toMatch(/ 1\.\\tab x.* 5\.\\tab y.* 6\.\\tab z/);
+		expect(body('<ol type="A"><li>x</li><li value="4">y</li></ol>')).toMatch(/ A\.\\tab x.* D\.\\tab y/);
+	});
+
+	it('a numbered list is written as before', () => {
+		expect(body('<ol><li>x</li><li>y</li></ol>')).toBe('\\pard\\li720\\fi-360 1.\\tab x\\par \\pard\\li720\\fi-360 2.\\tab y\\par ');
+		expect(body('<ol start="4" type="1"><li>x</li></ol>')).toContain(' 4.\\tab x');
+	});
+
+	it('is read back as a list that counts the same way', () => {
+		for (const html of [
+			parts,
+			'<ol type="a"><li>x</li><li>y</li></ol>',
+			'<ol type="i"><li>one</li><li>two</li><li>three</li><li>four</li><li>five</li><li>six</li></ol>',
+			'<ol type="I"><li>one</li><li>two</li></ol>',
+			'<ol type="A" start="3"><li>x</li><li>y</li></ol>',
+			// Past the letters that are numerals too: H, I, J and V, W, X.
+			'<ol type="A" start="8"><li>h</li><li>i</li><li>j</li></ol>',
+			'<ol type="a" start="21"><li>u</li><li>v</li><li>w</li><li>x</li><li>y</li></ol>',
+			// And a Roman list through C, which is a letter too.
+			'<ol type="I" start="99"><li>xcix</li><li>c</li><li>ci</li></ol>',
+			'<ol type="A"><li>Part<ol type="i"><li>sub one</li><li>sub two</li></ol></li><li>Next<ol><li>n1</li><li>n2</li></ol></li></ol>'
+		]) {
+			expect(rtfToHtml(htmlToRtf(el(html))), html).toBe(html);
+		}
+	});
+
+	it('a list of twenty-six letters and more comes back as one list', () => {
+		const html = `<ol type="A">${Array.from({ length: 30 }, (_, i) => `<li>item ${i + 1}</li>`).join('')}</ol>`;
+		const rtf = htmlToRtf(el(html));
+		expect(rtf).toContain(' Z.\\tab item 26');
+		expect(rtf).toContain(' AA.\\tab item 27');
+		expect(rtf).toContain(' AD.\\tab item 30');
+		expect(rtfToHtml(rtf)).toBe(html);
+	});
+
+	it('letters that open a list alone: "I" is a numeral, any other single letter a letter', () => {
+		expect(read(R`\pard\li720\fi-360 I.\tab x\par`)).toBe('<ol type="I"><li>x</li></ol>');
+		expect(read(R`\pard\li720\fi-360 i.\tab x\par`)).toBe('<ol type="i"><li>x</li></ol>');
+		expect(read(R`\pard\li720\fi-360 C.\tab x\par`)).toBe('<ol type="A" start="3"><li>x</li></ol>');
+		expect(read(R`\pard\li720\fi-360 IV.\tab x\par`)).toBe('<ol type="I" start="4"><li>x</li></ol>');
+		// What comes after says which: "I." before "J." is the ninth letter.
+		expect(read(R`\pard\li720\fi-360 I.\tab x\par\pard\li720\fi-360 J.\tab y\par`)).toBe('<ol type="A" start="9"><li>x</li><li>y</li></ol>');
+		expect(read(R`\pard\li720\fi-360 C.\tab x\par\pard\li720\fi-360 CI.\tab y\par`)).toBe('<ol type="I" start="100"><li>x</li><li>y</li></ol>');
+	});
+
+	it('a change of letters to numbers, or a letter out of turn, is a list of its own', () => {
+		expect(read(R`\pard\li720\fi-360 A.\tab x\par\pard\li720\fi-360 1.\tab y\par`)).toBe('<ol type="A"><li>x</li></ol>\n<ol><li>y</li></ol>');
+		expect(read(R`\pard\li720\fi-360 A.\tab x\par\pard\li720\fi-360 D.\tab y\par`)).toBe('<ol type="A"><li>x</li></ol>\n<ol type="A" start="4"><li>y</li></ol>');
+	});
+
+	it('a letter and a tab typed on a line that is no list item stay what was typed, tab and all', () => {
+		// A specimen line as other systems write it: no hanging indent of the writer's.
+		const typed = read(R`\pard A.\tab Left breast, biopsy:\par`);
+		expect(typed).toBe('<p>A.<span style="white-space:pre">\t</span>Left breast, biopsy:</p>');
+		expect(read(R`\pard\li720\fi-720 B.\tab hung by another distance\par`)).toContain('B.<span style="white-space:pre">\t</span>');
+		expect(read(R`\pard\qc\li720\fi-360 C.\tab centered\par`)).toContain('C.<span style="white-space:pre">\t</span>');
+		// And is written back as it was read.
+		expect(htmlToRtf(el(typed))).toContain('A.\\tab Left breast, biopsy:');
+	});
+
+	it('the size estimate counts the longer markers', () => {
+		// (The estimate runs a fixed number of bytes over for any list: what the markers add is exact.)
+		const numbered = `<ol>${'<li>x</li>'.repeat(40)}</ol>`;
+		for (const html of [`<ol type="i" start="3880">${'<li>x</li>'.repeat(40)}</ol>`, `<ol type="A">${'<li>x</li>'.repeat(40)}</ol>`]) {
+			const more = htmlToRtf(el(html)).length - htmlToRtf(el(numbered)).length;
+			expect(estimateRtfBytes(el(html)) - estimateRtfBytes(el(numbered)), html.slice(0, 26)).toBe(more);
+		}
+	});
+
+	it('Markdown, which numbers in digits only, carries the marker as the first words of a bullet', () => {
+		expect(htmlToMarkdown(el(`<p>Specimens:</p>${parts}<p>See part B.</p>`))).toBe(
+			'Specimens:\n\n- A. Left breast, biopsy\n- B. Right breast, biopsy\n- C. Sentinel node\n\nSee part B.\n\n'
+		);
+		expect(htmlToMarkdown(el('<ol type="i" start="3"><li>x</li><li>y</li></ol>'))).toBe('- iii. x\n- iv. y\n\n');
+		expect(htmlToMarkdown(el('<ol><li style="list-style-type:upper-alpha">x</li></ol>'))).toBe('- A. x\n\n');
+		// A numbered list is a numbered list, as before.
+		expect(htmlToMarkdown(el('<ol start="4"><li>x</li><li>y</li></ol>'))).toBe('4. x\n5. y\n\n');
+		// Before a list of its own, the marker is a line of its own.
+		expect(htmlToMarkdown(el('<ol type="A"><li><ul><li>inner</li></ul></li></ol>'))).toBe('- A.\n\n  - inner\n\n');
 	});
 });
