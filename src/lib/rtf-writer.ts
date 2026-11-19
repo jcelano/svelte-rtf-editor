@@ -170,7 +170,17 @@ function parseColor(colorStr: string): RGB | null {
 	}
 
 	// Basic named colors
-	const named: Record<string, RGB> = {
+	return NAMED_COLORS.get(s) ?? null;
+}
+
+/**
+ * The colors known by name. A Map, like every table here that is asked for a name out of the
+ * document (a color, a tag): an object also answers to the names every object has, so
+ * <font color="constructor"> was a color, and went into the color table as
+ * "\redundefined\greenundefined\blueundefined".
+ */
+const NAMED_COLORS: ReadonlyMap<string, RGB> = new Map(
+	Object.entries({
 		black: { r: 0, g: 0, b: 0 },
 		white: { r: 255, g: 255, b: 255 },
 		red: { r: 255, g: 0, b: 0 },
@@ -181,10 +191,8 @@ function parseColor(colorStr: string): RGB | null {
 		purple: { r: 128, g: 0, b: 128 },
 		gray: { r: 128, g: 128, b: 128 },
 		grey: { r: 128, g: 128, b: 128 }
-	};
-
-	return named[s] || null;
-}
+	})
+);
 
 function colorKey(c: RGB): string {
 	return `${c.r},${c.g},${c.b}`;
@@ -537,7 +545,7 @@ const PICTURE_OVERHEAD_BYTES = 80;
  * and closing runs measured from walkChildren. Anything not listed costs
  * nothing of its own beyond the text it contains.
  */
-const BLOCK_OVERHEAD_BYTES: Record<string, number> = {
+const BLOCK_OVERHEAD_BYTES: ReadonlyMap<string, number> = new Map(Object.entries({
 	p: 14,
 	div: 14,
 	h1: 29,
@@ -576,7 +584,17 @@ const BLOCK_OVERHEAD_BYTES: Record<string, number> = {
 	hr: 154, // "\pard\qc " + 20 x "\emdash" + "\par "
 	ul: 0,
 	ol: 0
-};
+}));
+
+/**
+ * What an element of this tag costs, or nothing for one not listed. (Looked up in a Map: asked
+ * of an object, an element named <constructor> cost a function, and the estimate, added to
+ * that, was a piece of text. An application comparing it with a size limit then let every
+ * document through.)
+ */
+function overheadBytes(tag: string): number {
+	return BLOCK_OVERHEAD_BYTES.get(tag) ?? 0;
+}
 
 /**
  * Blocks that are written as a <div> is: a paragraph when they hold text, a container when they
@@ -684,7 +702,7 @@ export function estimateRtfBytes(editorEl: HTMLElement, options: RtfWriteOptions
 		const tag = tagOf(el);
 		// A <div> that only holds blocks writes nothing of its own: its blocks are counted.
 		const container = tag === 'div' && Array.from(el.children).some(isBlock) && !startsWithInline(el) && !endsWithInline(el);
-		if (!container) total += BLOCK_OVERHEAD_BYTES[tag] ?? 0;
+		if (!container) total += overheadBytes(tag);
 		// A heading and a code block each write their size and the size around them.
 		if (HEADING_TAGS.has(tag) || tag === 'pre') total += 2 * sizeDigits;
 		// Bold, italic, a line under or through, and raised or lowered text set by a style cost
@@ -739,13 +757,13 @@ export function estimateRtfBytes(editorEl: HTMLElement, options: RtfWriteOptions
 				// rowspan="0" reaches the last row; no span reaches past the table.
 				const rowCount = el.closest('table')?.querySelectorAll('tr').length ?? 1;
 				const spanned = Math.min(rowCount, rows > 0 ? rows : rowCount);
-				total += 7 + (spanned - 1) * ((BLOCK_OVERHEAD_BYTES[tag] ?? 0) + 7);
+				total += 7 + (spanned - 1) * (overheadBytes(tag) + 7);
 			}
 		}
 		// A row with fewer cells than the table has columns is filled with empty ones.
 		if (tag === 'table' && !el.parentElement?.closest('td, th')) {
 			const model = tableModel(el);
-			for (const row of model.rows) total += row.filter((slot) => slot === null).length * BLOCK_OVERHEAD_BYTES.td;
+			for (const row of model.rows) total += row.filter((slot) => slot === null).length * overheadBytes('td');
 		}
 		// Anything in a table that is in no cell is written before it, each run a paragraph
 		// ("\pard\intbl\qc\liN " and "\par ", at most 27).
@@ -1281,7 +1299,7 @@ function walkNodeAt(node: Node, ctx: WalkContext, restate: boolean, endLooseText
 // ── Character formatting ──
 
 /** What a tag by itself does to its text. */
-const TAG_FORMAT: Record<string, { bold?: true; italic?: true; underline?: true; strike?: true; script?: 'super' | 'sub' }> = {
+const TAG_FORMAT: ReadonlyMap<string, { bold?: true; italic?: true; underline?: true; strike?: true; script?: 'super' | 'sub' }> = new Map(Object.entries({
 	b: { bold: true },
 	strong: { bold: true },
 	i: { italic: true },
@@ -1296,7 +1314,7 @@ const TAG_FORMAT: Record<string, { bold?: true; italic?: true; underline?: true;
 	del: { strike: true },
 	sup: { script: 'super' },
 	sub: { script: 'sub' }
-};
+}));
 
 /** Whether a font-weight is bold; null when it does not say. */
 function cssBold(weight: string | undefined): boolean | null {
@@ -1320,7 +1338,7 @@ function cssBold(weight: string | undefined): boolean | null {
  */
 function charFormat(el: HTMLElement, rawTag: string, ctx: WalkContext, block = false): { on: string; off: string; ctx: WalkContext } {
 	const style = el.style;
-	const tagFormat = TAG_FORMAT[rawTag] ?? {};
+	const tagFormat = TAG_FORMAT.get(rawTag) ?? {};
 
 	const weight = cssBold(style?.fontWeight);
 	const bold = weight ?? (tagFormat.bold || ctx.bold);

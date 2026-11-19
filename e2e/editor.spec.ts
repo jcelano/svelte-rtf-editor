@@ -7,6 +7,7 @@ declare global {
 		lib: typeof import('../src/lib/index.js');
 		setViewer(rtf: string): void;
 		changes: number;
+		saves: string[];
 		__ran?: string;
 	}
 }
@@ -528,5 +529,204 @@ test.describe('the writers', () => {
 		expect(await page.evaluate(() => window.changes)).toBeGreaterThan(0);
 		// It was 116 ms with these eight pictures; it is a few now. Wide enough for a slow machine.
 		expect(ms).toBeLessThan(40);
+	});
+});
+
+test.describe('what a third review found', () => {
+	// Markup that a paste is made safe of, as it is dragged in or put back by Redo: a block drawn
+	// over the page, a form that sends what is typed in it elsewhere, a frame, a picture address.
+	const OUTSIDE =
+		'<p>came in</p><div id="over" style="position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:9999;color:red">over</div>' +
+		'<form action="https://example.com/collect"><input name="q" value="typed"><button>Go</button></form><iframe src="https://example.com/frame"></iframe>';
+
+	/** What of OUTSIDE is in the document: nothing of it should be, but its words. */
+	const left = (page: Page) =>
+		page.evaluate(() => {
+			const ed = document.querySelector('.ink-content')!;
+			const over = Array.from(ed.querySelectorAll<HTMLElement>('div')).find((d) => d.textContent === 'over');
+			return {
+				risky: Array.from(ed.querySelectorAll('iframe, input, button, [action], [id="over"]')).map((el) => el.tagName.toLowerCase()),
+				overPosition: over ? getComputedStyle(over).position : 'gone',
+				overColor: over?.style.color ?? 'gone'
+			};
+		});
+
+	/** Put something on the page that can be dragged, carrying `markup` as a drag from another page does. */
+	async function draggable(page: Page, markup: string): Promise<void> {
+		await page.evaluate((markup) => {
+			const source = document.createElement('div');
+			source.id = 'drag-source';
+			source.draggable = true;
+			source.textContent = 'drag me';
+			source.addEventListener('dragstart', (e) => {
+				e.dataTransfer!.setData('text/html', markup);
+				e.dataTransfer!.setData('text/plain', 'came in');
+				e.dataTransfer!.effectAllowed = 'copy';
+			});
+			document.body.prepend(source);
+		}, markup);
+	}
+
+	async function selectIn(page: Page, paragraph: number, from: number, to: number): Promise<void> {
+		await page.evaluate(
+			({ paragraph, from, to }) => {
+				const text = document.querySelectorAll('.ink-content p')[paragraph].firstChild!;
+				const range = document.createRange();
+				range.setStart(text, from);
+				range.setEnd(text, to);
+				const selection = getSelection()!;
+				selection.removeAllRanges();
+				selection.addRange(range);
+				(document.querySelector('.ink-content') as HTMLElement).focus();
+			},
+			{ paragraph, from, to }
+		);
+	}
+
+	test('markup dragged into the document is made safe as a paste is', async ({ page }) => {
+		await open(page, { content: '<p>Line to drop on</p>' });
+		await draggable(page, OUTSIDE);
+		await page.dragAndDrop('#drag-source', `${content} p`);
+		await expect(page.locator(content)).toContainText('came in');
+		expect(await left(page)).toEqual({ risky: [], overPosition: 'static', overColor: 'red' });
+		// What the application is handed is the same document.
+		expect(await html(page)).not.toMatch(/iframe|<input|<button|action=|position/);
+	});
+
+	test('words dragged from one line of the document to another are still moved', async ({ page }) => {
+		await open(page, { content: '<p>alpha beta gamma</p><p>second line</p><p>third line</p>' });
+		await selectIn(page, 0, 0, 5);
+		const at = await page.evaluate(() => {
+			const from = getSelection()!.getRangeAt(0).getBoundingClientRect();
+			const to = document.querySelectorAll('.ink-content p')[2].getBoundingClientRect();
+			return { x: from.x + from.width / 2, y: from.y + from.height / 2, tx: to.x + 30, ty: to.y + to.height / 2 };
+		});
+		await page.mouse.move(at.x, at.y);
+		await page.mouse.down();
+		await page.mouse.move(at.x + 5, at.y + 5, { steps: 3 });
+		await page.mouse.move(at.tx, at.ty, { steps: 8 });
+		await page.mouse.up();
+		await expect(page.locator(`${content} p`).nth(2)).toContainText('alpha');
+		await expect(page.locator(`${content} p`).nth(0)).not.toContainText('alpha');
+		expect(await page.locator(`${content} p`).count()).toBe(3);
+	});
+
+	test('Redo does not put back what a paste was made safe of', async ({ page }) => {
+		await open(page, { content: '<p>Body</p>' });
+		await page.evaluate(async (markup) => {
+			await navigator.clipboard.write([new ClipboardItem({ 'text/html': new Blob([markup], { type: 'text/html' }) })]);
+		}, OUTSIDE);
+		await page.click(`${content} p`);
+		await page.keyboard.press('ControlOrMeta+v');
+		await expect(page.locator(content)).toContainText('came in');
+		expect((await left(page)).risky).toEqual([]);
+		for (const redo of ['ControlOrMeta+Shift+z', 'ControlOrMeta+y']) {
+			await page.keyboard.press('ControlOrMeta+z');
+			await expect(page.locator(content)).not.toContainText('came in');
+			await page.keyboard.press(redo);
+			await expect(page.locator(content)).toContainText('came in');
+			expect(await left(page), redo).toEqual({ risky: [], overPosition: 'static', overColor: 'red' });
+		}
+	});
+
+	test('a document with an element named "constructor" opens, is replaced by the next one, and can be pasted', async ({ page }) => {
+		const odd = '<constructor data-x="1" width="5">odd</constructor>';
+		const errors: string[] = [];
+		page.on('pageerror', (e) => errors.push(e.message));
+		await open(page, { content: `<p>Patient A</p>${odd}` });
+		await expect(page.locator(content)).toContainText('Patient A');
+		await page.evaluate((odd) => window.ed.setHTML(`<p>Patient B</p>${odd}`), odd);
+		await expect(page.locator(content)).toContainText('Patient B');
+		await expect(page.locator(content)).not.toContainText('Patient A');
+		// The size estimate is a number, which an application compares with its limit.
+		const estimate = await page.evaluate(() => window.lib.estimateRtfBytes(document.querySelector('.ink-content') as HTMLElement));
+		expect(typeof estimate).toBe('number');
+		expect(estimate).toBeGreaterThanOrEqual(await page.evaluate(() => window.ed.getRTF().length));
+		expect(await page.evaluate(() => window.ed.getRTF())).not.toMatch(/undefined|NaN/);
+		expect(errors).toEqual([]);
+	});
+
+	test('Bold, and a button of the toolbar, change what is selected now, not what was selected when a link was made', async ({ page }) => {
+		await open(page, { content: '<p>alpha beta gamma</p><p>second paragraph</p><p>third paragraph</p>' });
+		await selectIn(page, 0, 6, 10);
+		await page.keyboard.press('ControlOrMeta+k');
+		await page.keyboard.type('https://example.com/');
+		await page.keyboard.press('Enter');
+		await expect(page.locator(`${content} a`)).toHaveText('beta');
+		await selectIn(page, 1, 0, 6);
+		await page.keyboard.press('ControlOrMeta+b');
+		await selectIn(page, 2, 0, 5);
+		await page.getByRole('button', { name: 'Italic (Ctrl+I)' }).click();
+		expect(await html(page)).toBe(
+			'<p>alpha <a href="https://example.com/">beta</a> gamma</p><p><b>second</b> paragraph</p><p><i>third</i> paragraph</p>'
+		);
+	});
+
+	test('a button of the toolbar pressed while the selection is elsewhere on the page changes what was last selected in the document', async ({ page }) => {
+		await open(page, { content: '<p>alpha beta gamma</p><p>second paragraph</p>' });
+		await selectIn(page, 0, 0, 5);
+		await page.keyboard.press('ControlOrMeta+k');
+		await page.keyboard.press('Escape');
+		await selectIn(page, 1, 0, 6);
+		// (A selection is there for longer than no time at all: the browser says it has changed
+		// a moment after it has.)
+		await page.evaluate(() => new Promise((done) => setTimeout(done, 50)));
+		// The selection leaves the document: something on the page around the editor is selected.
+		await page.evaluate(() => {
+			const outside = document.createElement('p');
+			outside.id = 'outside';
+			outside.textContent = 'words of the page around the editor';
+			document.body.append(outside);
+			getSelection()!.selectAllChildren(outside);
+		});
+		await page.getByRole('button', { name: 'Bold (Ctrl+B)' }).click();
+		expect(await html(page)).toBe('<p>alpha beta gamma</p><p><b>second</b> paragraph</p>');
+		expect(await page.evaluate(() => document.getElementById('outside')!.innerHTML)).toBe('words of the page around the editor');
+	});
+
+	test('Undo and Redo leave what was typed and formatted as it was', async ({ page }) => {
+		// (They now look at what they bring back. Nothing of the editor's own is taken out by that.)
+		await open(page);
+		await page.click(content);
+		await page.keyboard.type('Plain ');
+		await page.keyboard.press('ControlOrMeta+b');
+		await page.keyboard.type('bold');
+		await page.keyboard.press('ControlOrMeta+b');
+		await page.keyboard.press('Enter');
+		await page.keyboard.press('Tab');
+		await page.keyboard.type('tabbed');
+		await page.keyboard.press('Enter');
+		await page.getByRole('button', { name: 'Bullet list' }).click();
+		await page.keyboard.type('item one');
+		await page.keyboard.press('Enter');
+		await page.keyboard.type('sized');
+		await page.keyboard.press('Shift+Home');
+		await page.locator('select[aria-label="Font size"]').selectOption('18');
+		await page.keyboard.press('End');
+		await page.keyboard.press('Enter');
+		await page.keyboard.type('linked');
+		await page.keyboard.press('Shift+Home');
+		await page.keyboard.press('ControlOrMeta+k');
+		await page.keyboard.type('https://example.com/');
+		await page.keyboard.press('Enter');
+		const typed = await html(page);
+		expect(typed).toContain('<b>bold</b>');
+		expect(typed).toContain('font-size: 18pt');
+		expect(typed).toContain('<a href="https://example.com/">linked</a>');
+		for (const steps of [3, 60]) {
+			for (let i = 0; i < steps; i++) await page.keyboard.press('ControlOrMeta+z');
+			for (let i = 0; i < steps; i++) await page.keyboard.press('ControlOrMeta+Shift+z');
+			expect(await html(page), `${steps} steps back and forth`).toBe(typed);
+		}
+	});
+
+	test('Ctrl+S hands the document to onsave where no draft is kept', async ({ page }) => {
+		await open(page, { content: '<p>Report</p>' });
+		await page.click(`${content} p`);
+		await page.keyboard.press('End');
+		await page.keyboard.type('!');
+		await page.keyboard.press('ControlOrMeta+s');
+		expect(await page.evaluate(() => window.saves)).toEqual(['<p>Report!</p>']);
+		expect(await page.evaluate(() => localStorage.length)).toBe(0);
 	});
 });

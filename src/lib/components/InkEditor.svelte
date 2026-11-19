@@ -145,6 +145,9 @@
 	 */
 	const EMPTY_DOCUMENT = '<p><br></p>';
 
+	/** The kinds of block the toolbar's list offers. */
+	const BLOCK_CHOICES = new Set(['p', 'h1', 'h2', 'h3', 'blockquote', 'pre']);
+
 	/** The sizes, in points, the toolbar's size list offers unless `fontSizes` says otherwise. */
 	const DEFAULT_FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36];
 	const NO_KEPT_ATTRIBUTES: string[] = [];
@@ -235,8 +238,13 @@
 		if (editorEl) {
 			selectedImage = null;
 			documentReplaced();
-			showDocument(html);
+			const shown = showDocument(html);
 			updateCounts();
+			if (!shown) {
+				// The caller is told, and the editor is empty: see showDocument.
+				showError(NOT_SHOWN);
+				throw new Error(`InkEditor.setHTML: ${NOT_SHOWN.toLowerCase()}`);
+			}
 			if (autosave) scheduleAutoSave();
 		}
 	}
@@ -245,20 +253,81 @@
 	 * Put HTML from outside in the editor: made safe first, and with a line in every empty
 	 * paragraph, so it shows as the blank line the RTF writes for it. The nodes that were checked
 	 * are the nodes shown (see sanitizedNodes): the HTML is read once.
+	 *
+	 * Returns whether the document is shown. If it could not be made safe it is not shown, and
+	 * neither is the one before it: the editor is left empty. (A failure here used to go up to
+	 * whoever called. Given as `content`, there was then no editor at all; given to setHTML, the
+	 * document before stayed on the screen, where it read as the one just asked for: one
+	 * patient's report under another's name.)
 	 */
-	function showDocument(html: string): void {
-		if (!editorEl) return;
+	function showDocument(html: string): boolean {
+		if (!editorEl) return false;
 		// An id the page already uses outside an editor is not the document's to take: see
 		// sanitize.ts. (Another editor on the page may hold a document with the same ids.)
 		const idTaken = (id: string) => {
 			const owner = document.getElementById(id);
 			return owner !== null && owner.closest('.ink-content') === null;
 		};
-		editorEl.replaceChildren(...sanitizedNodes(html, document, idTaken, keptNames));
+		let nodes: Node[] | null = null;
+		try {
+			nodes = sanitizedNodes(html, document, idTaken, keptNames);
+		} catch {
+			// Not shown: see above.
+		}
+		if (nodes === null) editorEl.innerHTML = EMPTY_DOCUMENT;
+		else editorEl.replaceChildren(...nodes);
 		for (const p of Array.from(editorEl.querySelectorAll('p'))) {
 			if (p.childNodes.length === 0) p.appendChild(document.createElement('br'));
 		}
+		checked = new WeakSet();
+		markChecked();
+		return nodes !== null;
 	}
+
+	/** Said when a document could not be made safe, and so is not shown. */
+	const NOT_SHOWN = 'This document could not be shown';
+
+	// ── What has been made safe ──
+	// Markup reaches the document in more ways than setHTML and a paste: it is dragged in, and
+	// Redo puts back what a paste first held, with the frame or the form that was taken out of
+	// it. So the editor keeps account of which elements have been through the sanitizer, or were
+	// made by typing, and after anything that can bring markup in from outside it makes safe
+	// every element that is not among them.
+
+	/** The elements of the document that have been made safe, or were made here by typing. */
+	let checked = new WeakSet<Element>();
+
+	function markChecked(): void {
+		if (!editorEl) return;
+		const all = editorEl.querySelectorAll('*');
+		for (let i = 0; i < all.length; i++) checked.add(all[i]);
+	}
+
+	/**
+	 * Make safe the elements `only` accepts. If that cannot be done at all, they are taken out:
+	 * what could not be checked does not stay. Returns whether it could be done.
+	 */
+	function makeSafe(only: (el: Element) => boolean): boolean {
+		if (!editorEl) return true;
+		try {
+			sanitizeTree(editorEl, only, undefined, keptNames);
+			return true;
+		} catch {
+			for (const el of Array.from(editorEl.querySelectorAll('*'))) {
+				if (el.isConnected && only(el)) el.remove();
+			}
+			return false;
+		}
+	}
+
+	/** Make safe every element that has not been: what was dropped in, or what Undo or Redo put back. */
+	function checkUnchecked(): void {
+		if (!makeSafe((el) => !checked.has(el))) showError(LEFT_OUT);
+		markChecked();
+	}
+
+	/** Said when what came in could not be made safe, and so was taken out again. */
+	const LEFT_OUT = 'What was put in could not be checked, so it was left out';
 
 	export function getMarkdown(): string {
 		if (!editorEl) return '';
@@ -334,6 +403,8 @@
 		indentUndo = [];
 		pastedOver = null;
 		pastedLoss = null;
+		// (A selection kept from the document before points at nothing in the new one.)
+		savedSelection = null;
 		stopCopyFormat();
 	}
 
@@ -359,12 +430,42 @@
 		}
 	}
 
+	/** Whether what is selected now, or the caret, is in the document. */
+	function selectionInEditor(): boolean {
+		const sel = window.getSelection();
+		return !!editorEl && !!sel && sel.rangeCount > 0 && editorEl.contains(sel.anchorNode) && editorEl.contains(sel.focusNode);
+	}
+
+	/**
+	 * Put the selection back in the document, where it has left it: a dialog or a list of the
+	 * toolbar took the keyboard. Where the selection is in the document, that is the one to act
+	 * on, and it is left alone. (The kept one was put back every time, and it was kept only when a
+	 * dialog opened or a picture went in: after one link, Bold and every other button changed
+	 * the words of that link, whatever was selected by then.)
+	 */
 	function restoreSelection(): void {
-		if (savedSelection) {
+		if (selectionInEditor()) return;
+		if (savedSelection && editorEl?.contains(savedSelection.startContainer) && editorEl.contains(savedSelection.endContainer)) {
 			const sel = window.getSelection();
 			sel?.removeAllRanges();
 			sel?.addRange(savedSelection);
 		}
+	}
+
+	/**
+	 * Keep the selection whenever it changes in the document, so the one put back is the last one
+	 * there. (Kept in the one Range, moved along: a new Range for every key pressed would be a
+	 * thousand of them for the browser to keep up to date with the text.)
+	 */
+	function trackSelection(): void {
+		if (!selectionInEditor()) return;
+		const range = window.getSelection()!.getRangeAt(0);
+		if (!savedSelection) {
+			savedSelection = range.cloneRange();
+			return;
+		}
+		savedSelection.setStart(range.startContainer, range.startOffset);
+		savedSelection.setEnd(range.endContainer, range.endOffset);
 	}
 
 	// ── Font size ──
@@ -1151,8 +1252,7 @@
 
 		const block = document.queryCommandValue('formatBlock');
 		const normalized = block.replace(/[<>]/g, '').toLowerCase();
-		const map: Record<string, string> = { h1: 'h1', h2: 'h2', h3: 'h3', blockquote: 'blockquote', pre: 'pre', p: 'p' };
-		currentBlock = map[normalized] || 'p';
+		currentBlock = BLOCK_CHOICES.has(normalized) ? normalized : 'p';
 
 		updateCounts();
 	}
@@ -1209,8 +1309,9 @@
 	// ── Auto-save ──
 	let saveTimer: ReturnType<typeof setTimeout> | undefined;
 
-	function autoSaveNow(): void {
-		if (!editorEl || !autosave) return;
+	/** Keep the draft in the browser's storage. */
+	function keepDraft(): void {
+		if (!editorEl) return;
 		try {
 			localStorage.setItem(storageKey, editorEl.innerHTML);
 			lastSaved = `Saved ${new Date().toLocaleTimeString()}`;
@@ -1220,6 +1321,24 @@
 			// fires so the host app can persist the content itself.
 			lastSaved = 'Too large to auto-save in this browser';
 		}
+	}
+
+	function autoSaveNow(): void {
+		if (!editorEl || !autosave) return;
+		keepDraft();
+		onsave?.({ html: editorEl.innerHTML });
+	}
+
+	/**
+	 * Ctrl+S: onsave, whether or not drafts are kept. (It went through the auto-save, which does
+	 * nothing where `autosave` is off. Since that is the default, the key was taken from the
+	 * browser and nothing was saved anywhere: an application that saves from onsave saved nothing.)
+	 */
+	function saveNow(): void {
+		if (!editorEl) return;
+		// The save that was waiting is this one.
+		clearTimeout(saveTimer);
+		if (autosave) keepDraft();
 		onsave?.({ html: editorEl.innerHTML });
 	}
 
@@ -1228,16 +1347,31 @@
 		saveTimer = setTimeout(autoSaveNow, 1000);
 	}
 
+	/** The kinds of input event that put markup from somewhere else into the document. */
+	const MARKUP_FROM_OUTSIDE = new Set(['insertFromPaste', 'insertFromPasteAsQuotation', 'insertFromDrop', 'insertFromYank']);
+
 	// ── Input handler ──
 	function handleInput(e?: Event): void {
 		placeCopySourceBox();
-		if (pastedOver) {
+		const kind = (e as InputEvent | undefined)?.inputType ?? '';
+		const history = kind === 'historyUndo' || kind === 'historyRedo';
+		// (Words dragged from one place in the document to another are first taken out where
+		// they were, which is an input event of its own: what was dropped has not come in yet.)
+		if (pastedOver && kind !== 'deleteByDrag') {
 			tidyPasted(pastedOver);
 			pastedOver = null;
+			markChecked();
+		} else if (history || MARKUP_FROM_OUTSIDE.has(kind)) {
+			// Undo and Redo put back what the browser remembers, not what the editor made of it:
+			// Redo after a paste brings back the frame that was taken out of the paste. And a
+			// drop or a paste the editor was not told of is still a drop or a paste.
+			checkUnchecked();
+		} else {
+			// Typing, and what the browser makes of it, is the editor's own.
+			markChecked();
 		}
 		indentUndo = [];
-		const kind = (e as InputEvent | undefined)?.inputType ?? '';
-		if (kind === 'historyUndo' || kind === 'historyRedo') {
+		if (history) {
 			afterHistory();
 		} else {
 			// An edit: what was undone can no longer be redone.
@@ -1602,7 +1736,15 @@
 	function handleDrop(e: DragEvent): void {
 		if (readonly) return;
 		const files = Array.from(e.dataTransfer?.files || []).filter((f) => f.type.startsWith('image/'));
-		if (files.length === 0) return;
+		if (files.length === 0) {
+			// Text or markup dragged in, from another page or from further up this one. The
+			// browser puts it in the document itself, as it does a paste, and the input event
+			// that follows makes it safe the same way. (Only a paste was: what was dragged in
+			// stayed as the browser left it, with a block drawn over the whole page, a form
+			// that sends what is typed in it somewhere else, a frame showing another site.)
+			expectInsertion();
+			return;
+		}
 		e.preventDefault();
 		editorEl?.focus();
 		placeCaretAtPoint(e.clientX, e.clientY);
@@ -1651,8 +1793,9 @@
 				documentReplaced();
 				// (What the reader writes is safe as it stands; it goes the same way as any other
 				// HTML so there is one way in.)
-				showDocument(html);
+				const shown = showDocument(html);
 				updateCounts();
+				if (!shown) throw new Error(NOT_SHOWN);
 				fireChange();
 				if (autosave) scheduleAutoSave();
 				onimport?.({ html });
@@ -1678,7 +1821,7 @@
 		if (mod && e.key === 'i') { e.preventDefault(); exec('italic'); }
 		if (mod && e.key === 'u') { e.preventDefault(); exec('underline'); }
 		if (mod && e.key === 'k') { e.preventDefault(); openLinkModal(); }
-		if (mod && e.key === 's') { e.preventDefault(); autoSaveNow(); }
+		if (mod && e.key === 's') { e.preventDefault(); saveNow(); }
 		if (mod && !e.shiftKey && e.key.toLowerCase() === 'z' && undoIndent()) { e.preventDefault(); return; }
 		if (mod && e.key === ']') { e.preventDefault(); indentBlocks('indent'); return; }
 		if (mod && e.key === '[') { e.preventDefault(); indentBlocks('outdent'); return; }
@@ -1857,8 +2000,7 @@
 		}
 		// The browser pastes next; the input event that follows tidies what came in.
 		if (!readonly && editorEl) {
-			const snapshot = new Set(editorEl.querySelectorAll('*'));
-			pastedOver = snapshot;
+			expectInsertion();
 			// What the browser's paste may lose (see pasteNotes), and where the paste begins.
 			const notes = pasteNotes(e.clipboardData?.getData('text/html') ?? '');
 			const start = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
@@ -1866,16 +2008,27 @@
 				notes && start && editorEl.contains(start.startContainer)
 					? { notes, from: shownCharsBefore(start.startContainer, start.startOffset) }
 					: null;
-			// A paste that inserts nothing (an empty clipboard, a host that cancels it) raises no
-			// input event. Left set, the snapshot would make the next keystroke treat the whole
-			// document as pasted.
-			setTimeout(() => {
-				if (pastedOver === snapshot) {
-					pastedOver = null;
-					pastedLoss = null;
-				}
-			}, 0);
 		}
+	}
+
+	/**
+	 * The browser is about to put something in the document itself, a paste or a drop: remember
+	 * which elements are there now, so that the input event that follows knows what came in.
+	 */
+	function expectInsertion(): void {
+		if (readonly || !editorEl) return;
+		const snapshot = new Set(editorEl.querySelectorAll('*'));
+		pastedOver = snapshot;
+		pastedLoss = null;
+		// A paste that inserts nothing (an empty clipboard, a host that cancels it) raises no
+		// input event. Left set, the snapshot would make the next keystroke treat the whole
+		// document as pasted.
+		setTimeout(() => {
+			if (pastedOver === snapshot) {
+				pastedOver = null;
+				pastedLoss = null;
+			}
+		}, 0);
 	}
 
 	/** How many characters that are not white space the document has before a place in it. */
@@ -1932,7 +2085,11 @@
 		// What the paste brought is made safe as HTML from anywhere else is: a browser takes the
 		// scripts out of a paste itself, but leaves a form, an <iframe>, or a block with
 		// position: fixed that covers the page.
-		sanitizeTree(editorEl, (el) => !before.has(el), undefined, keptNames);
+		// (And if it cannot be made safe, none of it stays.)
+		if (!makeSafe((el) => !before.has(el))) {
+			showError(LEFT_OUT);
+			return;
+		}
 		for (const el of Array.from(editorEl.querySelectorAll<HTMLElement>('*'))) {
 			if (before.has(el)) continue;
 			el.removeAttribute('id');
@@ -2226,23 +2383,33 @@
 	// ── Lifecycle ──
 	onMount(() => {
 		if (!editorEl) return;
+		document.addEventListener('selectionchange', trackSelection);
+		const stopTracking = () => document.removeEventListener('selectionchange', trackSelection);
 		if (autosave) {
+			let saved: string | null = null;
 			try {
-				const saved = localStorage.getItem(storageKey);
-				if (saved) {
-					// A draft is HTML from outside like any other: anything that can write to this
-					// origin's storage can write it.
-					showDocument(saved);
-					updateCounts();
-					return;
-				}
+				saved = localStorage.getItem(storageKey);
 			} catch (e) {}
+			if (saved) {
+				// A draft is HTML from outside like any other: anything that can write to this
+				// origin's storage can write it.
+				if (showDocument(saved)) {
+					updateCounts();
+					return stopTracking;
+				}
+				// (A draft that cannot be shown was dropped without a word; it is said now, and
+				// the content given is shown in its place.)
+				showError('The draft kept in this browser could not be shown');
+			}
 		}
 		// Always write the initial content prop so the div isn't empty.
 		// {#html content} must NOT be used inside the contenteditable div —
 		// Svelte would re-inject it on every reactive update, duplicating text.
-		showDocument(content || EMPTY_DOCUMENT);
+		// (A document that cannot be shown leaves the editor empty and says so: the failure
+		// used to go up through the component as it was made, and there was no editor.)
+		if (!showDocument(content || EMPTY_DOCUMENT)) showError(NOT_SHOWN);
 		updateCounts();
+		return stopTracking;
 	});
 
 	// Suppress unused warning for importing state (used in template)

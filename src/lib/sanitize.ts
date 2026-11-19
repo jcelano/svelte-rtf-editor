@@ -183,8 +183,19 @@ function namesIn(given: unknown): string[] {
 	return list.filter((name): name is string => typeof name === 'string').map((name) => name.trim());
 }
 
+/**
+ * A table to look names up in that come from the document: a tag, a unit, the name of a size.
+ * Written as an object, such a table also answers to the names every object has (`constructor`,
+ * `toString`, `__proto__`), with a function where a list or a number was meant: an element
+ * named <constructor> with an attribute of its own stopped the sanitizer where it stood. A Map
+ * holds what was put in it and nothing else.
+ */
+function table<T>(entries: Record<string, T>): ReadonlyMap<string, T> {
+	return new Map(Object.entries(entries));
+}
+
 /** Attributes only some elements may keep. */
-const TAG_ATTRIBUTES: Record<string, string[]> = {
+const TAG_ATTRIBUTES = table<string[]>({
 	a: ['href', 'target', 'rel'],
 	img: ['src', 'alt', 'width', 'height'],
 	td: ['colspan', 'rowspan', 'width'],
@@ -196,7 +207,7 @@ const TAG_ATTRIBUTES: Record<string, string[]> = {
 	li: ['value'],
 	font: ['color', 'size', 'face'],
 	details: ['open']
-};
+});
 
 /**
  * The one class that means something here: Safari's wrapper around a typed tab. Any other class
@@ -223,10 +234,10 @@ const UNSAFE_STYLE_VALUE = /url\s*\(|expression\s*\(|javascript:|@import|behavio
 // screen, so those values go too.
 
 /** Lengths in px, for the limits below. The units that follow the font are in FONT_UNITS. */
-const PX_PER_UNIT: Record<string, number> = { px: 1, pt: 4 / 3, pc: 16, in: 96, cm: 96 / 2.54, mm: 96 / 25.4, q: 96 / 101.6, rem: 16 };
+const PX_PER_UNIT = table<number>({ px: 1, pt: 4 / 3, pc: 16, in: 96, cm: 96 / 2.54, mm: 96 / 25.4, q: 96 / 101.6, rem: 16 });
 
 /** Lengths counted in the element's font size: how many of them make one. */
-const FONT_UNITS: Record<string, number> = { em: 1, ex: 2, ch: 2 };
+const FONT_UNITS = table<number>({ em: 1, ex: 2, ch: 2 });
 
 /** The font size where nothing above sets one. */
 const BASE_FONT_PX = 16;
@@ -238,10 +249,10 @@ const BASE_FONT_PX = 16;
 const LEAST_FONT_PX = 0.5;
 
 /** The font sizes that have names, in px. */
-const NAMED_FONT_PX: Record<string, number> = {
+const NAMED_FONT_PX = table<number>({
 	'xx-small': 9, 'x-small': 10, small: 13, medium: 16, large: 18, 'x-large': 24, 'xx-large': 32, 'xxx-large': 48,
 	'-webkit-xxx-large': 48
-};
+});
 
 /** A step up or down in size (`larger`, `smaller`): the factor a browser uses. */
 const FONT_STEP = 1.2;
@@ -264,13 +275,13 @@ const INLINE_TAGS = new Set([
 ]);
 
 /** What each part of a border picture is when there is none: what `border: …` sets them to. */
-const NO_BORDER_IMAGE: Record<string, string[]> = {
+const NO_BORDER_IMAGE = table<string[]>({
 	'border-image-source': ['none', 'initial'],
 	'border-image-slice': ['100%', 'initial'],
 	'border-image-width': ['1', 'initial'],
 	'border-image-outset': ['0', '0px', 'initial'],
 	'border-image-repeat': ['stretch', 'initial']
-};
+});
 
 /** A little over the widest page there is, 22 inches (2112 px). */
 const MOST_PX = 2200;
@@ -286,8 +297,10 @@ const DISPLAY_VALUES = new Set([
 
 /** One number of a style value with its unit, as px; null for a percentage, a bare number or a unit not known. */
 function lengthPx(digits: string, unit: string, fontPx: number): number | null {
-	if (unit in PX_PER_UNIT) return Number(digits) * PX_PER_UNIT[unit];
-	if (unit in FONT_UNITS) return (Number(digits) * fontPx) / FONT_UNITS[unit];
+	const px = PX_PER_UNIT.get(unit);
+	if (px !== undefined) return Number(digits) * px;
+	const perFont = FONT_UNITS.get(unit);
+	if (perFont !== undefined) return (Number(digits) * fontPx) / perFont;
 	return null;
 }
 
@@ -336,7 +349,8 @@ function oneLengthPx(value: string, fontPx: number): number | null {
  */
 function fontSizePx(value: string, parentPx: number): number | null {
 	const text = value.trim().toLowerCase();
-	if (text in NAMED_FONT_PX) return NAMED_FONT_PX[text];
+	const named = NAMED_FONT_PX.get(text);
+	if (named !== undefined) return named;
 	if (text === 'larger') return parentPx * FONT_STEP;
 	if (text === 'smaller') return parentPx / FONT_STEP;
 	if (text === 'inherit' || text === 'initial' || text === 'unset' || text === 'revert') return text === 'initial' ? BASE_FONT_PX : parentPx;
@@ -450,11 +464,12 @@ function sanitizeStyle(el: HTMLElement, tag: string, fonts: FontSizes): void {
 		const name = style.item(i);
 		const value = style.getPropertyValue(name);
 		if (name === 'font-size') continue;
-		if (name in NO_BORDER_IMAGE) {
+		const noPicture = NO_BORDER_IMAGE.get(name);
+		if (noPicture !== undefined) {
 			// `border: 1px solid` also says "no border picture", and a browser lists that with
 			// the properties it read. That much is no reason to write the attribute again; a
 			// border picture itself is drawn outside its element, and a document has none.
-			if (!NO_BORDER_IMAGE[name].includes(value.trim().toLowerCase())) drop.push(...Object.keys(NO_BORDER_IMAGE));
+			if (!noPicture.includes(value.trim().toLowerCase())) drop.push(...NO_BORDER_IMAGE.keys());
 			continue;
 		}
 		if (!STYLE_PROPERTY.test(name) || UNSAFE_STYLE_VALUE.test(value) || !sizeAllowed(name, value, tag, fontPx)) drop.push(name);
@@ -516,7 +531,7 @@ function namesAGlobal(id: string): boolean {
 }
 
 function sanitizeAttributes(el: HTMLElement, tag: string, fonts: FontSizes, idTaken?: (id: string) => boolean, keep?: Kept): void {
-	const own = TAG_ATTRIBUTES[tag];
+	const own = TAG_ATTRIBUTES.get(tag);
 	for (const attr of Array.from(el.attributes)) {
 		const name = attr.name.toLowerCase();
 		if (name === 'class') {
@@ -587,15 +602,12 @@ export function sanitizeTree(
 	const fonts: FontSizes = new Map();
 	/** The words of the last element that left its words, where they are still in the document. */
 	let lastKept: Text | null = null;
-	for (const el of Array.from(root.querySelectorAll<HTMLElement>('*'))) {
-		// Gone already, with something it was in.
-		if (!root.contains(el)) continue;
-		if (only && !only(el)) continue;
+	/** One element made safe; returns whether it was taken out or changed. */
+	const check = (el: HTMLElement): boolean => {
 		const tag = el.tagName.toLowerCase();
 		if (REMOVED_TAGS.has(tag) || isReadAloudCopy(el)) {
 			el.remove();
-			changed = true;
-			continue;
+			return true;
 		}
 		if (TEXT_KEPT_TAGS.has(tag)) {
 			const text = shownText(el, tag);
@@ -607,20 +619,33 @@ export function sanitizeTree(
 			} else {
 				el.remove();
 			}
-			changed = true;
-			continue;
+			return true;
 		}
 		// A custom element would be given its behaviour by the page: only what it holds is kept,
 		// and nothing of one that was hidden, which would show once the element is gone.
 		if (tag.includes('-')) {
 			if (hiddenByItself(el)) el.remove();
 			else el.replaceWith(...Array.from(el.childNodes));
-			changed = true;
-			continue;
+			return true;
 		}
 		const before = el.attributes.length + (el.getAttribute('style') ?? '') + (el.getAttribute('href') ?? '') + (el.getAttribute('width') ?? '') + (el.getAttribute('height') ?? '');
 		sanitizeAttributes(el, tag, fonts, idTaken, keep);
-		if (before !== el.attributes.length + (el.getAttribute('style') ?? '') + (el.getAttribute('href') ?? '') + (el.getAttribute('width') ?? '') + (el.getAttribute('height') ?? '')) changed = true;
+		return before !== el.attributes.length + (el.getAttribute('style') ?? '') + (el.getAttribute('href') ?? '') + (el.getAttribute('width') ?? '') + (el.getAttribute('height') ?? '');
+	};
+	for (const el of Array.from(root.querySelectorAll<HTMLElement>('*'))) {
+		// Gone already, with something it was in.
+		if (!root.contains(el)) continue;
+		if (only && !only(el)) continue;
+		try {
+			if (check(el)) changed = true;
+		} catch {
+			// An element that cannot be checked, for a reason nobody thought of, is not kept: it
+			// goes, with what is in it, and the elements after it are still looked at. Stopping
+			// here left the rest of a paste in the document as it came in, and whoever called
+			// with nothing to say which half had been made safe.
+			el.remove();
+			changed = true;
+		}
 	}
 	return changed;
 }

@@ -5,7 +5,7 @@
 	import * as lib from '../../lib/index.js';
 	import { InkEditor, RtfViewer } from '../../lib/index.js';
 
-	type Harness = { ed?: unknown; lib?: typeof lib; setViewer?: (rtf: string) => void; changes?: number };
+	type Harness = { ed?: unknown; lib?: typeof lib; setViewer?: (rtf: string) => void; changes?: number; saves?: string[] };
 
 	let ed: ReturnType<typeof InkEditor> | null = $state(null);
 	let rtf = $state('');
@@ -24,6 +24,7 @@
 		const w = window as unknown as Harness;
 		w.lib = lib;
 		w.changes = 0;
+		w.saves = [];
 		w.setViewer = (value: string) => (rtf = value);
 	});
 
@@ -41,6 +42,7 @@
 		keepAttributes={params.keepAttributes}
 		keepClasses={params.keepClasses}
 		onchange={params.onchange ? () => { (window as unknown as Harness).changes!++; } : undefined}
+		onsave={({ html }) => { (window as unknown as Harness).saves!.push(html); }}
 	/>
 	<div id="viewer"><RtfViewer content={rtf} /></div>
 {/if}

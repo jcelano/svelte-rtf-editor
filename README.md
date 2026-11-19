@@ -16,7 +16,7 @@ RTF viewer and rich-text editor components for **Svelte 5**.
   - Images: upload, paste or drag-and-drop, with a description below each picture, drag-to-resize and left/centre/right placement — embedded in the RTF, not linked
   - Import an RTF file from disk; export as RTF, HTML, or Markdown
   - Optional auto-save to `localStorage` (off unless asked for)
-  - HTML from outside (the `content` prop, `setHTML`, a restored draft, a paste) is made safe before it is shown. See [HTML from outside](#html-from-outside)
+  - HTML from outside (the `content` prop, `setHTML`, a restored draft, a paste, a drop) is made safe before it is shown. See [HTML from outside](#html-from-outside)
   - Word count and character count status bar
   - Keyboard shortcuts (`Ctrl+S` to save, `Ctrl+B/I/U` for formatting)
 - **Utility functions** — `rtfToHtml`, `htmlToRtf`, `readRtfFile`, `htmlToMarkdown`, `downloadFile`
@@ -145,7 +145,7 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 | Prop       | Payload                                      | Description                                 |
 |------------|----------------------------------------------|---------------------------------------------|
 | `onchange` | `{ html, text, wordCount, charCount, estimatedRtfBytes }` | Fired on every content change. `html`, `text` and `estimatedRtfBytes` are worked out when the handler reads them, so a handler that only wants the counts costs nothing on a long document. They are the document as it is when first read: read them in the handler. A payload kept and read after a later edit gives the document as it is by then |
-| `onsave`   | `{ html }`                                   | Fired on auto-save or `Ctrl+S`              |
+| `onsave`   | `{ html }`                                   | Fired on `Ctrl+S`, and after each auto-save where `autosave` is on |
 | `onimport` | `{ html }`                                   | Fired after a successful RTF file import    |
 
 #### Methods (via `bind:this`)
@@ -153,7 +153,7 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 ```ts
 editor.getHTML()          // → string  — current editor HTML
 editor.getText()          // → string  — plain text (no tags)
-editor.setHTML(html)      // → void    — replace content programmatically (made safe first)
+editor.setHTML(html)      // → void    — replace content programmatically (made safe first; throws, leaving the editor empty, if it cannot be)
 editor.getMarkdown()      // → string  — Markdown conversion of content
 editor.getRTF()           // → string  — RTF conversion of content
 editor.getRtfSize()       // → number  — exact byte size of that RTF
@@ -173,7 +173,11 @@ editor.setFontSize(14)    // → void    — size, in points, of the selected te
 
 #### HTML from outside
 
-Whatever HTML reaches the editor is made safe before it is shown: the `content` prop, `setHTML()`, a draft restored from `localStorage`, and what a paste brings. `sanitizeHtml` is exported for HTML you show yourself (stored editor output in a preview, say).
+Whatever HTML reaches the editor is made safe before it is shown: the `content` prop, `setHTML()`, a draft restored from `localStorage`, what a paste brings, what is dragged in from another page or from elsewhere in the document, and what Undo and Redo put back (Redo after a paste gives the browser's own copy of the paste, not the one that was made safe). `sanitizeHtml` is exported for HTML you show yourself (stored editor output in a preview, say).
+
+A paste and a drop are made safe just after the browser has put them in the document, not before: a frame or a picture in them may be asked for from its address in that moment, though it does not stay.
+
+An element that cannot be checked is taken out, and a document that cannot be checked at all is not shown: the editor is left empty and says so, `setHTML()` throws, and the document that was there before does not stay on the screen in its place.
 
 | Taken out | Why |
 |---|---|
