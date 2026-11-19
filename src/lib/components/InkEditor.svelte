@@ -2474,8 +2474,8 @@
 			const notes = pasteNotes(dropped);
 			const at = notes ? rangeAtPoint(e.clientX, e.clientY) : null;
 			pastedLoss = notes && at && editorEl?.contains(at.startContainer) ? { notes, from: shownCharsBefore(at.startContainer, at.startOffset), dropped: true } : null;
-			// What holds a frame is put in here, without it (see pasteWithoutFrames).
-			const unframed = pasteWithoutFrames(dropped);
+			// What holds a frame is put in here, made safe and without it (see pasteWithoutFrames).
+			const unframed = pasteWithoutFrames(dropped, keptNames);
 			if (unframed !== null) {
 				e.preventDefault();
 				editorEl?.focus();
@@ -2766,8 +2766,8 @@
 					: null;
 			// The pictures Word's HTML only names, from its RTF (see pastePictures).
 			pastedPictures = pastePictures(html, e.clipboardData?.getData('text/rtf') ?? '');
-			// What holds a frame is put in here, without it (see pasteWithoutFrames).
-			const unframed = pasteWithoutFrames(html);
+			// What holds a frame is put in here, made safe and without it (see pasteWithoutFrames).
+			const unframed = pasteWithoutFrames(html, keptNames);
 			if (unframed !== null) {
 				e.preventDefault();
 				document.execCommand('insertHTML', false, unframed);
