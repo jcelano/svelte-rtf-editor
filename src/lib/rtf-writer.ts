@@ -28,7 +28,8 @@ interface RGB {
 export interface RtfWriteOptions {
 	/**
 	 * Font for the whole document: body text, headings, lists and tables.
-	 * Code keeps a monospace font. Default: DEFAULT_FONT_FAMILY.
+	 * Code keeps a monospace font. Default: DEFAULT_FONT_FAMILY. Given a CSS list, the first
+	 * family is the font written; the rest is for a screen (see cssFontFamily).
 	 */
 	fontFamily?: string;
 	/**
@@ -893,6 +894,8 @@ export interface FontChoice {
 
 /** The generic families of CSS, which are written without quotes. */
 const GENERIC_FAMILY = new Set(['serif', 'sans-serif', 'monospace', 'cursive', 'fantasy', 'system-ui', 'ui-serif', 'ui-sans-serif', 'ui-monospace', 'ui-rounded', 'math', 'emoji', 'fangsong']);
+/** What a font name is made of: letters, digits, spaces and a few marks. */
+const FONT_NAME = /^[\p{L}\p{N} ._-]+$/u;
 /** Words that mean something else to CSS where a family is named: such a name is quoted. */
 const CSS_WIDE = /^(inherit|initial|unset|revert|revert-layer|default)$/i;
 
@@ -940,7 +943,7 @@ export function fontChoices(fonts: unknown): FontChoice[] {
 	const choices = new Map<string, FontChoice>();
 	for (const entry of given) {
 		const families = familiesOf(entry);
-		if (families.length === 0 || families.some((family) => !/^[\p{L}\p{N} ._-]+$/u.test(family) || family.length > 100)) continue;
+		if (families.length === 0 || families.some((family) => !FONT_NAME.test(family) || family.length > 100)) continue;
 		const name = families[0];
 		const key = name.toLowerCase();
 		if (GENERIC_FAMILY.has(key) || choices.has(key)) continue;
@@ -1002,12 +1005,24 @@ function fontFamilyClass(name: string): 'roman' | 'modern' | 'swiss' {
 }
 
 /**
- * CSS font-family value for a font name, with the generic fallback that
- * matches it, e.g. "Arial", sans-serif.
+ * CSS font-family value for the document font: the name, with the generic fallback that matches
+ * it, e.g. "Arial", sans-serif.
+ *
+ * Given a CSS list, the first family is the font (the one the RTF names) and the rest is what a
+ * screen without that font shows the document in, in that order: "Segoe UI, Selawik, sans-serif"
+ * is Segoe UI where it is installed and Selawik where the page has loaded that. A list that does
+ * not end in a generic family is given the one that matches the font. A family that is no font
+ * name (it has a brace, a semicolon, a bracket) is left out.
  */
 export function cssFontFamily(name: string | undefined): string {
 	const font = cleanFontName(name);
-	return `"${font}", ${genericFor(font)}`;
+	const others = familiesOf(name)
+		.slice(1)
+		.filter((family) => FONT_NAME.test(family) && family.length <= 100)
+		.map((family) => (GENERIC_FAMILY.has(family.toLowerCase()) ? family.toLowerCase() : `"${family}"`));
+	const last = others[others.length - 1];
+	if (last === undefined || last.startsWith('"')) others.push(genericFor(font));
+	return [`"${font}"`, ...others].join(', ');
 }
 
 /** The generic CSS family that suits a font name: what a screen without the font shows instead. */

@@ -109,7 +109,7 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 | Prop         | Type     | Default   | Description                              |
 |--------------|----------|-----------|------------------------------------------|
 | `content`    | `string` | —         | Raw RTF string to parse and display      |
-| `fontFamily` | `string` | `'Segoe UI'` | Font the document is shown in. See [Fonts](#fonts) |
+| `fontFamily` | `string` | `'Segoe UI'` | Font the document is shown in; a CSS list names the font first, then what a screen without it shows. See [Fonts](#fonts) |
 | `fontSize`   | `number` | `12`      | Body text size in points                 |
 | `maxRtfBytes` | `number` | `52428800` | The largest document it reads (50 MB); `0` reads any size. See [Size limit on import](#size-limit-on-import) |
 | `fonts`      | `string[]` | `[]`    | The fonts text may be shown in beside the document's own: the same list you give the editor. See [Fonts for selected text](#fonts-for-selected-text) |
@@ -135,7 +135,7 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 | `maxImageBytes` | `number`   | `524288`                     | Encoded byte ceiling per image; an oversized picture is re-encoded and shrunk until it fits, and is not inserted if it cannot. `0` disables |
 | `maxRtfBytes`   | `number`   | `52428800`                   | The largest RTF file Import reads (50 MB); `0` reads any size |
 | `maxImageDisplayWidth` | `number` | `624`                 | Width (px) a newly inserted image is displayed at, unless the column is narrower — 6.5in of page. `0` fills the column |
-| `fontFamily`    | `string`   | `'Segoe UI'`                 | Document font, on screen and in the RTF. See [Fonts](#fonts) |
+| `fontFamily`    | `string`   | `'Segoe UI'`                 | Document font, on screen and in the RTF. A CSS list names the font first, then what a screen without it shows. See [Fonts](#fonts) |
 | `fontSize`      | `number`   | `12`                         | Body text size in points, on screen and in the RTF        |
 | `fontSizes`     | `number[]` | `[8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36]` | The sizes, in points, the toolbar's size list offers for selected text. The body size is always among them; `[]` takes the list off the toolbar. See [Size of selected text](#size-of-selected-text) |
 | `fonts`         | `string[]` | `[]`                         | The fonts the toolbar's font list offers for selected text, beside the document's own. `[]` means no font list, and one font for the whole document. See [Fonts for selected text](#fonts-for-selected-text) |
@@ -253,14 +253,49 @@ An application that shows documents in more than one place does well to keep the
 
 The default was Arial through 1.9.0. A document is written in the font of the editor that saves it, not in the font it was written in before: a report saved in Arial and opened and saved again by an editor left at the default comes out in Segoe UI. To keep Arial, pass `fontFamily="Arial"`.
 
-Segoe UI is installed with Windows. On a system without it (macOS, Linux, a phone) the screen shows the system's sans-serif font in its place, and the RTF still names Segoe UI, which is what the receiving system reads.
+Segoe UI is installed with Windows. On a system without it (macOS, Linux, a phone) the screen shows the system's sans-serif font in its place, and the RTF still names Segoe UI, which is what the receiving system reads. To show such a screen something closer, see [A font the screen does not have](#a-font-the-screen-does-not-have).
 
 - `fontFamily` is used for the whole document: body text, headings, lists and tables. Code keeps Courier New.
 - `fontSize` is the body size in points. Headings scale from it: at 12 pt, `h1` is 24 pt, `h2` 18 pt and `h3` 14 pt.
 - If you call `htmlToRtf` yourself on the editor's content, pass the same options you gave the editor, or the two produce different RTF.
-- `fontFamily` names one font. Given a CSS list such as `'Arial, sans-serif'`, only the first family is used.
+- `fontFamily` names one font. Given a CSS list such as `'Segoe UI, Selawik, sans-serif'`, the first family is the font: the one the RTF names, and the one the toolbar's font list shows. The rest of the list is for the screen alone, where the font is missing. Through 1.12.0 the rest of the list was ignored.
 - `fontSize` is rounded to the nearest half-point, which is what RTF measures in, and kept between 1 and 1638 pt.
 - If you show RTF in an editor or viewer set to another size, pass the same `fontSize` to `rtfToHtml`. Text at that size then carries no size of its own, text at any other size keeps it, and headings are recognized by the same ratios the writer uses. `InkEditor`'s RTF import and `RtfViewer` do this themselves. A heading must also be bold, at every body size, as every heading the writer emits is.
+
+### A font the screen does not have
+
+The RTF names a font; it does not carry one. Whoever opens the document sees it in that font only if their machine has it, and that goes for your users' browsers too. On a Mac, a document in Segoe UI is shown in Helvetica, which is hard to tell from Arial, and lines break in other places than they will for the reader on Windows.
+
+A page cannot reliably find out which fonts a machine has, and does not need to. Give the font a stand-in the page loads itself, and name it after the font:
+
+```css
+/* Your page's stylesheet. The files are served by your own application. */
+@font-face { font-family: "Selawik"; font-weight: 400; src: url("/fonts/selawik-regular.woff2") format("woff2"); }
+@font-face { font-family: "Selawik"; font-weight: 700; src: url("/fonts/selawik-bold.woff2") format("woff2"); }
+```
+
+```svelte
+<InkEditor fontFamily="Segoe UI, Selawik, sans-serif" />
+<RtfViewer content={rtf} fontFamily="Segoe UI, Selawik, sans-serif" />
+```
+
+Where Segoe UI is installed the browser uses it and does not fetch the stand-in. Where it is not, the stand-in is fetched and shown. The RTF names Segoe UI either way. The fonts you offer for selected text take a stand-in the same way: `fonts={['Calibri, Carlito, sans-serif']}`.
+
+Fonts made to take the place of the usual ones, with letters of the same widths, so that lines break where they do in the original:
+
+| Font | Stand-in |
+| --- | --- |
+| Segoe UI | Selawik (upright cuts only: italic is slanted by the browser) |
+| Calibri | Carlito |
+| Cambria | Caladea |
+| Arial | Arimo, Liberation Sans |
+| Times New Roman | Tinos, Liberation Serif |
+| Courier New | Cousine, Liberation Mono |
+
+- Use a stand-in rather than the font itself. Segoe UI, Calibri and the others belong to their makers and are not yours to serve from a web page; the stand-ins are published under open licences. Read each one's licence before you ship it.
+- Serve the files from your own application, not from a font service. A request to someone else's server tells them who opened a document and when, is stopped by a strict content security policy, and does not work on a network that is closed to the outside.
+- Give the stand-in its own name, as above, and do not declare it under the name of the font it stands in for. A page that declares `"Segoe UI"` with one regular file takes the place of the installed Segoe UI too, and its bold is then the regular cut drawn thicker.
+- This package loads no fonts and makes no requests. The stylesheet and the files are your page's.
 
 ### Size of selected text
 
@@ -285,11 +320,14 @@ By default a document has one font, `fontFamily`, and the toolbar has no font li
 
 The toolbar then has a font list before the size list: the document font first, then yours. A font chosen there is given to the selected text; with nothing selected, to what is typed next. `editor.setFont(name)` does the same from your own toolbar, and `editor.setFont('')` sets text back to the document font.
 
-Name only fonts that the system receiving the RTF has, and that your page can show: fonts installed where your users work, or fonts your page loads itself with `@font-face`. The list is the limit. A font that is not on it is not offered, is taken off HTML that is set or pasted, is not written to the RTF and is not read back from one.
+Which fonts to offer is decided by the system that receives the RTF, not by what is installed where the document is written or viewed. A font that system cannot show is a choice the user only appears to have: the words come out in whatever it substitutes. So the list is set by whoever integrates the editor, once for each receiving system, and leaving it out is as good a decision as any: one font, and no font list.
+
+The list is the limit. A font that is not on it is not offered, is taken off HTML that is set or pasted, is not written to the RTF and is not read back from one. Keep it with `fontFamily` and `fontSize` in one module of your own, and pass all three wherever a document goes. What your own screens show of a font they do not have is a separate matter: see [A font the screen does not have](#a-font-the-screen-does-not-have).
 
 - An entry is a font name, or a CSS list whose first family is the name. The rest of the list is what a screen without that font shows the text in: `'Calibri, Carlito, sans-serif'` is Calibri in the list and in the RTF, and Carlito on a machine that has no Calibri. A name alone is given `serif`, `sans-serif` or `monospace` after it, whichever suits it.
 - In the RTF, each font the document has text in is one more entry of the font table, and the text is written between `\fN` and the font it was in before. A font that is offered and not used is not in the table.
-- Pass the same list wherever the document goes: `<RtfViewer fonts={…}>`, `htmlToRtf(el, { fonts })`, `rtfToHtml(rtf, { fonts, fontFamily })` and `sanitizeHtml(html, { fonts, fontFamily })`. Without it each of them does what it did before: the writer writes one font, the reader gives none, and the sanitizer leaves the fonts of a paste on the screen, where they were never written to the RTF.
+- An editor that offers no fonts lets none in. Text pasted from Word or a web page is shown in the document font, as the RTF has it. Through 1.12.0 the font of a paste stayed on the screen and was never written to the RTF: the editor showed Calibri and sent Segoe UI. If you use the editor for its HTML and want pasted fonts kept, name them in `fonts`.
+- Pass the same list wherever the document goes: `<RtfViewer fonts={…}>`, `htmlToRtf(el, { fonts })`, `rtfToHtml(rtf, { fonts, fontFamily })` and `sanitizeHtml(html, { fonts, fontFamily })`. Without it the writer writes one font and the reader gives none. `sanitizeHtml` called without `fonts` leaves fonts as they come, as before; with a list, `[]` included, it keeps those fonts and the document's and takes any other off.
 - An RTF file from another program is read the same way. Text it sets in a font you offer carries that font; text in any other font, and text in the font your screen shows the document in, carries none. TextEdit names each cut of a font (`TimesNewRomanPS-BoldMT`, `Arial-ItalicMT`): those are read as Times New Roman and Arial.
 - The editor uses the browser's own font command, so a change of font is undone and redone with everything else. In the HTML the font is on a `<font>` element (`<font face="Georgia, serif">`); what is read from RTF has it as a style (`<span style="font-family:Georgia, serif">`). Both are written to RTF alike.
 - Set back to the document font, the words lose their `<font>` in Chromium and Safari, and in Firefox are given one that names the document font. The RTF is the same.

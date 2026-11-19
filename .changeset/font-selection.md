@@ -26,8 +26,29 @@ in any font on it:
 - A change of font is the browser's own command: Undo and Redo treat it as any other change, in
   Chromium, Firefox and Safari. Clear formatting takes a font off.
 
-Without `fonts` nothing changes: there is no font list, the writer writes one font and the
-reader gives none.
+Without `fonts` there is no font list, the writer writes one font and the reader gives none, as
+before.
+
+**Changed: an editor that offers no fonts lets none in**
+
+The font of pasted text used to stay on the screen and was never written to the RTF: text pasted
+from Word showed in Calibri and was sent in the document font. The editor now takes fonts off
+HTML that is set or pasted, unless they are in `fonts`, so that the screen shows what the RTF
+has. An application that uses the editor for its HTML and wants pasted fonts kept names them in
+`fonts`. `sanitizeHtml` called without `fonts` is unchanged; `sanitizeHtml(html, { fonts: [] })`
+takes every font off but the document's.
+
+**A stand-in for a font the screen does not have**
+
+`fontFamily` may be a CSS list: `fontFamily="Segoe UI, Selawik, sans-serif"`. The first family is
+the font, as before: the one the RTF names. The rest of the list is now given to the screen, for
+where that font is missing; it was ignored. A Mac has no Segoe UI and showed such a document in
+Helvetica; with a stand-in font the page loads itself, it shows one with the same letter widths.
+The README has the stylesheet for it and the stand-ins for the usual fonts. A list that does not
+end in a generic family is given one, and the package itself still loads no fonts.
+
+An application that passed a list and relied on only the first family being used on screen now
+gets the whole list there.
 
 Known limit: text set in a monospace font that is offered is written in that font, and read back
 as code.

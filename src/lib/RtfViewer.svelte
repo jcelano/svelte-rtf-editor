@@ -9,7 +9,8 @@
 
     // fontFamily and fontSize (points) set how the document is shown, and
     // default to the font the editor writes, so a document reads the same in
-    // the viewer as in the editor. maxRtfBytes is the largest document it will
+    // the viewer as in the editor. fontFamily may be a CSS list: the font, then
+    // what a screen without it shows. maxRtfBytes is the largest document it will
     // read (rtfToHtml's maxBytes): a picture costs two characters per byte, so
     // raise it where reports can carry large pictures, or pass 0 for no limit.
     // fonts are the fonts text may be shown in beside the document's own, as the

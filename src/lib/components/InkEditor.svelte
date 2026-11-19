@@ -30,7 +30,9 @@
 	 *   maxRtfBytes   — The largest RTF file Import reads. Default: 52428800 (50 MB);
 	 *                   0 reads any size.
 	 *   fontFamily    — Font for the document, both on screen and in the RTF.
-	 *                   Default: DEFAULT_FONT_FAMILY (rtf-writer.ts).
+	 *                   Given a CSS list ('Segoe UI, Selawik, sans-serif'), the first
+	 *                   family is the font, and the rest is what a screen without it
+	 *                   shows. Default: DEFAULT_FONT_FAMILY (rtf-writer.ts).
 	 *   fontSize      — Body text size in points, both on screen and in the RTF.
 	 *                   Headings scale from it. Default: 12.
 	 *   fontSizes     — The sizes, in points, the toolbar's size list offers for the
@@ -42,7 +44,8 @@
 	 *                   first family is the name ('Calibri, Carlito, sans-serif'). Text
 	 *                   in one of them is written in it to the RTF and read back in it;
 	 *                   any other font is taken off HTML as it comes in, set or pasted.
-	 *                   Default: none, and there is no font list.
+	 *                   Default: none: there is no font list, and no font but the
+	 *                   document's is let in.
 	 *   keepAttributes — `data-` attributes the application's documents carry, which
 	 *                   the editor leaves on their elements: a mark on a paragraph that
 	 *                   the application reads back (`data-section="2"`). Every other

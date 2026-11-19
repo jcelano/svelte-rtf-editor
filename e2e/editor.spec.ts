@@ -1192,6 +1192,26 @@ test.describe('Fonts', () => {
 		return page.locator(list).evaluate((select: HTMLSelectElement) => select.selectedOptions[0]?.textContent ?? '');
 	}
 
+	test('an editor that offers no fonts shows none: not from a document, and not from a paste', async ({ page, browserName }) => {
+		// (They used to stay on the screen, and were never in the RTF.)
+		await open(page, { content: '<p style="font-family: Papyrus; text-align: right;">one <font face="Georgia" color="#ff0000">two</font></p>' });
+		expect(await html(page)).toBe('<p style="text-align: right;">one <font color="#ff0000">two</font></p>');
+		test.skip(browserName !== 'chromium', 'the paste is made through the clipboard, which only Chromium gives a test');
+		await page.evaluate(async () => {
+			const markup = '<span style="font-family: Calibri, sans-serif; font-size: 11pt; font-weight: bold;">from Word</span>';
+			await navigator.clipboard.write([new ClipboardItem({ 'text/html': new Blob([markup], { type: 'text/html' }) })]);
+		});
+		await page.click(`${content} p`);
+		await page.keyboard.press(MAC ? 'Meta+ArrowRight' : 'End');
+		const before = await html(page);
+		await page.keyboard.press('ControlOrMeta+v');
+		await expect.poll(() => html(page)).not.toBe(before);
+		const pasted = await html(page);
+		expect(pasted).not.toMatch(/Calibri|font-family/);
+		expect(pasted).toMatch(/font-weight: (bold|700)/);
+		expect(await page.locator(content).textContent()).toContain('from Word');
+	});
+
 	test('there is no font list unless fonts are offered', async ({ page }) => {
 		await open(page, { content: '<p>one</p>' });
 		await expect(page.locator(list)).toHaveCount(0);
@@ -1246,6 +1266,40 @@ test.describe('Fonts', () => {
 		await selectChars(page, 4, 7);
 		expect(await shown(page)).toBe('Segoe UI');
 		expect(await page.locator(`${content} p`).textContent()).toBe('one two three four');
+	});
+
+	test('a document font given as a list is shown in what follows where the first is missing, and words go back to it', async ({ page }) => {
+		// (A font no machine has, then one the page could have loaded: here Courier New, whose
+		// letters are all one width, so that it shows in the width of a line.)
+		const fontFamily = 'No Such Font 3, Courier New, monospace';
+		await open(page, { content: '<p>iiiiii <font face="Georgia, serif">WWWWWW</font> end</p>', fonts, fontFamily });
+		const widths = await page.evaluate(() => {
+			const paragraph = document.querySelector('.ink-content p') as HTMLElement;
+			const measure = (font: string) => {
+				const probe = document.createElement('span');
+				probe.style.cssText = `font-family: ${font}; font-size: ${getComputedStyle(paragraph).fontSize}; white-space: pre; position: absolute;`;
+				probe.textContent = 'iiiiii';
+				document.body.append(probe);
+				const width = probe.getBoundingClientRect().width;
+				probe.remove();
+				return width;
+			};
+			const range = document.createRange();
+			range.setStart(paragraph.firstChild!, 0);
+			range.setEnd(paragraph.firstChild!, 6);
+			return { shown: range.getBoundingClientRect().width, fallback: measure('"Courier New", monospace'), family: getComputedStyle(paragraph).fontFamily };
+		});
+		expect(widths.family).toMatch(/No Such Font 3.*Courier New.*monospace/);
+		expect(Math.abs(widths.shown - widths.fallback)).toBeLessThan(0.5);
+		// The list names the document font by its first family, and that is what the RTF names.
+		expect(await page.locator(`${list} option`).first().textContent()).toBe('No Such Font 3');
+		await selectChars(page, 7, 13);
+		await page.selectOption(list, '');
+		const rtf = await page.evaluate(() => window.ed.getRTF());
+		expect(rtf).toContain('{\\fonttbl{\\f0\\fswiss\\fcharset0 No Such Font 3;}{\\f1\\fmodern\\fcharset0 Courier New;}}');
+		expect(body(rtf)).toBe('\\pard iiiiii WWWWWW end\\par }');
+		await selectChars(page, 7, 13);
+		expect(await shown(page)).toBe('No Such Font 3');
 	});
 
 	test('a font chosen at a caret is the font of what is typed next', async ({ page }) => {

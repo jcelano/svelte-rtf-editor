@@ -146,7 +146,9 @@ export interface KeepOptions {
 	/**
 	 * The fonts text may be set in, beside the document's own (the editor's `fonts`): a font
 	 * name, or a CSS list whose first family is the name. Where this is given, a font that is
-	 * not among them is taken off the text. Where it is not, fonts are left as they come.
+	 * not among them is taken off the text; given as an empty list, every font but the
+	 * document's is. Where it is not given, fonts are left as they come. (The editor always
+	 * gives its list, so an editor that offers no fonts lets none in.)
 	 */
 	fonts?: readonly string[];
 	/** The document's own font (the editor's `fontFamily`), which text may always name. Only read where `fonts` is given. */
@@ -158,8 +160,9 @@ export interface Kept {
 	attributes: ReadonlySet<string>;
 	classes: ReadonlySet<string>;
 	/**
-	 * The fonts text may name, by the name each is looked up by, with what is written for it.
-	 * Not there where the application offers no fonts: then fonts are left as they come.
+	 * The fonts text may name, by the name each is looked up by, with what is written for it:
+	 * the fonts offered, and the document's own. Not there where no list of fonts was given
+	 * at all: then fonts are left as they come.
 	 */
 	fonts?: ReadonlyMap<string, string>;
 }
@@ -181,10 +184,9 @@ export function keptMarks(options: KeepOptions | undefined): Kept {
 	// `md:flex`, `w-1/2` and `résumé` without saying so, and kept nothing out: a name is only
 	// ever compared with the classes an element has, and one with a space in it is none of them.
 	const classes = new Set(namesIn(options?.keepClasses));
-	const offered = fontChoices(options?.fonts);
-	if (offered.length === 0) return { attributes, classes };
+	if (options?.fonts == null) return { attributes, classes };
 	// The document font last: a list that names it too does not make it a font of the text's own.
-	const fonts = new Map(offered.map((choice) => [choice.key, choice.css]));
+	const fonts = new Map(fontChoices(options.fonts).map((choice) => [choice.key, choice.css]));
 	const own = cssFontFamily(options?.fontFamily);
 	fonts.set(fontKey(own), own);
 	return { attributes, classes, fonts };

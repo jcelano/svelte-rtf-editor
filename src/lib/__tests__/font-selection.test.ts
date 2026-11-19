@@ -150,9 +150,20 @@ describe('rtfToHtml: text in a font of its own', () => {
 });
 
 describe('sanitizeHtml: the fonts that may come in', () => {
-	it('leaves fonts as they come where none is offered, as before', () => {
+	it('leaves fonts as they come where no list is given, as before', () => {
 		const html = '<p style="font-family: Papyrus;">a <font face="Comic Sans MS">b</font></p>';
 		expect(sanitizeHtml(html)).toBe(html);
+		expect(sanitizeHtml(html, { keepClasses: ['x'] })).toBe(html);
+	});
+
+	it('takes every font off where the list given is empty, but for the document font', () => {
+		const html = `<p style="font-family: Papyrus; text-align: center;">a <font face="Georgia" color="#ff0000">b</font> <span style="font: italic 12pt Arial;">c</span> <font face="${DEFAULT_FONT_FAMILY}">d</font></p>`;
+		const safe = sanitizeHtml(html, { fonts: [] });
+		expect(safe).toContain('<p style="text-align: center;">a <font color="#ff0000">b</font>');
+		expect(safe).toContain(`<font face="&quot;${DEFAULT_FONT_FAMILY}&quot;, sans-serif">d</font>`);
+		expect(safe).not.toMatch(/Papyrus|Georgia|Arial/);
+		// What else the shorthand said of the text stays.
+		expect(safe).toMatch(/<span style="[^"]*font-style: italic[^"]*">c<\/span>/);
 	});
 
 	it('keeps an offered font, written as the application wrote it, and takes any other off', () => {
@@ -218,6 +229,16 @@ describe('InkEditor: the font list', () => {
 	it('is not there unless fonts are offered', () => {
 		open({ content: '<p>a</p>' });
 		expect(list()).toBeNull();
+	});
+
+	it('an editor that offers no fonts lets none in: what it shows is what the RTF has', () => {
+		// (Fonts on a paste used to stay on the screen, and were never written to the RTF.)
+		const editor = open({ content: '<p style="font-family: Calibri, sans-serif; text-align: right;">a <font face="Georgia" color="#ff0000">b</font></p>' });
+		expect(editor.innerHTML).toBe('<p style="text-align: right;">a <font color="#ff0000">b</font></p>');
+		api().setHTML('<p><span style="font-family: Papyrus; font-weight: bold;">c</span></p>');
+		expect(editor.innerHTML).toBe('<p><span style="font-weight: bold;">c</span></p>');
+		api().setFont('Georgia');
+		expect(commands).toEqual([]);
 	});
 
 	it('offers the document font first, then the fonts given, and the document font once', () => {
