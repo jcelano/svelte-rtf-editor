@@ -1,5 +1,168 @@
 # svelte-rtf-editor
 
+## 1.13.0
+
+### Minor Changes
+
+- f2bcbfb: Fonts for selected text, from a list the application gives.
+
+  A document had one font. With `fonts`, the editor's toolbar has a font list, and words can be set
+  in any font on it:
+
+  ```svelte
+  <InkEditor fonts={['Georgia', 'Calibri, Carlito, sans-serif', 'Arial']} />
+  ```
+
+  - The list is the limit: a font that is not on it is not offered, is taken off HTML that is set
+    or pasted, is not written to the RTF and is not read back from one. An application names the
+    fonts its receiving system has, or the ones its page loads itself.
+  - An entry is a font name, or a CSS list whose first family is the name; the rest of the list is
+    what a screen without the font shows. A name alone is given the generic family that suits it.
+  - The RTF's font table has one more entry for each font the document has text in.
+  - `editor.setFont(name)` sets a font from an application's own toolbar; `''` sets text back to
+    the document font.
+  - `RtfViewer`, `htmlToRtf`, `rtfToHtml` and `sanitizeHtml` take the same `fonts`. `rtfToHtml` and
+    `sanitizeHtml` also take `fontFamily`, the document font, which text may always name.
+  - RTF from other programs is read the same way, also where a font table names each cut of a font
+    as TextEdit does (`TimesNewRomanPS-BoldMT`).
+  - A change of font is the browser's own command: Undo and Redo treat it as any other change, in
+    Chromium, Firefox and Safari. Clear formatting takes a font off.
+
+  Without `fonts` there is no font list, the writer writes one font and the reader gives none, as
+  before.
+
+  **Changed: an editor that offers no fonts lets none in**
+
+  The font of pasted text used to stay on the screen and was never written to the RTF: text pasted
+  from Word showed in Calibri and was sent in the document font. The editor now takes fonts off
+  HTML that is set or pasted, unless they are in `fonts`, so that the screen shows what the RTF
+  has. An application that uses the editor for its HTML and wants pasted fonts kept names them in
+  `fonts`. `sanitizeHtml` called without `fonts` is unchanged; `sanitizeHtml(html, { fonts: [] })`
+  takes every font off but the document's.
+
+  **The toolbar stays in sight of a long document**
+
+  The editing area grows with the document, and the toolbar used to leave the window with the
+  top of it: at the end of a long report there was no toolbar to use. It now stays at the top of
+  the window, or of the scrolling element the editor is in, and a caret moved up with the keys is
+  not left under it. New prop `stickyToolbar` (default `true`; `false` is the behaviour through
+  1.12.0) and CSS variable `--ink-toolbar-top`, for a page with a header of its own that stays.
+  The toolbar's ground is now white where `--bg-toolbar` is not set; it was see-through.
+
+  **A link opens on Ctrl+click (Cmd+click on a Mac)**
+
+  A click on a link in the editor puts the caret in it, and until now only the browser's own menu
+  opened it. A click with Ctrl or Cmd opens it in a new tab, as in Word, and the pointer over a
+  link shows a note with the address and how to open it. The note is not in the HTML or the RTF.
+  With `readonly`, a plain click opens the link in a new tab; it used to open in place of the page.
+
+  **The toolbar's lists are boxes one can see**
+
+  The lists of paragraph kinds, fonts and sizes have a rounded border, so a list that shows nothing
+  is still there to be chosen from. A list shows nothing where the selected text is in more than one
+  font, or more than one size, as in Word: this is now so for a font or size anywhere in the
+  selection, and not only at its two ends. New theme variable `--bg-select` (default transparent);
+  the border is `--border`, and `--border-active` under the pointer.
+
+  **A stand-in for a font the screen does not have**
+
+  `fontFamily` may be a CSS list: `fontFamily="Segoe UI, Selawik, sans-serif"`. The first family is
+  the font, as before: the one the RTF names. The rest of the list is now given to the screen, for
+  where that font is missing; it was ignored. A Mac has no Segoe UI and showed such a document in
+  Helvetica; with a stand-in font the page loads itself, it shows one with the same letter widths.
+  The README has the stylesheet for it and the stand-ins for the usual fonts. A list that does not
+  end in a generic family is given one, and the package itself still loads no fonts.
+
+  An application that passed a list and relied on only the first family being used on screen now
+  gets the whole list there.
+
+  Known limit: text set in a monospace font that is offered is written in that font, and read back
+  as code.
+
+### Patch Changes
+
+- 38965e9: **A paste or a drop that holds a frame is made safe before it is put in the page**
+
+  Not in any release: found by a review of `main` before 1.13.0 went out.
+
+  A paste that holds an `<iframe>` is put in by the editor itself, without the frame, so that
+  Safari keeps what it could undo. Only the frames were taken out first, and the rest was made safe
+  once it was in the page. A browser's own paste takes the handlers off what it pastes; the command
+  the editor inserts with does not, and a handler runs as soon as its element is in the page. So a
+  page one copied from could run script in the application, by having a frame in the copy: the
+  `onerror` of a `<video>`, a `<source>`, an `<audio>` or an `<svg><image>` ran. The whole of such a
+  paste is now made safe in a document of its own, as HTML from anywhere else is, before any of it
+  is inserted. A paste with no frame was the browser's own all along, and was not affected.
+
+- 07105aa: Three findings of an outside review of 1.12.0.
+
+  **Words that needed their background can be read**
+
+  A background is not written to the RTF, and shading in an RTF is not shown. A Word table with a
+  dark header row and white header text looked right in the editor and was written white on white:
+  the header of a results table was in the report and could not be seen. A sentence copied from a
+  page with a dark theme was written at a contrast of 1.18. A text color that can be read on its
+  background and not on white is now left out, by `htmlToRtf` and by `rtfToHtml`, and the words are
+  in the reader's own color. A color that can be read on white, and a light color with no
+  background behind it, are written as before, and a document with no backgrounds is the same RTF
+  byte for byte. `sanitizeHtml` keeps the `bgcolor` of older pages and mail as the background it
+  stands for, so that the screen shows it and the writer knows of it.
+
+  **Lettered lists are written with their letters**
+
+  A list numbered A, B, C (`type="A"`, `a`, `I`, `i`, or `list-style-type`, on the list or on each
+  item) showed letters in the editor and was written 1, 2, 3 to the RTF and the Markdown: "see part
+  B" pointed at an item labelled "2.". The RTF now carries the marker the screen shows, counted from
+  the list's `start` and an item's `value`, and such a list is read back as `<ol type="A">`.
+  Markdown, which numbers in digits only, carries the marker as the first words of a bullet
+  (`- B. Right breast, biopsy`). A numbered list is written as before.
+
+  **Firefox and Safari are tested, not only named**
+
+  The browser tests run in Chromium, Firefox and WebKit, locally (`npm run test:e2e`) and in CI.
+  Running them there found four faults, now fixed:
+
+  - Firefox: after a paste of text that Word hides entirely, the caret was left inside the hidden
+    element, and what was typed next was not seen and not written.
+  - Firefox: Word's hidden words stayed in the document (undisplayed) where the paste carried a
+    style sheet, as a copy made in Word does.
+  - Safari: Tab in the link and picture dialogs went from the last field out of the dialog, past its
+    buttons, into the page behind it. Tab now goes round the dialog in every browser.
+  - Safari: after a paste or a drop that held an `<iframe>` (a part of a web page with a video or an
+    advertisement in it), nothing done before it could be undone, and after Undo and Redo of the
+    paste, not the paste either. The frame was taken out after the browser had put it in, and
+    Safari forgets every step it could undo when a frame leaves a page. What holds a frame is now
+    put in by the editor without it, in every browser, so a frame of a paste is never in the page
+    at all.
+
+  Three tests that paste Word's hidden text and a text box are skipped in WebKit, which rewrites
+  the HTML a script puts on the clipboard before it is pasted; a copy made in Word itself is checked
+  by hand there. In Firefox a paste of
+  whole paragraphs into an empty line leaves that line after them, which is the browser's own paste.
+
+- 01b5ca8: **A picture copied in Word with its text is pasted as the picture**
+
+  Word names a copied picture in its HTML by a file on the writer's own disk, which no page may
+  open: pasted with text, the picture was a broken image on the screen and `[Image: description]`
+  in the RTF. Word puts the picture itself in the RTF it copies beside the HTML, and the editor now
+  reads it from there, for a paste and for a drop, and gives each image its own. It then goes
+  through the same steps as any pasted picture (`maxImageEdge`, `maxImageBytes`).
+
+  Nothing is guessed: unless the RTF has exactly as many pictures as the HTML has images on the
+  disk, none is given and the paste is as before. A metafile, which no browser shows, stays a
+  placeholder.
+
+  **A comment that comes in with a paste or a drop is emptied**
+
+  Word writes the address of each copied picture in an HTML comment: a file on the writer's own
+  disk, with the name of the writer's account in it. A browser leaves comments out of a paste, but
+  Firefox keeps those of markup that is dropped, and they were saved with the HTML (never in the
+  RTF). A comment that comes in is now emptied. Comments in the application's own HTML stay.
+
+  **Clear formatting on a very long selection** is slow, and the README now says how slow: the time
+  is the browser's own command (three seconds for 1,000 formatted paragraphs in Chromium). It is not
+  changed here.
+
 ## 1.12.0
 
 ### Minor Changes
