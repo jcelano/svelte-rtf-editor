@@ -201,6 +201,67 @@ describe('rtfToHtml: words colored to stand on shading that is not shown', () =>
 	});
 });
 
+/**
+ * Light words on a background that is not kept (a review of main before 1.13.0, item 2).
+ *
+ * No picture is loaded for a document, and a gradient is not a thing an RTF has: both are taken
+ * off what comes in. The color of the words that stood on them was left: white, on the white
+ * of the page, in the editor and in the RTF. The words were in the report and nobody saw them.
+ */
+describe('sanitizeHtml: light words whose picture or gradient is taken away', () => {
+	it('are in the page\'s color: on the element itself, and in what it holds', () => {
+		expect(sanitizeHtml('<div style="background-image:linear-gradient(#003366,#0055aa);color:#ffffff"><p>Header</p></div>')).toBe('<div><p>Header</p></div>');
+		expect(sanitizeHtml('<div style="background-image:url(https://example.com/dark.png)"><p style="color:white">On a picture</p></div>')).toBe(
+			'<div><p>On a picture</p></div>'
+		);
+		// The rest of the style stays.
+		expect(sanitizeHtml('<div style="background-image:linear-gradient(#000,#333)"><p><span style="color:#fff;font-weight:bold">Bold</span></p></div>')).toMatch(
+			/<span style="font-weight: ?bold;?">Bold<\/span>/
+		);
+		// `background`, the short form, as it is mostly written.
+		const short = sanitizeHtml('<div style="background:linear-gradient(to right,#003366,#0055aa);color:#fff"><p>Header</p></div>');
+		expect(short).not.toMatch(/(^|[ ;"])color:/);
+		expect(short).toContain('<p>Header</p>');
+	});
+
+	it('by the `background` and the <font color> of older pages and mail, too', () => {
+		expect(sanitizeHtml('<table><tr><td background="dark.png"><font color="#FFFFFF">Old mail</font></td></tr></table>')).toBe(
+			'<table><tbody><tr><td><font>Old mail</font></td></tr></tbody></table>'
+		);
+		expect(sanitizeHtml('<table background="dark.png"><tr><td><font color="ffffff" size="2">No hash</font></td></tr></table>')).toContain('<font size="2">No hash</font>');
+	});
+
+	it('a color that can be read on white stays, and so does one that still has a color behind it', () => {
+		expect(sanitizeHtml('<div style="background-image:linear-gradient(#000,#333)"><p style="color:#c00000">red</p></div>')).toBe('<div><p style="color:#c00000">red</p></div>');
+		// Its own background color, among the words.
+		const own = sanitizeHtml('<div style="background-image:linear-gradient(#000,#333)"><p><span style="background-color:#000000;color:#ffffff">shaded</span></p></div>');
+		expect(own).toContain('<span style="background-color:#000000;color:#ffffff">shaded</span>');
+		// A color under the gradient, on the same element.
+		const under = sanitizeHtml('<div style="background:linear-gradient(#003366,#0055aa) #003366;color:#fff"><p>Header</p></div>');
+		expect(under).toMatch(/color: ?#fff/);
+		expect(under).toMatch(/background-color: ?#003366/);
+		// A color around it: the words still stand on that.
+		const around = sanitizeHtml('<div style="background-color:#000080"><p style="background-image:linear-gradient(#000,#333);color:#ffffff">On navy</p></div>');
+		expect(around).toMatch(/<p style="color: ?#ffffff;?">On navy<\/p>/);
+		// (And is left out of the RTF by the writer, which knows the navy is not written.)
+		expect(colorTable(rtfOf(around))).not.toContain(WHITE_ENTRY);
+	});
+
+	it('white with no background at all is the writer\'s own choice, as before', () => {
+		expect(sanitizeHtml('<p style="color:#ffffff">white by choice</p>')).toBe('<p style="color:#ffffff">white by choice</p>');
+		expect(sanitizeHtml('<p><font color="#ffffff">white by choice</font></p>')).toBe('<p><font color="#ffffff">white by choice</font></p>');
+		// Next to an element that lost its picture, not in it.
+		expect(sanitizeHtml('<div style="background-image:url(x.png)"><p>in</p></div><p style="color:#ffffff">beside</p>')).toContain('<p style="color:#ffffff">beside</p>');
+	});
+
+	it('the RTF of such a paste has no white in it', () => {
+		const safe = sanitizeHtml('<div style="background:linear-gradient(#003366,#0055aa);color:#fff"><h2 style="color:#ffffff">Diagnosis</h2><p>Invasive carcinoma.</p></div>')!;
+		const rtf = rtfOf(safe);
+		expect(rtf).toContain('Diagnosis');
+		expect(rtf).not.toContain(WHITE_ENTRY);
+	});
+});
+
 describe('sanitizeHtml: bgcolor', () => {
 	it('is kept as the background it stands for, so that the screen shows it and the writer knows of it', () => {
 		const safe = sanitizeHtml('<table><tr><td bgcolor="#000080"><font color="#ffffff">Marker</font></td><td bgcolor="1F3864">x</td></tr></table>');

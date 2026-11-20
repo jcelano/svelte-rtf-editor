@@ -1349,6 +1349,73 @@ test.describe('what a third review found', () => {
 	});
 });
 
+test.describe('what a review of main before 1.13.0 found', () => {
+	// Light words on a gradient or a picture: neither is kept, and the words were left white on
+	// the white of the page, in the editor and in the RTF. Invented text.
+	const BANNER =
+		'<div style="background:linear-gradient(to right,#003366,#0055aa);color:#ffffff;padding:8px"><h2 style="color:#ffffff">Diagnosis</h2>' +
+		'<p>Invasive ductal carcinoma, <span style="color:#fff">grade 2</span>, <span style="color:#c00000">margins positive</span>.</p></div>' +
+		'<table><tr><td style="background-image:linear-gradient(#111,#333)"><font color="#FFFFFF">HER2</font></td><td>Negative (1+)</td></tr></table>';
+	/** How each of the words is drawn: its color against white, as WCAG counts contrast. */
+	const contrasts = (page: Page) =>
+		page.evaluate(() => {
+			const part = (value: number) => {
+				const s = value / 255;
+				return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+			};
+			const onWhite = (color: string) => {
+				const [r, g, b] = color.match(/\d+/g)!.map(Number);
+				return 1.05 / (0.2126 * part(r) + 0.7152 * part(g) + 0.0722 * part(b) + 0.05);
+			};
+			const ed = document.querySelector('.ink-content')!;
+			const walker = document.createTreeWalker(ed, NodeFilter.SHOW_TEXT);
+			const out: Record<string, number> = {};
+			for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+				const words = node.textContent!.trim();
+				if (words) out[words] = Math.round(onWhite(getComputedStyle(node.parentElement!).color) * 10) / 10;
+			}
+			return out;
+		});
+	const readable = async (page: Page) => {
+		const drawn = await contrasts(page);
+		expect(Object.keys(drawn).join('|')).toContain('Diagnosis');
+		expect(Object.keys(drawn).join('|')).toContain('HER2');
+		// Every word can be read on the white it is now on, and the red is still red.
+		for (const [words, contrast] of Object.entries(drawn)) expect(contrast, words).toBeGreaterThan(4.5);
+		expect(await html(page)).toMatch(/color: ?(#c00000|rgb\(192, 0, 0\))/);
+		expect(await html(page)).not.toMatch(/gradient|#fff|rgb\(255, 255, 255\)/i);
+		const rtf = await page.evaluate(() => window.ed.getRTF());
+		expect(rtf).not.toContain('\\red255\\green255\\blue255;');
+		for (const words of ['Diagnosis', 'grade 2', 'HER2']) expect(rtf).toContain(words);
+	};
+
+	test('light words on a gradient are not left white on white: in a document that is opened', async ({ page }) => {
+		await open(page, { content: BANNER });
+		await readable(page);
+	});
+
+	test('nor in one that is pasted', async ({ page }) => {
+		await open(page, { content: '<p>Report</p>' });
+		await page.click(`${content} p`);
+		await page.evaluate(async (pasted) => {
+			await navigator.clipboard.write([new ClipboardItem({ 'text/html': new Blob([pasted], { type: 'text/html' }) })]);
+		}, BANNER);
+		await page.keyboard.press('ControlOrMeta+v');
+		await expect(page.locator(content)).toContainText('Negative (1+)');
+		await readable(page);
+	});
+
+	test('white that had a color behind it, or nothing at all, is left as it was chosen', async ({ page }) => {
+		await open(page, {
+			content:
+				'<p><span style="background-color:#1F3864;color:#ffffff">shaded</span></p><p style="color:#ffffff">chosen</p>' +
+				'<div style="background-color:#000080"><p style="background-image:linear-gradient(#000,#333);color:#ffffff">on navy</p></div>'
+		});
+		const drawn = await contrasts(page);
+		expect(drawn).toEqual({ shaded: 1, chosen: 1, 'on navy': 1 });
+	});
+});
+
 test.describe('Clear formatting', () => {
 	// The browser's own command does this differently in each browser: these run in all three.
 	const MAC = process.platform === 'darwin';

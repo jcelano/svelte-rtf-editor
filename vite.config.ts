@@ -14,7 +14,7 @@ export default defineConfig({
 			exclude: ['src/lib/__tests__/**', 'src/lib/index.ts'],
 			reporter: ['text-summary', 'json-summary'],
 			// A floor a little under what the suite reaches, so coverage cannot quietly fall.
-			thresholds: { lines: 90, functions: 88, statements: 88, branches: 82 }
+			thresholds: { lines: 92, functions: 89, statements: 89, branches: 84 }
 		}
 	},
 	// Component tests mount Svelte in happy-dom, which needs the client build of
