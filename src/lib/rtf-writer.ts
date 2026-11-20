@@ -161,7 +161,7 @@ const MAX_ELEMENT_DEPTH = 600;
 
 // ── Color helpers ──
 
-function parseColor(colorStr: string): RGB | null {
+export function parseColor(colorStr: string): RGB | null {
 	if (!colorStr) return null;
 	const s = colorStr.trim().toLowerCase();
 
@@ -247,7 +247,7 @@ export function hardToReadOnWhite(color: RGB): boolean {
 }
 
 /** A background that shows nothing: none, or one with no opacity. */
-const NO_BACKGROUND = /^(|transparent|none|initial|inherit|unset|revert|currentcolor|rgba\([^)]*,\s*0(\.0+)?\s*\)|#[0-9a-f]{3}0|#[0-9a-f]{6}00)$/;
+export const NO_BACKGROUND = /^(|transparent|none|initial|inherit|unset|revert|currentcolor|rgba\([^)]*,\s*0(\.0+)?\s*\)|#[0-9a-f]{3}0|#[0-9a-f]{6}00)$/;
 
 /**
  * The background an element sets by itself: its color, 'some' for one that is set and not read

@@ -44,6 +44,8 @@ type MarkdownPart = string | MarkdownSpan;
 interface MarkdownOutput {
 	blocks: string[];
 	line: MarkdownPart[];
+	/** The last numbered list written: which of `blocks` it is, and the mark after its last number ("." or ")"). */
+	numbered?: { at: number; mark: string };
 }
 
 /** Elements whose text is never shown. */
@@ -600,10 +602,26 @@ function listToMarkdown(list: HTMLElement, ordered: boolean, ctx: MarkdownContex
 	let shownNumber = listStart(list);
 	let items: { marker: string; blocks: string[] }[] = [];
 	let loose: Node[] = [];
+	/**
+	 * The mark after a number: "1." or "1)". Markdown takes a list's first number and counts on
+	 * from it, whatever the items after it say: "1. 7. 8." is shown as 1, 2, 3, and a list of
+	 * its own that follows another is counted on with it. The other mark is what starts a new
+	 * list, from the number it is written with: "1. 7) 8)" is shown as 1, 7, 8.
+	 */
+	let mark = '.';
+	/** Whether a number has been written with this mark, in the run of items being written. */
+	let counting = false;
+	const otherMark = () => {
+		mark = mark === '.' ? ')' : '.';
+	};
 
 	const endItems = () => {
-		if (items.length) out.blocks.push(items.map((item) => listItem(item.marker, item.blocks.join('\n\n'))).join('\n'));
+		if (items.length) {
+			out.blocks.push(items.map((item) => listItem(item.marker, item.blocks.join('\n\n'))).join('\n'));
+			if (counting) out.numbered = { at: out.blocks.length - 1, mark };
+		}
 		items = [];
+		counting = false;
 	};
 	const endLoose = () => {
 		const blocks = blocksOf(loose, ctx);
@@ -631,8 +649,26 @@ function listToMarkdown(list: HTMLElement, ordered: boolean, ctx: MarkdownContex
 				else blocks.unshift(label);
 			}
 			// An item whose text is hidden shows no marker either.
-			if (blocks.length || !inside.unseen) items.push({ marker: ordered && !label ? `${number++}. ` : '- ', blocks });
-			else if (label) blocks.shift();
+			if (blocks.length || !inside.unseen) {
+				if (ordered && !label) {
+					// An item with a number of its own (`value`) has it here too, and those
+					// after it count on from it, as the screen and the RTF have them. (It was
+					// written by its place in the list: "7." in the RTF, and "2." here.)
+					const own = Math.max(0, Math.min(itemNumber(node as Element, number), 999_999_999));
+					if (counting && own !== number) otherMark();
+					// And a list that follows another starts at its own number.
+					else if (!counting && items.length === 0 && out.numbered?.at === out.blocks.length - 1 && out.numbered.mark === mark) otherMark();
+					number = own;
+					counting = true;
+					items.push({ marker: `${number++}${mark} `, blocks });
+				} else {
+					// (A bullet between numbers ends their list: the next number starts one, at
+					// the number the screen has for it, which counts the bullet too.)
+					counting = false;
+					if (label) number = Math.max(0, Math.min(shownNumber, 999_999_999));
+					items.push({ marker: '- ', blocks });
+				}
+			} else if (label) blocks.shift();
 		} else if (['ul', 'ol', 'menu', 'dir'].includes(tag)) {
 			endLoose();
 			if (items.length) items[items.length - 1].blocks.push(...blocksOf([node], ctx));

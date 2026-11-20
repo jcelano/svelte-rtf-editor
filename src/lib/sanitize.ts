@@ -25,7 +25,7 @@
  *   of its paragraph, text of no size).
  */
 
-import { cssFontFamily, fontChoices, fontKey, linkTarget, sameFontList } from './rtf-writer.js';
+import { cssFontFamily, fontChoices, fontKey, hardToReadOnWhite, linkTarget, NO_BACKGROUND, parseColor, sameFontList } from './rtf-writer.js';
 import { isSafeImageUrl } from './images.js';
 
 /** Elements taken out with everything in them. */
@@ -630,6 +630,65 @@ function sanitizeAttributes(el: HTMLElement, tag: string, fonts: FontSizes, idTa
 	sanitizeStyle(el, tag, fonts, keep);
 }
 
+/** A picture as a background, in a style: one that is loaded, or one that is drawn (a gradient). */
+const BACKGROUND_PICTURE = /(gradient|url|image|image-set|cross-fade|element|paint)\s*\(/i;
+
+/**
+ * Whether an element is given a picture or a gradient to stand on: by its style, or by the
+ * `background` older pages and mail put on a table and its cells. Asked before the element is
+ * made safe, which takes that away: no picture is loaded for a document, and a gradient is not
+ * a thing an RTF has.
+ */
+function hasBackgroundPicture(el: HTMLElement): boolean {
+	if ((el.getAttribute('background') ?? '').trim() !== '') return true;
+	// From the attribute as it is written: a browser that does not read a gradient the way it
+	// is spelled there ("-webkit-gradient(…)") lists nothing for it.
+	return declarations(el.getAttribute('style') ?? '').some(
+		(declaration) => (declaration.name === 'background' || declaration.name === 'background-image') && BACKGROUND_PICTURE.test(declaration.text)
+	);
+}
+
+/** Whether an element has a background color of its own. */
+function hasShade(el: Element): boolean {
+	const color = ((el as HTMLElement).style?.backgroundColor ?? '').trim().toLowerCase();
+	return color !== '' && !NO_BACKGROUND.test(color);
+}
+
+/**
+ * Words left on the white of the page are left readable. `bare` holds the elements whose
+ * picture or gradient was taken away, with no color behind them: light words on one of those
+ * (white on a dark gradient) would be white on white, in the editor and in the RTF, there for
+ * a reader to select and for nobody to see. Their color is taken off with the background it
+ * was chosen for. A color with a background color behind it stays: that is kept, and the
+ * writer knows what to do with the two. Called for an element once it is made safe, the
+ * elements it is in before it.
+ */
+function leaveReadable(el: HTMLElement, pictured: boolean, bare: Set<Element>, root: Element): void {
+	/** What the words of an element stand on now: a color, a background that is gone, or the page. */
+	const behind = (from: Element): 'shade' | 'bare' | null => {
+		for (let at: Element | null = from; at; at = at.parentElement) {
+			if (hasShade(at)) return 'shade';
+			if (bare.has(at)) return 'bare';
+			if (at === root) break;
+		}
+		return null;
+	};
+	if (pictured && behind(el) !== 'shade') bare.add(el);
+	const light = (color: string | null | undefined): boolean => {
+		const read = color ? (parseColor(color) ?? parseColor(`#${color.trim()}`)) : null;
+		return read !== null && hardToReadOnWhite(read);
+	};
+	const styled = light(el.style?.color);
+	const attribute = el.tagName === 'FONT' && light(el.getAttribute('color'));
+	if ((!styled && !attribute) || behind(el) !== 'bare') return;
+	if (attribute) el.removeAttribute('color');
+	if (styled) {
+		el.style.removeProperty('color');
+		if (el.style.cssText) el.setAttribute('style', el.style.cssText);
+		else el.removeAttribute('style');
+	}
+}
+
 /**
  * Whether an element is a formula's copy for a screen reader, beside the same formula written
  * as text: KaTeX writes both, and its stylesheet hides this one. Kept, "30%" read "30%30%".
@@ -662,6 +721,8 @@ export function sanitizeTree(
 ): boolean {
 	let changed = false;
 	const fonts: FontSizes = new Map();
+	/** The elements whose background picture was taken away: see leaveReadable. */
+	const bare = new Set<Element>();
 	/** The words of the last element that left its words, where they are still in the document. */
 	let lastKept: Text | null = null;
 	/** One element made safe; returns whether it was taken out or changed. */
@@ -692,7 +753,9 @@ export function sanitizeTree(
 			return true;
 		}
 		const before = el.attributes.length + (el.getAttribute('style') ?? '') + (el.getAttribute('href') ?? '') + (el.getAttribute('width') ?? '') + (el.getAttribute('height') ?? '');
+		const pictured = hasBackgroundPicture(el);
 		sanitizeAttributes(el, tag, fonts, idTaken, keep);
+		leaveReadable(el, pictured, bare, root);
 		return before !== el.attributes.length + (el.getAttribute('style') ?? '') + (el.getAttribute('href') ?? '') + (el.getAttribute('width') ?? '') + (el.getAttribute('height') ?? '');
 	};
 	for (const el of Array.from(root.querySelectorAll<HTMLElement>('*'))) {

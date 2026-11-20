@@ -2347,6 +2347,29 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		 * ("D." or "CI."); and with neither to go by, a Roman numeral for "I" and for several
 		 * letters, a letter for any other.
 		 */
+		/**
+		 * For each item, the next one at its level in the same run of items: the one after it
+		 * with the same indent, with none of a smaller indent between; -1 where there is none.
+		 * Found for all of them in one pass from the end. (Looked for from each item in turn,
+		 * a list in which every item is one level deeper than the last was read through once
+		 * for each of its items: a second for 20,000 of them, four for 40,000.)
+		 */
+		const nextAtLevel: number[] = new Array(list.length).fill(-1);
+		{
+			/** The items after this one that one before it may still go on to: the nearest at each indent, the smallest indent first. */
+			const ahead: { left: number; at: number }[] = [];
+			for (let i = list.length - 1; i >= 0; i--) {
+				const left = list[i].left;
+				while (ahead.length > 0 && ahead[ahead.length - 1].left > left) ahead.pop();
+				const same = ahead[ahead.length - 1];
+				if (same && same.left === left) {
+					nextAtLevel[i] = same.at;
+					same.at = i;
+				} else {
+					ahead.push({ left, at: i });
+				}
+			}
+		}
 		const readingOf = (at: number, top: (typeof open)[number] | undefined): LetterReading => {
 			const item = list[at];
 			if (!item.letters) return { style: 'decimal', number: item.number };
@@ -2356,12 +2379,11 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 				if (goesOn) return goesOn;
 			}
 			if (readings.length === 1) return readings[0];
-			for (let i = at + 1; i < list.length && list[i].left >= item.left; i++) {
-				if (list[i].left > item.left) continue;
-				const after = list[i].letters ? letterReadings(list[i].letters!) : [];
+			const next = nextAtLevel[at];
+			if (next !== -1) {
+				const after = list[next].letters ? letterReadings(list[next].letters!) : [];
 				const led = readings.find((r) => after.some((a) => a.style === r.style && a.number === r.number + 1));
 				if (led) return led;
-				break;
 			}
 			const roman = item.letters.length > 1 || /^[Ii]$/.test(item.letters);
 			return readings.find((r) => r.style.endsWith(roman ? 'roman' : 'alpha')) ?? readings[0];

@@ -498,5 +498,93 @@ describe('a list numbered in letters or Roman numerals', () => {
 		expect(htmlToMarkdown(el('<ol start="4"><li>x</li><li>y</li></ol>'))).toBe('4. x\n5. y\n\n');
 		// Before a list of its own, the marker is a line of its own.
 		expect(htmlToMarkdown(el('<ol type="A"><li><ul><li>inner</li></ul></li></ol>'))).toBe('- A.\n\n  - inner\n\n');
+		// A number after a lettered item is the one the screen has, which counts that item.
+		expect(htmlToMarkdown(el('<ol><li>a</li><li style="list-style-type:upper-alpha">b</li><li>c</li></ol>'))).toBe('1. a\n- B. b\n3. c\n\n');
 	});
+});
+
+/**
+ * An item's own number in Markdown (a review of main before 1.13.0, item 3).
+ *
+ * An item with `value="7"` was written "7." in the RTF and "2." in the Markdown: by its place
+ * in the list. Written "7." after "1.", it is still shown as 2: Markdown takes a list's first
+ * number and counts on from it, whatever the items after it say. What starts a new list, from
+ * the number it is written with, is the other mark after the number: "1." then "7)". Checked
+ * with pandoc, as CommonMark and as GitHub's Markdown: 1, then 7 and 8.
+ */
+describe('htmlToMarkdown: an item with a number of its own', () => {
+	it('has that number, and the items after it count on from it', () => {
+		expect(htmlToMarkdown(el('<ol><li>a</li><li value="7">b</li><li>c</li></ol>'))).toBe('1. a\n7) b\n8) c\n\n');
+		// As the RTF has them.
+		expect(body('<ol><li>a</li><li value="7">b</li><li>c</li></ol>')).toMatch(/ 1\.\\tab a.* 7\.\\tab b.* 8\.\\tab c/);
+		// Each jump is a new list: back to "." for the next.
+		expect(htmlToMarkdown(el('<ol><li>a</li><li value="7">b</li><li value="3">c</li><li>d</li></ol>'))).toBe('1. a\n7) b\n3. c\n4. d\n\n');
+		// In a list inside an item too.
+		expect(htmlToMarkdown(el('<ol><li>a<ol><li>x</li><li value="4">y</li></ol></li><li>b</li></ol>'))).toBe('1. a\n\n   1. x\n   4) y\n2. b\n\n');
+	});
+
+	it('is written as before where the number is the one it would have had, or the list\'s first', () => {
+		expect(htmlToMarkdown(el('<ol><li>a</li><li value="2">b</li><li>c</li></ol>'))).toBe('1. a\n2. b\n3. c\n\n');
+		expect(htmlToMarkdown(el('<ol><li value="5">a</li><li>b</li></ol>'))).toBe('5. a\n6. b\n\n');
+		expect(htmlToMarkdown(el('<ol start="3"><li value="5">a</li><li>b</li></ol>'))).toBe('5. a\n6. b\n\n');
+		// A value that is no number is no value.
+		expect(htmlToMarkdown(el('<ol><li>a</li><li value="x">b</li></ol>'))).toBe('1. a\n2. b\n\n');
+		// One Markdown cannot write (it has nine digits and none below zero) is as near as it can count.
+		expect(htmlToMarkdown(el('<ol><li>a</li><li value="-4">b</li></ol>'))).toBe('1. a\n0) b\n\n');
+		expect(htmlToMarkdown(el('<ol><li>a</li><li value="12345678901">b</li></ol>'))).toBe('1. a\n999999999) b\n\n');
+	});
+
+	it('a numbered list right after another starts at its own number, and is not counted on with the first', () => {
+		// (The reader makes two lists of numbers that are out of sequence: 1, 2, then 5, 6.
+		// Written "1. 2." and "5. 6.", they were one list in Markdown, shown as 1 to 4.)
+		expect(htmlToMarkdown(el('<ol><li>a</li><li>b</li></ol><ol start="5"><li>c</li><li>d</li></ol>'))).toBe('1. a\n2. b\n\n5) c\n6) d\n\n');
+		expect(htmlToMarkdown(el('<ol><li>a</li></ol><ol><li>b</li></ol><ol><li>c</li></ol>'))).toBe('1. a\n\n1) b\n\n1. c\n\n');
+		// With something between them they are two lists already.
+		expect(htmlToMarkdown(el('<ol><li>a</li></ol><p>between</p><ol start="5"><li>c</li></ol>'))).toBe('1. a\n\nbetween\n\n5. c\n\n');
+		expect(htmlToMarkdown(el('<ol><li>a</li></ol><ul><li>dot</li></ul><ol start="5"><li>c</li></ol>'))).toBe('1. a\n\n- dot\n\n5. c\n\n');
+		// From an RTF whose numbers jump.
+		expect(htmlToMarkdown(el(read(R`\pard\li720\fi-360 1.\tab a\par\pard\li720\fi-360 2.\tab b\par\pard\li720\fi-360 5.\tab c\par`)))).toBe('1. a\n2. b\n\n5) c\n\n');
+	});
+});
+
+/**
+ * Letters that can be read two ways, in a long list (a review of main before 1.13.0, item 4).
+ *
+ * "C" is the third letter and the Roman 100: where it opens a list, it is read as the next item
+ * at its level goes on. That item was looked for from each item in turn, through all the items
+ * nested under it: a list in which every item is one level deeper than the last was read
+ * through once for each of its items, a second for 20,000 of them and four for 40,000.
+ */
+describe('rtfToHtml: the item a lettered one is read by', () => {
+	const item = (level: number, marker: string, text: string) => `\\pard\\li${720 * level}\\fi-360 ${marker}\\tab ${text}\\par `.replace(/\\\\/g, '\\');
+
+	it('is the next at its level, over what is nested under it', () => {
+		// "C." then "D.": letters. "C." then "CI.": Roman numerals.
+		expect(read(item(1, 'C.', 'c') + item(2, '1.', 'under') + item(3, 'a.', 'deeper') + item(1, 'D.', 'd'))).toContain('<ol type="A" start="3">');
+		expect(read(item(1, 'C.', 'c') + item(2, '1.', 'under') + item(3, 'a.', 'deeper') + item(1, 'CI.', 'ci'))).toContain('<ol type="I" start="100">');
+		// The same for each level of a list that has several.
+		const nested = read(item(1, 'C.', 'c') + item(2, 'c.', 'inner') + item(2, 'ci.', 'inner next') + item(1, 'D.', 'd'));
+		expect(nested).toContain('<ol type="A" start="3"><li>c<ol type="i" start="100"><li>inner</li><li>inner next</li></ol></li><li>d</li></ol>');
+	});
+
+	it('is not one past an item further out: that is another list', () => {
+		// "C." at the second level, then an item at the first, then "D." at the second.
+		const html = read(item(2, 'C.', 'c') + item(1, '1.', 'out') + item(2, 'D.', 'd'));
+		// With nothing to go by, one letter other than I is a letter.
+		expect(html).toContain('<ol type="A" start="3"');
+		const alone = read(item(2, 'I.', 'one') + item(1, '1.', 'out') + item(2, 'J.', 'j'));
+		expect(alone).toContain('<ol type="I"');
+	});
+
+	it('is found in one pass: 120,000 items, each nested a level deeper than the last, are read in half a second', () => {
+		let rtf = '';
+		for (let level = 1; level <= 120000; level++) rtf += item(level, 'I.', 'x');
+		const start = performance.now();
+		const html = read(rtf);
+		const took = performance.now() - start;
+		expect((html.match(/<ol/g) ?? []).length).toBe(120000);
+		// (Half a second here. Twelve before, when each item looked through all that followed
+		// it: the limit is far from both, for a machine that is slow or busy.)
+		expect(took).toBeLessThan(4000);
+	}, 60000);
 });
