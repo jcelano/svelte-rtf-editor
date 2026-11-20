@@ -88,7 +88,7 @@
 	import { onMount } from 'svelte';
 	import Toolbar from './Toolbar.svelte';
 	import Modal from './Modal.svelte';
-	import ImageOverlay from './ImageOverlay.svelte';
+	import ImageOverlay, { type PicturePlace } from './ImageOverlay.svelte';
 	import { htmlToMarkdown, downloadFile } from '../utils.js';
 	import { keptMarks, pasteHasWords, pasteNotes, pasteWithoutFrames, removeWordHidden, sanitizedNodes, sanitizeTree, type PasteNotes } from '../sanitize.js';
 	import { givePastedPictures, pastePictures, type PastePictures } from '../paste-pictures.js';
@@ -225,6 +225,8 @@
 	let currentBlock: string = $state('p');
 	/** The size of the text at the caret, in points, for the toolbar. */
 	let currentFontSize: number | null = $state(null);
+	/** The spacing of the paragraph at the caret, as its own style sets it: see spacingOf. */
+	let currentSpacing: ParagraphSpacing = $state({ line: null, before: 0, after: 0 });
 	/** The font at the selection, by its key: '' for the document font, null where it has more than one. */
 	let currentFont: string | null = $state('');
 
@@ -238,6 +240,11 @@
 	// Modal state
 	let linkModalOpen: boolean = $state(false);
 	let imageModalOpen: boolean = $state(false);
+	let tableModalOpen: boolean = $state(false);
+	let tableRows: number | null = $state(3);
+	let tableColumns: number | null = $state(3);
+	let tableBorders: boolean = $state(true);
+	let tableHeader: boolean = $state(false);
 	let linkUrl: string = $state('');
 	let linkError: string = $state('');
 	let linkText: string = $state('');
@@ -948,6 +955,13 @@
 			hangAtCaret();
 			return;
 		}
+		if (cmd === 'lineSpacing' || cmd === 'spaceBefore' || cmd === 'spaceAfter') {
+			const n = value === null || value === '' ? null : Number(value);
+			if (n !== null && !Number.isFinite(n)) return;
+			if (cmd === 'lineSpacing') applySpacing({ line: n });
+			else applySpacing(cmd === 'spaceBefore' ? { before: n } : { after: n });
+			return;
+		}
 		if (cmd === 'undo' && (undoIndent() || undoClear())) return;
 		if (cmd === 'redo' && redoClear()) return;
 		document.execCommand(cmd, false, value ?? undefined);
@@ -1337,6 +1351,117 @@
 		indentChanged();
 	}
 
+	// ── Spacing ──
+	// The space before and after a paragraph, and between its lines, as a style on each
+	// paragraph the selection touches: a paragraph, a heading, and a picture (which has the
+	// space around it, and no lines). It is what the RTF writer sends:
+	//
+	// | Set                  | Style on the paragraph | RTF               |
+	// |----------------------|------------------------|-------------------|
+	// | 6 pt before          | margin-top: 6pt        | \sb120            |
+	// | 6 pt after           | margin-bottom: 6pt     | \sa120            |
+	// | lines 1.5 apart      | line-height: 1.5       | \sl360\slmult1   |
+	//
+	// Not in a table cell, where the writer sends a paragraph's alignment and left indent only,
+	// and not on a list. Each change is one step of the editor's own Undo, as an indent is.
+
+	/** A paragraph's spacing as its own style sets it: lines apart (null: the editor's own), and points before and after. */
+	interface ParagraphSpacing {
+		line: number | null;
+		before: number;
+		after: number;
+	}
+	/** The most that is set: ten lines, and a space of two inches. */
+	const MOST_LINES = 10;
+	const MOST_SPACE_PT = 144;
+
+	/** A margin a style sets, in points; 0 where it sets none, or one that cannot be read. */
+	function spacePt(value: string): number {
+		const m = value.trim().toLowerCase().match(/^(\d+(?:\.\d+)?|\.\d+)(px|pt|in|cm|mm)$/);
+		return m ? Math.round(((parseFloat(m[1]) * PX_PER_UNIT[m[2]]) / PX_PER_UNIT.pt) * 100) / 100 : 0;
+	}
+
+	function spacingOf(el: HTMLElement): ParagraphSpacing {
+		const line = el.style.lineHeight.trim();
+		const lines = /^(\d+(\.\d+)?|\.\d+)%?$/.test(line) ? parseFloat(line) / (line.endsWith('%') ? 100 : 1) : null;
+		return { line: lines !== null && lines > 0 ? Math.round(lines * 100) / 100 : null, before: spacePt(el.style.marginTop), after: spacePt(el.style.marginBottom) };
+	}
+
+	/** The paragraph, heading or picture the caret is in, where spacing can be set on it. */
+	function spacedBlockAtCaret(): HTMLElement | null {
+		if (!editorEl) return null;
+		const node = selectedImage ?? window.getSelection()?.anchorNode ?? null;
+		if (!node || !editorEl.contains(node)) return null;
+		const el = node instanceof Element ? node : node.parentElement;
+		if (!el || el.closest('td, th, li')) return null;
+		const block = el.closest<HTMLElement>(INDENT_TARGETS);
+		if (!block || block === editorEl || !editorEl.contains(block)) return null;
+		return isPlainParagraph(block) || /^(H[1-6]|FIGURE)$/.test(block.tagName) ? block : null;
+	}
+
+	function applySpacing(change: { line?: number | null; before?: number | null; after?: number | null }): void {
+		if (readonly || !editorEl) return;
+		const valid = (n: number | null | undefined, most: number) => n == null || (typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= most);
+		if (!valid(change.line, MOST_LINES) || change.line === 0 || !valid(change.before, MOST_SPACE_PT) || !valid(change.after, MOST_SPACE_PT)) return;
+		// A picture that is selected is spaced as the paragraph it is.
+		const figure = selectedImage?.closest<HTMLElement>('figure') ?? null;
+		// (Not one in a table cell, where no paragraph is spaced: nor is the paragraph the
+		// caret was last in, which is not what is selected.)
+		if (selectedImage?.closest('td, th')) return;
+		const wrapped = new Map<HTMLElement, HTMLBRElement | null>();
+		let targets: HTMLElement[];
+		if (figure && editorEl.contains(figure)) {
+			targets = [figure];
+		} else {
+			restoreSelection();
+			editorEl.focus();
+			const sel = window.getSelection();
+			if (!sel || sel.rangeCount === 0 || !sel.anchorNode || !editorEl.contains(sel.anchorNode)) return;
+			const { anchorNode, anchorOffset, focusNode, focusOffset } = sel;
+			targets = indentTargets(sel.getRangeAt(0), 'spacing', wrapped);
+			if (wrapped.size > 0 && anchorNode instanceof Text && focusNode instanceof Text && anchorNode.isConnected && focusNode.isConnected) {
+				sel.setBaseAndExtent(anchorNode, anchorOffset, focusNode, focusOffset);
+			}
+		}
+		const points = (n: number) => `${Math.round(n * 100) / 100}pt`;
+		const step: IndentChange[] = [];
+		for (const el of targets) {
+			const before = el.getAttribute('style');
+			// (A picture has no lines to space.)
+			if (change.line !== undefined && el.tagName !== 'FIGURE') el.style.lineHeight = change.line === null ? '' : String(Math.round(change.line * 100) / 100);
+			if (change.before !== undefined) el.style.marginTop = change.before ? points(change.before) : '';
+			if (change.after !== undefined) el.style.marginBottom = change.after ? points(change.after) : '';
+			if (!el.getAttribute('style')) el.removeAttribute('style');
+			const after = el.getAttribute('style');
+			const br = wrapped.get(el);
+			if (after === before && br === undefined) continue;
+			step.push({ el, before, after, wrapped: br === undefined ? null : { br } });
+		}
+		if (step.length === 0) return;
+		indentUndo.push(step);
+		indentChanged();
+		overlayRef?.reposition();
+	}
+
+	/**
+	 * Set how far apart the lines are in the paragraphs the selection touches, in lines: 1, 1.15,
+	 * 1.5, 2. `null` takes the setting off, and the lines are as far apart as the editor's own
+	 * style has them. Also what the toolbar's spacing list calls.
+	 */
+	export function setLineSpacing(lines: number | null): void {
+		applySpacing({ line: lines });
+	}
+
+	/**
+	 * Set the space before and after the paragraphs the selection touches, in points; a picture
+	 * that is selected is spaced the same way. `0` or `null` takes a space off, and a side that
+	 * is left out stays as it is: `setParagraphSpacing({ after: 6 })`.
+	 */
+	export function setParagraphSpacing(space: { before?: number | null; after?: number | null }): void {
+		if (!space || typeof space !== 'object') return;
+		applySpacing({ before: space.before, after: space.after });
+	}
+
 	/** An element's left margin in px: its own, from the inline style, or 0. */
 	function marginLeftPx(el: HTMLElement): number {
 		return Math.max(0, stylePx(el, 'marginLeft'));
@@ -1536,8 +1661,12 @@
 		/** The tab stop that goes with a hanging indent: tab-size on screen, \tx in the RTF. */
 		tabSize: string;
 		tabStops: string;
+		/** The space before and after it, and between its lines. */
+		marginTop: string;
+		marginBottom: string;
+		lineHeight: string;
 	}
-	const NO_FORMAT: ParagraphFormat = { textAlign: '', marginLeft: '', marginRight: '', textIndent: '', tabSize: '', tabStops: '' };
+	const NO_FORMAT: ParagraphFormat = { textAlign: '', marginLeft: '', marginRight: '', textIndent: '', tabSize: '', tabStops: '', marginTop: '', marginBottom: '', lineHeight: '' };
 	const PAINT_BLOCKS = 'p, div, h1, h2, h3, h4, h5, h6';
 
 	/** 'pick': waiting for the paragraph to copy from. 'apply': each click applies the format. */
@@ -1584,7 +1713,10 @@
 			marginRight: el.style.marginRight,
 			textIndent: el.style.textIndent,
 			tabSize: el.style.tabSize,
-			tabStops: el.getAttribute(TAB_STOPS) ?? ''
+			tabStops: el.getAttribute(TAB_STOPS) ?? '',
+			marginTop: el.style.marginTop,
+			marginBottom: el.style.marginBottom,
+			lineHeight: el.style.lineHeight
 		};
 	}
 
@@ -1659,6 +1791,10 @@
 		if (indents) {
 			target.style.marginRight = copiedFormat.marginRight;
 			target.style.textIndent = copiedFormat.textIndent;
+			// (Spacing goes where the writer sends it: the same blocks.)
+			target.style.marginTop = copiedFormat.marginTop;
+			target.style.marginBottom = copiedFormat.marginBottom;
+			target.style.lineHeight = copiedFormat.lineHeight;
 		}
 		if (whole) {
 			target.style.tabSize = copiedFormat.tabSize;
@@ -1712,7 +1848,7 @@
 	 */
 	function indentTargets(
 		range: Range,
-		cmd: IndentCommand,
+		cmd: IndentCommand | 'spacing',
 		wrapped: Map<HTMLElement, HTMLBRElement | null>
 	): HTMLElement[] {
 		if (!editorEl) return [];
@@ -1733,8 +1869,9 @@
 			const block = inScope(item) ? item.parentElement : inScope(closest) ? closest : null;
 			if (cmd !== 'indent' && cmd !== 'outdent') {
 				if (cell) return null;
-				if (inScope(block)) return isPlainParagraph(block) ? block : null;
-				if (decreases(cmd)) return null;
+				// (Spacing is also a heading's and a picture's: the writer sends it for those.)
+				if (inScope(block)) return isPlainParagraph(block) || (cmd === 'spacing' && /^(H[1-6]|FIGURE)$/.test(block.tagName)) ? block : null;
+				if (cmd !== 'spacing' && decreases(cmd)) return null;
 				const made = wrapLooseLine(node);
 				if (made) wrapped.set(made.p, made.br);
 				return made?.p ?? null;
@@ -1816,6 +1953,8 @@
 		saveSelection();
 		currentFontSize = sizeAtSelection();
 		currentFont = fontList.length > 0 ? fontAtSelection() : '';
+		const spaced = spacedBlockAtCaret();
+		currentSpacing = spaced ? spacingOf(spaced) : { line: null, before: 0, after: 0 };
 
 		formatState = {
 			bold: document.queryCommandState('bold'),
@@ -2075,6 +2214,94 @@
 		e.preventDefault();
 		e.stopPropagation();
 		act();
+	}
+
+	// ── Tables ──
+	// A table is put in from a dialog: its rows and columns, whether its cells have borders,
+	// and whether its first row is a header. It is written the way rtfToHtml reads a table
+	// back, so that a document is the same after it is saved and opened again: the cells
+	// share the width of the table, and a border is a style on each cell, which is what the
+	// RTF writer sends (\clbrdrt\brdrs\brdrw15 and so on). A table with no borders has none
+	// in the RTF either; the editor draws a faint line around its cells while it is edited.
+	const MOST_TABLE_ROWS = 50;
+	const MOST_TABLE_COLUMNS = 12;
+	const TABLE_STYLE = 'border-collapse:collapse;width:100%;margin:4px 0';
+	const CELL_BORDER = 'border:1px solid;';
+
+	/**
+	 * A column's share of the width of a table of `count` equal columns, as the reader gives
+	 * it: the edges, each rounded to a hundredth of a percent, and a cell the difference of two.
+	 */
+	function columnShare(column: number, count: number): string {
+		const edge = (k: number) => Math.round((k / count) * 10000) / 100;
+		return (edge(column + 1) - edge(column)).toFixed(2).replace(/0$/, '');
+	}
+
+	function openTableModal(): void {
+		keepForDialog();
+		tableModalOpen = true;
+	}
+
+	function applyTable(): void {
+		const at = dialogSelection;
+		tableModalOpen = false;
+		restoreFor(at);
+		insertTable(tableRows ?? 0, tableColumns ?? 0, { borders: tableBorders, header: tableHeader });
+	}
+
+	/**
+	 * Put a table of empty cells in after the paragraph the caret is in (in its place where
+	 * that is empty), and the caret in its first cell. `borders` (default true) gives every
+	 * cell a border, which is written to the RTF; `header` makes the first row header cells.
+	 * At most 50 rows and 12 columns. Also what the toolbar's Insert table dialog calls.
+	 */
+	export function insertTable(rows: number, columns: number, options: { borders?: boolean; header?: boolean } = {}): void {
+		if (readonly || !editorEl) return;
+		const whole = (n: unknown, most: number) => (typeof n === 'number' && Number.isFinite(n) ? Math.max(1, Math.min(most, Math.floor(n))) : 0);
+		const rowCount = whole(rows, MOST_TABLE_ROWS);
+		const columnCount = whole(columns, MOST_TABLE_COLUMNS);
+		if (rowCount < 1 || columnCount < 1 || rows < 1 || columns < 1) return;
+		const borders = options?.borders !== false;
+		const header = options?.header === true;
+		editorEl.focus();
+		// Inserting changes the document outside an input event: earlier indent steps no longer undo.
+		indentUndo = [];
+
+		const table = document.createElement('table');
+		table.setAttribute('style', TABLE_STYLE);
+		const body = document.createElement('tbody');
+		for (let r = 0; r < rowCount; r++) {
+			const row = document.createElement('tr');
+			for (let c = 0; c < columnCount; c++) {
+				const head = header && r === 0;
+				const cell = document.createElement(head ? 'th' : 'td');
+				const width = `width:${columnShare(c, columnCount)}%`;
+				// (A header cell says how it is aligned: a browser centers one that does not.
+				// With no borders it has the line under it that marks a header cell in the RTF.)
+				cell.setAttribute('style', head ? `${borders ? CELL_BORDER : 'border-bottom:1px solid;'}padding:2px 6px;text-align:left;${width}` : `${borders ? CELL_BORDER : ''}padding:2px 6px;${width}`);
+				cell.appendChild(document.createElement('br'));
+				row.appendChild(cell);
+			}
+			body.appendChild(row);
+		}
+		table.appendChild(body);
+
+		const block = caretBlock();
+		if (block && isEmptyBlock(block)) block.replaceWith(table);
+		else if (block) block.after(table);
+		else editorEl.appendChild(table);
+		// Somewhere to go on typing after the table.
+		const next = table.nextElementSibling;
+		if (!next || next.tagName === 'TABLE' || next.tagName === 'FIGURE') {
+			const p = document.createElement('p');
+			p.appendChild(document.createElement('br'));
+			table.after(p);
+		}
+		selectedImage = null;
+		placeCaret(table.querySelector('td, th') as HTMLElement);
+		updateToolbarState();
+		fireChange();
+		if (autosave) scheduleAutoSave();
 	}
 
 	// ── Images ──
@@ -2422,8 +2649,219 @@
 		return !!el?.closest('figcaption');
 	}
 
+	// ── Pictures: where they are ──
+	// A picture is moved up and down the document as the block it is: its figure, with its
+	// caption. Two pictures side by side are a table of one row with no borders, a picture
+	// and its own caption in each cell: that is what an RTF can say (a row of cells, read by
+	// Word and by every other reader), and what rtfToHtml gives back. The frame around a
+	// selected picture has the buttons: Move up, Move down, Place beside the picture above,
+	// and, for a picture that is beside another, Place on its own line.
+	const MOST_PICTURES_IN_ROW = 4;
+	const PICTURE_CELL_STYLE = 'padding:2px 6px;';
+	/** The padding of such a cell, left and right together, in px. */
+	const PICTURE_CELL_PADDING = 12;
+
+	/** The picture a cell holds and nothing else: its figure, or the picture itself. */
+	function pictureInCell(cell: Element): HTMLElement | null {
+		const held = Array.from(cell.children).filter((child) => child.tagName !== 'BR');
+		if (held.length !== 1) return null;
+		const unit = held[0] as HTMLElement;
+		const pictures = unit.tagName === 'IMG' ? 1 : unit.tagName === 'FIGURE' ? unit.querySelectorAll('img').length : 0;
+		if (pictures !== 1) return null;
+		// (Words typed beside the picture make the cell an ordinary one.)
+		return (cell.textContent ?? '').trim() === (unit.textContent ?? '').trim() ? unit : null;
+	}
+
+	/** The row of pictures a picture is in: a table of one row, a picture in each of its cells. */
+	function pictureRowOf(node: Element | null): { table: HTMLTableElement; cells: HTMLTableCellElement[] } | null {
+		const table = node?.closest('table');
+		if (!table || !editorEl || table.parentElement !== editorEl || table.querySelector('table')) return null;
+		if (table.rows.length !== 1 || table.querySelector('caption')) return null;
+		const cells = Array.from(table.rows[0].cells);
+		return cells.length > 0 && cells.every((cell) => pictureInCell(cell)) ? { table, cells } : null;
+	}
+
+	/** A block of the document that is one picture: its figure, or a paragraph that holds it alone. */
+	function isPictureBlock(block: Element | null): block is HTMLElement {
+		if (!(block instanceof HTMLElement) || block.parentElement !== editorEl) return false;
+		if (block.tagName === 'IMG') return true;
+		if (!/^(FIGURE|P|DIV)$/.test(block.tagName) || block.querySelectorAll('img').length !== 1) return false;
+		const caption = block.tagName === 'FIGURE' ? block.querySelector('figcaption') : null;
+		return (block.textContent ?? '').trim() === (caption?.textContent ?? '').trim();
+	}
+
+	/** What is moved when a picture is: its own block, or the row of pictures it is in. Null for a picture in a line of text. */
+	function movedWith(img: HTMLImageElement | null): HTMLElement | null {
+		if (!img || !editorEl?.contains(img)) return null;
+		const row = pictureRowOf(img);
+		if (row) return row.table;
+		let block: HTMLElement = img.closest<HTMLElement>('figure') ?? img;
+		while (block.parentElement && block.parentElement !== editorEl) block = block.parentElement;
+		return isPictureBlock(block) ? block : null;
+	}
+
+	/** An empty line at the end of the document: where typing goes on, and nothing to move a picture past. */
+	function isLastEmptyLine(el: Element | null): boolean {
+		return !!el && el === editorEl?.lastElementChild && /^(P|DIV)$/.test(el.tagName) && isEmptyBlock(el as HTMLElement);
+	}
+
+	function picturePlace(): PicturePlace {
+		const none: PicturePlace = { up: false, down: false, beside: null };
+		const block = readonly ? null : movedWith(selectedImage);
+		if (!block) return none;
+		const above = block.previousElementSibling;
+		const below = block.nextElementSibling;
+		const inRow = block.tagName === 'TABLE';
+		const joins = !inRow && !!above && (isPictureBlock(above) || (pictureRowOf(above)?.cells.length ?? MOST_PICTURES_IN_ROW) < MOST_PICTURES_IN_ROW);
+		return { up: !!above, down: !!below && !isLastEmptyLine(below), beside: inRow ? 'leave' : joins ? 'join' : null };
+	}
+
+	function pictureMoved(): void {
+		// A move changes the document outside an input event: earlier indent steps no longer undo.
+		indentUndo = [];
+		const last = editorEl?.lastElementChild;
+		// Somewhere to go on typing after a picture that is now the last thing in the document.
+		if (editorEl && last && (last.tagName === 'FIGURE' || last.tagName === 'TABLE')) {
+			const p = document.createElement('p');
+			p.appendChild(document.createElement('br'));
+			editorEl.appendChild(p);
+		}
+		selectedImage?.scrollIntoView?.({ block: 'nearest' });
+		overlayRef?.reposition();
+		handleImageEdited();
+	}
+
+	/** Move the selected picture (with its caption, or the row of pictures it is in) over the block above it or below it. */
+	function moveSelectedImage(direction: -1 | 1): void {
+		const place = picturePlace();
+		const block = movedWith(selectedImage);
+		if (!block || !(direction < 0 ? place.up : place.down)) return;
+		if (direction < 0) block.previousElementSibling!.before(block);
+		else block.nextElementSibling!.after(block);
+		pictureMoved();
+	}
+
+	/** A picture block as the figure it is put in a cell as. */
+	function figureOf(block: HTMLElement): { figure: HTMLElement; align: string } {
+		const align = block.style.textAlign;
+		if (block.tagName === 'FIGURE') {
+			// (In a cell it is the cell that is aligned, and nothing is indented or spaced.)
+			block.removeAttribute('style');
+			return { figure: block, align };
+		}
+		const figure = document.createElement('figure');
+		const img = block.tagName === 'IMG' ? block : block.querySelector('img')!;
+		figure.append(img, document.createElement('figcaption'));
+		if (block !== img) block.remove();
+		return { figure, align };
+	}
+
+	function pictureCell(block: HTMLElement): HTMLTableCellElement {
+		const cell = document.createElement('td');
+		const { figure, align } = figureOf(block);
+		cell.appendChild(figure);
+		cell.setAttribute('style', PICTURE_CELL_STYLE);
+		if (align && align !== 'left') cell.style.textAlign = align;
+		return cell;
+	}
+
+	/** The cells of a row of pictures share its width, and no picture is wider than its cell. */
+	function fitPictureRow(cells: HTMLTableCellElement[]): void {
+		const whole = contentWidth();
+		cells.forEach((cell, i) => {
+			const align = cell.style.textAlign;
+			cell.setAttribute('style', `${PICTURE_CELL_STYLE}width:${columnShare(i, cells.length)}%`);
+			if (align && align !== 'left') cell.style.textAlign = align;
+			const img = cell.querySelector('img');
+			const room = Math.floor(whole / cells.length) - PICTURE_CELL_PADDING;
+			if (!img || room < 40) return;
+			const width = parseFloat(img.style.width) || img.getBoundingClientRect().width || img.naturalWidth;
+			if (width > room || !img.style.width) {
+				img.removeAttribute('width');
+				img.removeAttribute('height');
+				img.style.width = `${Math.min(width || room, room)}px`;
+				img.style.height = 'auto';
+			}
+		});
+	}
+
+	/** The picture of a cell back on a line of its own, where `at` is. */
+	function pictureOutOfCell(cell: HTMLTableCellElement, at: Element, where: 'before' | 'after'): void {
+		const unit = pictureInCell(cell);
+		if (!unit) return;
+		const { figure } = figureOf(unit);
+		const align = cell.style.textAlign;
+		if (align && align !== 'left') figure.style.textAlign = align;
+		at[where](figure);
+		cell.remove();
+	}
+
+	/** What is left of a row of pictures after one has gone: a narrower row, or the one picture on its own line. */
+	function closeUpPictureRow(table: HTMLTableElement): void {
+		const cells = Array.from(table.rows[0]?.cells ?? []);
+		if (cells.length > 1) {
+			fitPictureRow(cells);
+			return;
+		}
+		if (cells.length === 1) pictureOutOfCell(cells[0], table, 'before');
+		table.remove();
+	}
+
+	/**
+	 * Put the selected picture beside the picture above it; or, where it is beside another,
+	 * back on a line of its own, under the row it was in.
+	 */
+	function toggleBeside(): void {
+		const place = picturePlace();
+		const img = selectedImage;
+		const block = movedWith(img);
+		if (!img || !block || !place.beside) return;
+		if (place.beside === 'leave') {
+			const cell = img.closest('td, th') as HTMLTableCellElement;
+			pictureOutOfCell(cell, block, 'after');
+			closeUpPictureRow(block as HTMLTableElement);
+		} else {
+			const above = block.previousElementSibling as HTMLElement;
+			let row = pictureRowOf(above)?.table.rows[0];
+			if (!row) {
+				const table = document.createElement('table');
+				table.setAttribute('style', TABLE_STYLE);
+				const body = document.createElement('tbody');
+				row = document.createElement('tr');
+				body.appendChild(row);
+				table.appendChild(body);
+				above.before(table);
+				row.appendChild(pictureCell(above));
+			}
+			row.appendChild(pictureCell(block));
+			fitPictureRow(Array.from(row.cells));
+		}
+		pictureMoved();
+	}
+
+	/** Width in px a picture has room for: its cell where it is one of a row of pictures, else the page. */
+	function pictureRoom(): number {
+		const whole = contentWidth();
+		const row = selectedImage ? pictureRowOf(selectedImage) : null;
+		return row ? Math.max(0, Math.floor(whole / row.cells.length) - PICTURE_CELL_PADDING) : whole;
+	}
+
 	function removeSelectedImage(): void {
 		if (!selectedImage) return;
+		const row = pictureRowOf(selectedImage);
+		if (row) {
+			// One of a row of pictures: the others close up, and a last one is on its own line again.
+			selectedImage.closest('td, th')!.remove();
+			selectedImage = null;
+			const next = row.table.nextElementSibling as HTMLElement | null;
+			closeUpPictureRow(row.table);
+			indentUndo = [];
+			if (next && !/^(TABLE|FIGURE)$/.test(next.tagName)) placeCaret(next);
+			updateCounts();
+			fireChange();
+			if (autosave) scheduleAutoSave();
+			return;
+		}
 		const figure = selectedImage.closest('figure');
 		const next = (figure ?? selectedImage).nextElementSibling as HTMLElement | null;
 		(figure ?? selectedImage).remove();
@@ -2436,7 +2874,15 @@
 
 	/** Put the caret in the image's description line, creating it if needed. */
 	function focusCaption(img: HTMLImageElement): void {
-		const figure = img.closest('figure');
+		let figure = img.closest('figure');
+		// One of a row of pictures that had no caption is read back as the picture alone in
+		// its cell: it is a figure again when it is given one.
+		const cell = img.parentElement;
+		if (!figure && cell && /^(TD|TH)$/.test(cell.tagName) && pictureInCell(cell) === img) {
+			figure = document.createElement('figure');
+			img.before(figure);
+			figure.appendChild(img);
+		}
 		if (!figure) return;
 		let caption = figure.querySelector('figcaption');
 		if (!caption) {
@@ -3388,6 +3834,7 @@
 					onblock={setBlock}
 					oninsertlink={openLinkModal}
 					oninsertimage={openImageModal}
+					oninserttable={openTableModal}
 					fontSize={currentFontSize}
 					fontSizes={sizeChoices}
 					onfontsize={setFontSize}
@@ -3395,6 +3842,7 @@
 					fonts={fontList}
 					documentFont={fontChoices([fontFamily])[0]?.name ?? DEFAULT_FONT_FAMILY}
 					onfont={setFont}
+					spacing={currentSpacing}
 					copyingFormat={copyFormat !== 'off'}
 					oncopyformat={toggleCopyFormat}
 				/>
@@ -3484,10 +3932,13 @@
 				target={selectedImage}
 				bounds={contentWrapEl}
 				within={editorEl}
-				maxWidth={contentWidth}
+				maxWidth={pictureRoom}
 				onchange={handleImageEdited}
 				onremove={removeSelectedImage}
 				oncaption={focusCaption}
+				place={picturePlace}
+				onmove={moveSelectedImage}
+				onbeside={toggleBeside}
 			/>
 		{/if}
 	</div>
@@ -3527,6 +3978,26 @@
 	{#snippet actions()}
 		<button class="ink-btn-ghost" onclick={() => (linkModalOpen = false)}>Cancel</button>
 		<button class="ink-btn-primary" onclick={applyLink}>Insert</button>
+	{/snippet}
+</Modal>
+
+<!-- Table Modal -->
+<Modal title="Insert Table" open={tableModalOpen} onclose={() => (tableModalOpen = false)}>
+	<div class="ink-table-size">
+		<label>
+			<span>Rows</span>
+			<input type="number" min="1" max={MOST_TABLE_ROWS} step="1" data-autofocus bind:value={tableRows} onkeydown={(e) => onEnter(e, applyTable)} />
+		</label>
+		<label>
+			<span>Columns</span>
+			<input type="number" min="1" max={MOST_TABLE_COLUMNS} step="1" bind:value={tableColumns} onkeydown={(e) => onEnter(e, applyTable)} />
+		</label>
+	</div>
+	<label class="ink-check"><input type="checkbox" bind:checked={tableBorders} /> <span>Borders</span></label>
+	<label class="ink-check"><input type="checkbox" bind:checked={tableHeader} /> <span>First row is a header</span></label>
+	{#snippet actions()}
+		<button class="ink-btn-ghost" onclick={() => (tableModalOpen = false)}>Cancel</button>
+		<button class="ink-btn-primary" onclick={applyTable}>Insert</button>
 	{/snippet}
 </Modal>
 
@@ -3884,8 +4355,30 @@
 	}
 
 	/* ── Figures (image + description) ── */
+	/* A picture has the space of a paragraph, which is what the RTF gives it: none of its own.
+	   The space before and after it is set from the Spacing list, and shows as it is set.
+	   (It had 20px here that no reader of the RTF showed, and a space that was set was lost
+	   in it.) */
 	.ink-content :global(figure) {
-		margin: 20px 0;
+		margin: 0 0 0.2em;
+	}
+
+	/* A cell with no border has none in the RTF. While the document is edited it is drawn with
+	   a faint line, or a table of empty cells could not be seen at all. (Not a cell that holds
+	   a picture: pictures side by side are a row of such cells, and show where they are.) */
+	.ink-content[contenteditable='true'] :global(:is(td, th):not([style*='border']):not(:has(> figure, > img))) {
+		outline: 1px dashed var(--border, #e5e2dc);
+		outline-offset: -1px;
+	}
+
+	/* A picture in a cell starts at the top of it, where the RTF has it. */
+	.ink-content :global(:is(td, th):has(> figure, > img)) {
+		vertical-align: top;
+	}
+
+	.ink-content :global(:is(td, th) > img:only-child) {
+		margin: 0;
+		vertical-align: bottom;
 	}
 
 	.ink-content :global(figure img) {
@@ -3997,6 +4490,45 @@
 		margin: 0 0 12px;
 		font-size: 12px;
 		color: var(--text-muted, #8a7e72);
+	}
+
+	.ink-table-size {
+		display: flex;
+		gap: 16px;
+		margin-bottom: 14px;
+	}
+
+	.ink-table-size label {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		flex: 1;
+		font-size: 13px;
+		color: var(--text-muted, #8a7e72);
+	}
+
+	.ink-table-size input {
+		padding: 9px 12px;
+		border: 1px solid var(--border, #e5e2dc);
+		border-radius: var(--radius-sm, 5px);
+		font: inherit;
+		font-size: 14px;
+		color: var(--text, #2c2520);
+		outline: none;
+	}
+
+	.ink-table-size input:focus {
+		border-color: var(--accent, #d4622b);
+	}
+
+	.ink-check {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin-bottom: 8px;
+		font-size: 14px;
+		color: var(--text, #2c2520);
+		cursor: pointer;
 	}
 
 	.ink-modal-error {

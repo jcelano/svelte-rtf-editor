@@ -1848,3 +1848,247 @@ test.describe('Fonts', () => {
 		expect(((await page.locator(`${content}`).textContent()) ?? '').replace(/\s/g, ' ')).toContain('papyrus arial');
 	});
 });
+
+test.describe('the layout of a report: spacing, tables with borders, pictures side by side', () => {
+	type Layout = Editor & { insertTable(rows: number, columns: number, options?: { borders?: boolean; header?: boolean }): void };
+	const rtf = (page: Page) => page.evaluate(() => window.ed.getRTF());
+	const spacing = 'select.tb-spacing';
+	const tool = (page: Page, title: string) => page.locator(`.ink-img-tools button[title="${title}"]`);
+	/** The document as its blocks: a paragraph's text, a picture's caption, [a|b] for a row of pictures. */
+	const blocks = (page: Page) =>
+		page.evaluate(() =>
+			Array.from(document.querySelector('.ink-content')!.children, (child) => {
+				if (child.tagName === 'FIGURE') return child.querySelector('figcaption')?.textContent || 'figure';
+				if (child.tagName === 'TABLE') return `[${Array.from(child.querySelectorAll('td, th'), (cell) => cell.querySelector('figcaption')?.textContent || cell.textContent).join('|')}]`;
+				return (child.textContent ?? '').trim() || 'empty';
+			})
+		);
+	/** Two pictures, each wider than half the page, one under the other, between two paragraphs. */
+	async function twoPictures(page: Page): Promise<void> {
+		// (A page on which the two do not fit side by side as they are.)
+		await page.setViewportSize({ width: 900, height: 900 });
+		await open(page);
+		await page.evaluate(async () => {
+			const picture = (color: string) => {
+				const canvas = document.createElement('canvas');
+				canvas.width = 520;
+				canvas.height = 300;
+				const g = canvas.getContext('2d')!;
+				g.fillStyle = color;
+				g.fillRect(0, 0, 520, 300);
+				return canvas.toDataURL('image/png');
+			};
+			const figure = (color: string, caption: string) => `<figure><img src="${picture(color)}" alt="" style="width:520px;height:auto"><figcaption>${caption}</figcaption></figure>`;
+			window.ed.setHTML(`<p>Gross description</p>${figure('#b04a5a', 'Figure 1. H&amp;E')}${figure('#4a6ab0', 'Figure 2. Ki-67')}<p>Diagnosis</p>`);
+			await Promise.all(Array.from(document.querySelectorAll('.ink-content img'), (img) => (img as HTMLImageElement).decode()));
+		});
+	}
+	const boxes = (page: Page) =>
+		page.evaluate(() =>
+			Array.from(document.querySelectorAll('.ink-content img'), (img) => {
+				const r = img.getBoundingClientRect();
+				const c = (img.closest('figure')?.querySelector('figcaption') ?? img).getBoundingClientRect();
+				const cell = (img.closest('td') ?? document.querySelector('.ink-content')!).getBoundingClientRect();
+				return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, captionTop: c.top, captionLeft: c.left, cellLeft: cell.left, cellRight: cell.right };
+			})
+		);
+
+	test('the Spacing list sets the line spacing and the space after a paragraph, on the page and in the RTF', async ({ page }) => {
+		await open(page, { content: '<p>Specimen A: skin, left forearm, shave biopsy.</p><p>Specimen B: skin, right forearm.</p>' });
+		const tops = () => page.evaluate(() => Array.from(document.querySelectorAll('.ink-content p'), (p) => p.getBoundingClientRect().top));
+		const before = await tops();
+		await page.click(`${content} p >> nth=0`);
+		await page.selectOption(spacing, 'spaceAfter:12');
+		expect(await html(page)).toBe('<p style="margin-bottom: 12pt;">Specimen A: skin, left forearm, shave biopsy.</p><p>Specimen B: skin, right forearm.</p>');
+		const spaced = await tops();
+		// 12 pt is 16 px, in place of the little space a paragraph has by itself.
+		expect(spaced[1] - before[1]).toBeGreaterThan(8);
+		expect(spaced[1] - before[1]).toBeLessThan(17);
+		await page.selectOption(spacing, 'lineSpacing:2');
+		expect(await page.evaluate(() => (document.querySelector('.ink-content p') as HTMLElement).style.lineHeight)).toBe('2');
+		expect(body(await rtf(page))).toMatch(/^\\pard\\sa240\\sl480\\slmult1 Specimen A/);
+		// The list shows what the paragraph has, and is back at its name.
+		expect(await page.locator(`${spacing} option:checked`).textContent()).toBe('Spacing');
+		expect(await page.locator(`${spacing} option[value="lineSpacing:2"]`).textContent()).toContain('✓');
+		// The typing goes on in the paragraph, and each step is undone by itself.
+		await page.keyboard.press('ControlOrMeta+z');
+		expect(await html(page)).toBe('<p style="margin-bottom: 12pt;">Specimen A: skin, left forearm, shave biopsy.</p><p>Specimen B: skin, right forearm.</p>');
+		// And what is saved is read back the same.
+		const again = await page.evaluate(() => window.lib.rtfToHtml(window.ed.getRTF()));
+		expect(again).toBe('<p style="margin-bottom:12pt">Specimen A: skin, left forearm, shave biopsy.</p>\n<p>Specimen B: skin, right forearm.</p>');
+	});
+
+	test('Insert table puts in a table with borders, to type in; the RTF has the borders and the viewer shows them', async ({ page }) => {
+		await open(page, { content: '<p>Results</p>' });
+		await page.click(`${content} p`);
+		await page.getByRole('button', { name: 'Insert table' }).click();
+		const dialog = page.getByRole('dialog');
+		await expect(dialog.getByLabel('Rows')).toBeFocused();
+		await dialog.getByLabel('Rows').fill('2');
+		await dialog.getByLabel('Columns').fill('2');
+		await dialog.getByLabel('First row is a header').check();
+		await dialog.getByRole('button', { name: 'Insert' }).click();
+		await expect(dialog).toBeHidden();
+		// The caret is in the first cell.
+		await page.keyboard.type('Marker');
+		expect(await page.locator(`${content} th >> nth=0`).textContent()).toBe('Marker');
+		await page.click(`${content} td >> nth=1`);
+		await page.keyboard.type('Negative');
+		expect(await page.locator(`${content} table`).evaluate((table) => Array.from(table.querySelectorAll('th, td'), (cell) => `${cell.tagName}:${cell.textContent}`))).toEqual(['TH:Marker', 'TH:', 'TD:', 'TD:Negative']);
+		const border = (selector: string) =>
+			page.locator(selector).evaluate((cell) => {
+				const s = getComputedStyle(cell);
+				return [s.borderTopStyle, s.borderLeftStyle, s.borderBottomStyle, s.borderRightStyle, s.borderTopWidth].join(' ');
+			});
+		expect(await border(`${content} td >> nth=1`)).toBe('solid solid solid solid 1px');
+		const written = await rtf(page);
+		expect(written.match(/\\clbrdrt\\brdrs\\brdrw15\\clbrdrl\\brdrs\\brdrw15\\clbrdrb\\brdrs\\brdrw15\\clbrdrr\\brdrs\\brdrw15\\cellx/g)).toHaveLength(4);
+		await page.evaluate((value) => window.setViewer(value), written);
+		await expect(page.locator('#viewer th')).toHaveCount(2);
+		expect(await border('#viewer td >> nth=1')).toBe('solid solid solid solid 1px');
+		expect(await page.locator('#viewer td >> nth=1').textContent()).toBe('Negative');
+	});
+
+	test('a table with no borders has none in the RTF, and is drawn with a faint line only while it is edited', async ({ page }) => {
+		await open(page, { content: '<p>Results</p>' });
+		await page.click(`${content} p`);
+		await page.getByRole('button', { name: 'Insert table' }).click();
+		const dialog = page.getByRole('dialog');
+		await dialog.getByLabel('Borders').uncheck();
+		await dialog.getByLabel('Rows').press('Enter');
+		await expect(page.locator(`${content} td`)).toHaveCount(9);
+		const outline = (selector: string) => page.locator(selector).evaluate((cell) => getComputedStyle(cell).outlineStyle);
+		expect(await outline(`${content} td >> nth=0`)).toBe('dashed');
+		const written = await rtf(page);
+		expect(written).not.toContain('\\clbrdr');
+		expect(await html(page)).not.toContain('outline');
+		await page.evaluate((value) => window.setViewer(value), written);
+		await expect(page.locator('#viewer td')).toHaveCount(9);
+		expect(await outline('#viewer td >> nth=0')).toBe('none');
+	});
+
+	test('a picture is moved down and up with its caption', async ({ page }) => {
+		await twoPictures(page);
+		await page.click(`${content} img >> nth=0`);
+		await tool(page, 'Move down').click();
+		expect(await blocks(page)).toEqual(['Gross description', 'Figure 2. Ki-67', 'Figure 1. H&E', 'Diagnosis']);
+		// The frame is still around the picture that was moved.
+		const frame = await page.locator('.ink-img-frame').boundingBox();
+		const moved = await page.locator(`${content} img >> nth=1`).boundingBox();
+		expect(Math.abs(frame!.y - moved!.y)).toBeLessThan(3);
+		await tool(page, 'Move up').click();
+		await tool(page, 'Move up').click();
+		expect(await blocks(page)).toEqual(['Figure 1. H&E', 'Gross description', 'Figure 2. Ki-67', 'Diagnosis']);
+		await expect(tool(page, 'Move up')).toBeDisabled();
+	});
+
+	test('two pictures are put side by side, each with its own caption under it, and are still so when the RTF is read', async ({ page }) => {
+		await twoPictures(page);
+		await page.click(`${content} img >> nth=1`);
+		await tool(page, 'Place beside the picture above').click();
+		expect(await blocks(page)).toEqual(['Gross description', '[Figure 1. H&E|Figure 2. Ki-67]', 'Diagnosis']);
+		const sideBySide = async () => {
+			const [a, b] = await boxes(page);
+			// On one line, the second to the right of the first, each inside its own half.
+			expect(Math.abs(a.top - b.top)).toBeLessThan(3);
+			expect(b.left).toBeGreaterThanOrEqual(a.right);
+			for (const box of [a, b]) {
+				expect(box.left).toBeGreaterThanOrEqual(box.cellLeft);
+				expect(box.right).toBeLessThanOrEqual(box.cellRight + 0.5);
+				// Its caption is under it, in its own cell.
+				expect(box.captionTop).toBeGreaterThanOrEqual(box.bottom);
+				expect(box.captionLeft).toBeGreaterThanOrEqual(box.cellLeft);
+				expect(box.captionLeft).toBeLessThan(box.cellRight);
+			}
+			return [a, b];
+		};
+		const [a] = await sideBySide();
+		// Each was wider than half the page, and was made to fit.
+		expect(a.width).toBeLessThan(520);
+		// The tools of the picture at the left edge are all on the page.
+		await page.click(`${content} img >> nth=0`);
+		const tools = await page.locator('.ink-img-tools').boundingBox();
+		const wrap = await page.locator('.ink-content-wrap').boundingBox();
+		expect(tools!.x).toBeGreaterThanOrEqual(wrap!.x);
+		expect(tools!.x + tools!.width).toBeLessThanOrEqual(wrap!.x + wrap!.width + 0.5);
+		// A caption is typed where it is.
+		await page.click(`${content} figcaption >> nth=1`);
+		await page.keyboard.press(process.platform === 'darwin' ? 'Meta+ArrowRight' : 'End');
+		await page.keyboard.type(', 20x');
+		expect(await page.locator(`${content} figcaption >> nth=1`).textContent()).toBe('Figure 2. Ki-67, 20x');
+		// Saved and opened again.
+		const written = await rtf(page);
+		expect(written.match(/\{\\\*\\inkcap\}/g)).toHaveLength(2);
+		await page.evaluate(async (value) => {
+			window.ed.setHTML(window.lib.rtfToHtml(value));
+			await Promise.all(Array.from(document.querySelectorAll('.ink-content img'), (img) => (img as HTMLImageElement).decode()));
+		}, written);
+		expect(await blocks(page)).toEqual(['Gross description', '[Figure 1. H&E|Figure 2. Ki-67, 20x]', 'Diagnosis']);
+		await sideBySide();
+		expect(await rtf(page)).toBe(written);
+		// And the viewer shows them the same way.
+		await page.evaluate((value) => window.setViewer(value), written);
+		await expect(page.locator('#viewer td figure')).toHaveCount(2);
+	});
+
+	test('a picture that is beside another goes back on a line of its own', async ({ page }) => {
+		await twoPictures(page);
+		await page.click(`${content} img >> nth=1`);
+		await tool(page, 'Place beside the picture above').click();
+		await page.click(`${content} img >> nth=0`);
+		await tool(page, 'Place on its own line').click();
+		expect(await blocks(page)).toEqual(['Gross description', 'Figure 2. Ki-67', 'Figure 1. H&E', 'Diagnosis']);
+		await expect(page.locator(`${content} table`)).toHaveCount(0);
+		const [first, second] = await boxes(page);
+		expect(second.top).toBeGreaterThan(first.bottom);
+	});
+
+	test('the space between two pictures, one under the other, is set from the Spacing list', async ({ page }) => {
+		await twoPictures(page);
+		const gap = async () => {
+			const [a, b] = await boxes(page);
+			return b.top - a.bottom;
+		};
+		const before = await gap();
+		await page.click(`${content} img >> nth=1`);
+		await page.selectOption(spacing, 'spaceBefore:12');
+		expect(await page.locator(`${content} figure >> nth=1`).getAttribute('style')).toBe('margin-top: 12pt;');
+		// 12 pt is 16 px, in place of the little space a picture has by itself.
+		expect((await gap()) - before).toBeGreaterThan(10);
+		expect((await gap()) - before).toBeLessThan(17);
+		// And none again.
+		await page.selectOption(spacing, 'spaceBefore:0');
+		expect(await gap()).toBe(before);
+		await page.selectOption(spacing, 'spaceBefore:12');
+		expect(await rtf(page)).toMatch(/\\pard\\ql\\sb240 \{\\pict/);
+	});
+
+	test('a table that comes with borders, as Word, Excel and Google Docs paste one, has them in the RTF', async ({ page }) => {
+		await open(page);
+		await page.evaluate(() =>
+			window.ed.setHTML(
+				'<table style="border-collapse:collapse"><tbody>' +
+					'<tr><td style="border:solid windowtext 1.0pt;padding:0in 5.4pt">Marker</td><td style="border:solid windowtext 1.0pt;border-left:none">Result</td></tr>' +
+					'<tr><td style="border: 0.5pt solid windowtext;">ER</td><td style="border-width: 1pt; border-style: solid; border-color: rgb(192, 0, 0);">Positive</td></tr>' +
+					'</tbody></table>'
+			)
+		);
+		const cells = (await rtf(page)).match(/(?:\\clbrdr[tlbr]\\brdr[a-z]+\\brdrw\d+(?:\\brdrcf\d+)?)*\\cellx/g)!.map((cell) => cell.replace(/\\cellx$/, ''));
+		const all = (width: number, color = '') => ['t', 'l', 'b', 'r'].map((side) => `\\clbrdr${side}\\brdrs\\brdrw${width}${color}`).join('');
+		expect(cells).toEqual([all(20), all(20).replace('\\clbrdrl\\brdrs\\brdrw20', ''), all(10), all(20, '\\brdrcf2')]);
+		// And they are there when the RTF is read.
+		await page.evaluate(() => window.setViewer(window.ed.getRTF()));
+		await expect(page.locator('#viewer td')).toHaveCount(4);
+		expect(await page.locator('#viewer td >> nth=3').evaluate((cell) => [getComputedStyle(cell).borderTopStyle, getComputedStyle(cell).borderTopColor])).toEqual(['solid', 'rgb(192, 0, 0)']);
+		expect(await page.locator('#viewer td >> nth=1').evaluate((cell) => [getComputedStyle(cell).borderLeftStyle, getComputedStyle(cell).borderRightStyle])).toEqual(['none', 'solid']);
+	});
+
+	test('insertTable is there for a page that has its own button', async ({ page }) => {
+		await open(page, { content: '<p>Results</p>' });
+		await page.click(`${content} p`);
+		await page.evaluate(() => (window.ed as Layout).insertTable(1, 3, { borders: false }));
+		await expect(page.locator(`${content} td`)).toHaveCount(3);
+		await page.keyboard.type('a');
+		expect(await page.locator(`${content} td >> nth=0`).textContent()).toBe('a');
+	});
+});

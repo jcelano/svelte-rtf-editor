@@ -84,6 +84,16 @@ interface RenderState {
 	leftIndent: number;
 	rightIndent: number;
 	firstLineIndent: number;
+	/**
+	 * Paragraph spacing, which holds and ends as the indents do: \sb and \sa in twips (the space
+	 * before and after), and \sl with \slmult for the lines. \sl counts in 240ths of a line
+	 * where \slmult is 1; else it is a height in twips, exactly that where it is below zero
+	 * and at least that above.
+	 */
+	spaceBefore: number;
+	spaceAfter: number;
+	lineSpacing: number;
+	lineMultiple: boolean;
 }
 
 /**
@@ -140,6 +150,11 @@ interface ParagraphBlock {
 	left: number;
 	right: number;
 	first: number;
+	/** \sb, \sa and \sl (with whether \slmult1 makes it a count of lines). */
+	before: number;
+	after: number;
+	line: number;
+	lineMultiple: boolean;
 	/** Tagged by {\*\inkcap}: the description of the figure above it. */
 	caption: boolean;
 	marker: ListMarker | null;
@@ -168,6 +183,38 @@ interface CellDef {
 	hmrg: boolean;
 	/** \clcbpat: the shading of the cell as CSS, or ''. It is not shown (see readsOnWhite). */
 	shade: string;
+	/** The cell's borders (\clbrdrt, \clbrdrl, \clbrdrb, \clbrdrr with a line, a width and a color). */
+	borders: Partial<Record<BorderEdge, BorderRead>>;
+	/** The edge a \clbrdrX just named, until a line (\brdrs…) draws it or \brdrnone clears it. */
+	edge: BorderEdge | null;
+	/** The edge whose line was read last, which a \brdrw or \brdrcf after it belongs to. */
+	drawn: BorderEdge | null;
+}
+
+type BorderEdge = 't' | 'l' | 'b' | 'r';
+interface BorderRead {
+	/** The line as CSS names it. */
+	line: string;
+	twips: number;
+	/** Its color as CSS, or '' for the text's own. */
+	color: string;
+}
+/** The lines RTF names that CSS has too; any other is a plain line. */
+const BORDER_LINE_CSS: ReadonlyMap<string, string> = new Map(
+	Object.entries({ brdrdb: 'double', brdrdot: 'dotted', brdrdash: 'dashed', brdrdashsm: 'dashed', brdrdashd: 'dashed', brdrdashdd: 'dashed' })
+);
+
+/**
+ * A cell's borders as CSS, which the writer reads back as the same: "border:1px solid;" where
+ * all four are one, else each side that has one. A width is given in px, 15 twips each, as
+ * the writer counts them.
+ */
+function bordersStyle(borders: Partial<Record<BorderEdge, BorderRead>>): string {
+	const css = (b: BorderRead | undefined) =>
+		b ? `${Math.round((Math.max(1, Math.min(b.twips, 75)) / 15) * 100) / 100}px ${b.line}${b.color ? ` ${b.color}` : ''}` : '';
+	const sides = [css(borders.t), css(borders.r), css(borders.b), css(borders.l)];
+	if (sides[0] && sides.every((side) => side === sides[0])) return `border:${sides[0]};`;
+	return ['top', 'right', 'bottom', 'left'].map((name, i) => (sides[i] ? `border-${name}:${sides[i]};` : '')).join('');
 }
 
 interface RowCell {
@@ -175,6 +222,8 @@ interface RowCell {
 	/** The same with the colors left out that cannot be read on white, where it has any: what a shaded cell shows. */
 	onWhite?: string;
 	align: string;
+	/** Marked a header cell in what it holds ({\*\inkth}), as the writer marks one that has borders. */
+	header?: boolean;
 }
 
 interface TableRow {
@@ -914,6 +963,42 @@ function resetIndents(state: RenderState): void {
 	state.leftIndent = 0;
 	state.rightIndent = 0;
 	state.firstLineIndent = 0;
+	state.spaceBefore = 0;
+	state.spaceAfter = 0;
+	state.lineSpacing = 0;
+	state.lineMultiple = false;
+}
+
+/** The most space before or after a paragraph that is read: a page's height. More is a mistake in the file. */
+const MOST_SPACE_TWIPS = 15840;
+
+/**
+ * A paragraph's spacing as CSS, which the writer reads back as the same \sb, \sa and \sl:
+ * "margin-top:6pt;margin-bottom:6pt;line-height:1.5". A height the lines have at least (\sl
+ * above zero with no \slmult1) is not a thing CSS has, and is left to the screen.
+ */
+function spacingStyle(block: ParagraphBlock, part: 'all' | 'before' | 'after' = 'all'): string {
+	const parts: string[] = [];
+	const space = (twips: number) => twipsToPt(Math.min(twips, MOST_SPACE_TWIPS));
+	if (part !== 'after' && block.before > 0) parts.push(`margin-top:${space(block.before)}`);
+	if (part !== 'before' && block.after > 0) parts.push(`margin-bottom:${space(block.after)}`);
+	if (part === 'all') {
+		if (block.lineMultiple && block.line >= 120 && block.line <= 2400) parts.push(`line-height:${Math.round((block.line / 240) * 100) / 100}`);
+		else if (!block.lineMultiple && block.line < 0 && block.line >= -MOST_SPACE_TWIPS) parts.push(`line-height:${twipsToPt(-block.line)}`);
+	}
+	return parts.join(';');
+}
+
+/** A style added to the element an HTML string opens with: `<figure>` or `<figure style="…">`. */
+function withStyle(html: string, style: string): string {
+	if (!style) return html;
+	const open = html.match(/^<[a-z0-9]+( style="([^"]*)")?/);
+	if (!open) return html;
+	const tag = open[0].slice(0, open[0].length - (open[1]?.length ?? 0));
+	// (What it sets replaces what the element had of the same name.)
+	const named = new Set(style.split(';').map((declaration) => declaration.split(':')[0]));
+	const kept = (open[2] ?? '').split(';').filter((declaration) => declaration && !named.has(declaration.split(':')[0]));
+	return `${tag} style="${[...kept, style].join(';')}"${html.slice(open[0].length)}`;
 }
 
 /**
@@ -1080,6 +1165,10 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 	let cellBorders = { b: false, other: false, bare: false };
 	/** The side whose border type was read last, which a \brdrw or \brdrcf after it belongs to. */
 	let borderSide: 'b' | 'other' | null = null;
+	/** {\*\inkth} was read in the cell being read: it is a header cell. */
+	let cellMarkedHeader = false;
+	/** How much of the cell had been read when {\*\inkcap} marked what follows as a caption. */
+	let captionAt: number | null = null;
 	let inTableCell = false;
 	/** \par seen in a table cell since its last text: line breaks owed if more text follows. */
 	let cellBreaks = 0;
@@ -1089,7 +1178,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 	let nestTabPending = false;
 
 	function newCellDef(): CellDef {
-		return { right: 0, header: false, vmgf: false, vmrg: false, hmgf: false, hmrg: false, shade: '' };
+		return { right: 0, header: false, vmgf: false, vmrg: false, hmgf: false, hmrg: false, shade: '', borders: {}, edge: null, drawn: null };
 	}
 
 	// The document is the first group. A byte-order mark or blank lines before it (a file saved
@@ -1175,6 +1264,10 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			leftIndent: 0,
 			rightIndent: 0,
 			firstLineIndent: 0,
+			spaceBefore: 0,
+			spaceAfter: 0,
+			lineSpacing: 0,
+			lineMultiple: false,
 		};
 	}
 
@@ -1318,6 +1411,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 	/** An empty paragraph to read into. */
 	function newRuns(): void {
 		runs = [];
+		captionAt = null;
 		onlyText = true;
 		contentAlign = 'left';
 		marker = null;
@@ -1438,7 +1532,22 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		appendText(text.slice(from), state);
 	}
 
-	/** The text of the line being read, back to the last line break, if text is all it holds. */
+	/**
+	 * The cell being read as the figure it is, where it holds one picture and then the caption
+	 * the writer marked ({\*\inkcap}): pictures side by side are a row of such cells, each
+	 * picture with its own caption. Null for any other cell, which is read as its lines.
+	 */
+	function cellFigure(): string | null {
+		if (captionAt == null || captionAt < 1) return null;
+		const before = runs.slice(0, captionAt).filter((run) => !(run.type === 'text' && ONLY_SPACES.test(run.text)));
+		if (before.length !== 1 || before[0].type !== 'html' || before[0].kind !== 'img') return null;
+		let from = captionAt;
+		while (from < runs.length && runs[from].type === 'html' && (runs[from] as { kind: string }).kind === 'br') from++;
+		const caption = stripWrappingEm(trimSpaces(renderRuns(runs.slice(from))));
+		if (!caption) return null;
+		return `<figure>${trimSpaces(renderRuns(before))}<figcaption>${caption}</figcaption></figure>`;
+	}
+
 	/** The cell being read, with the colors left out that cannot be read on white; undefined where it has none. */
 	function cellOnWhite(): string | undefined {
 		if (!runs.some((run) => run.fmt.color && !run.fmt.background && !readsOnWhite(run.fmt.color))) return undefined;
@@ -1517,6 +1626,8 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		interface Placed {
 			html: string;
 			align: string;
+			/** A header cell, by either mark: the bare line under it, or {\*\inkth} in it. */
+			header: boolean;
 			def: CellDef;
 			left: number;
 			right: number;
@@ -1540,7 +1651,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 					if (cellHtml) last.html += (last.html ? ' ' : '') + cellHtml;
 				} else {
 					placed.push({
-						html: cellHtml, align: cell.align, def,
+						html: cellHtml, align: cell.align, header: def.header || cell.header === true, def,
 						left: prevRight, right: Math.max(def.right, prevRight),
 						start: 0, end: 0, rowspan: 1, merged: false
 					});
@@ -1611,12 +1722,15 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			html += '<tr>';
 			for (const cell of row) {
 				if (cell.merged) continue;
-				const tag = cell.def.header ? 'th' : 'td';
+				const tag = cell.header ? 'th' : 'td';
 				const pct = (shareAt(cell.right) - shareAt(cell.left)).toFixed(2).replace(/0$/, '');
 				const alignStyle = cell.align !== 'left' ? `;text-align:${cell.align}` : '';
+				// (A header cell says how it is aligned, left too: a browser centers one that does not.)
 				const style = cell.def.header
 					? `border-bottom:1px solid;padding:2px 6px;text-align:${cell.align};width:${pct}%`
-					: `padding:2px 6px;width:${pct}%${alignStyle}`;
+					: cell.header
+						? `${bordersStyle(cell.def.borders)}padding:2px 6px;text-align:${cell.align};width:${pct}%`
+						: `${bordersStyle(cell.def.borders)}padding:2px 6px;width:${pct}%${alignStyle}`;
 				const colspan = cell.end > cell.start ? ` colspan="${cell.end - cell.start + 1}"` : '';
 				const rowspan = cell.rowspan > 1 ? ` rowspan="${cell.rowspan}"` : '';
 				html += `<${tag}${colspan}${rowspan} style="${style}">${cell.html}</${tag}>`;
@@ -1645,6 +1759,10 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 				left: state.leftIndent,
 				right: state.rightIndent,
 				first: state.firstLineIndent,
+				before: state.spaceBefore,
+				after: state.spaceAfter,
+				line: state.lineSpacing,
+				lineMultiple: state.lineMultiple,
 				caption: paragraphIsCaption,
 				marker,
 				inTable: inTableCell
@@ -1723,14 +1841,14 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 				const saved = {
 					blocks, runs, onlyText, marker, paragraphHasListMarker, paragraphIsCaption, paragraphAsides,
 					tableAsides, tableRows, currentRowCells, currentRowDefs, lastRowDefs, pendingDef, pendingSide,
-					cellBorders, borderSide, inTableCell, cellBreaks, contentAlign, lastRow, nestTabPending,
+					cellBorders, borderSide, cellMarkedHeader, captionAt, inTableCell, cellBreaks, contentAlign, lastRow, nestTabPending,
 					pendingHighSurrogate, pendingUnicodeSkip, noteNumber, unshown, stateBase
 				};
 				restore = () => {
 					({
 						blocks, runs, onlyText, marker, paragraphHasListMarker, paragraphIsCaption, paragraphAsides,
 						tableAsides, tableRows, currentRowCells, currentRowDefs, lastRowDefs, pendingDef, pendingSide,
-						cellBorders, borderSide, inTableCell, cellBreaks, contentAlign, lastRow, nestTabPending,
+						cellBorders, borderSide, cellMarkedHeader, captionAt, inTableCell, cellBreaks, contentAlign, lastRow, nestTabPending,
 						pendingHighSurrogate, pendingUnicodeSkip, noteNumber, unshown, stateBase
 					} = saved);
 				};
@@ -1748,6 +1866,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 				pendingSide = null;
 				cellBorders = { b: false, other: false, bare: false };
 				borderSide = null;
+				cellMarkedHeader = false;
 				inTableCell = false;
 				cellBreaks = 0;
 				lastRow = false;
@@ -1879,6 +1998,10 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 				} else if (dest?.word === 'inkcap') {
 					// Marks the paragraph that follows as a picture caption.
 					paragraphIsCaption = true;
+					captionAt = runs.length;
+				} else if (dest?.word === 'inkth') {
+					// Marks the cell it is in as a header cell.
+					cellMarkedHeader = true;
 				} else if (dest?.word === 'nesttableprops') {
 					// Word ends each row of a table inside a cell with this group, which holds
 					// the row's definition and its \nestrow.
@@ -1986,6 +2109,18 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 				case 'fi':
 					state.firstLineIndent = p ?? 0;
 					break;
+				case 'sb':
+					state.spaceBefore = Math.max(0, p ?? 0);
+					break;
+				case 'sa':
+					state.spaceAfter = Math.max(0, p ?? 0);
+					break;
+				case 'sl':
+					state.lineSpacing = p ?? 0;
+					break;
+				case 'slmult':
+					state.lineMultiple = p === 1;
+					break;
 				case 'par':
 				case 'sect':
 					// \sect ends a section, and with it the paragraph: "A\sect B" is two lines.
@@ -2009,21 +2144,29 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 				case 'trleft':
 				case 'trhdr':
 					pendingSide = null;
+					pendingDef.edge = null;
 					break; // table formatting, ignored
 				case 'clbrdrr':
 				case 'clbrdrl':
 				case 'clbrdrt':
 					pendingSide = 'other';
 					borderSide = null;
+					pendingDef.edge = w === 'clbrdrr' ? 'r' : w === 'clbrdrl' ? 'l' : 't';
+					pendingDef.drawn = null;
 					break;
 				case 'clbrdrb':
 					pendingSide = 'b';
 					borderSide = null;
+					pendingDef.edge = 'b';
+					pendingDef.drawn = null;
 					break;
 				case 'brdrnone':
 				case 'brdrnil':
+				case 'brdrtbl':
 					pendingSide = null;
 					borderSide = null;
+					pendingDef.edge = null;
+					pendingDef.drawn = null;
 					break;
 				case 'brdrw':
 				case 'brdrcf':
@@ -2031,6 +2174,17 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 					// the rule that closes a table), which Word and TextEdit never write
 					// without one. The writer's header mark is the bare \clbrdrb\brdrs.
 					if (borderSide === 'b') cellBorders.bare = false;
+					if (pendingDef.drawn && p != null) {
+						const border = pendingDef.borders[pendingDef.drawn]!;
+						if (w === 'brdrw') {
+							// (No width is no line: Word writes \brdrw0 for a border that is off.)
+							if (p > 0) border.twips = p;
+							else delete pendingDef.borders[pendingDef.drawn];
+						} else {
+							const color = p > 0 && p < colorTable.length ? colorTable[p] : '';
+							border.color = color === 'rgb(0,0,0)' ? '' : color;
+						}
+					}
 					break;
 				// Every border style RTF names: any of them makes the side a border.
 				case 'brdrs':
@@ -2066,6 +2220,11 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 					}
 					borderSide = pendingSide;
 					pendingSide = null;
+					if (pendingDef.edge) {
+						pendingDef.borders[pendingDef.edge] = { line: BORDER_LINE_CSS.get(w) ?? 'solid', twips: 15, color: '' };
+						pendingDef.drawn = pendingDef.edge;
+						pendingDef.edge = null;
+					}
 					break;
 				case 'clvmgf':
 					pendingDef.vmgf = true;
@@ -2098,14 +2257,19 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 						pendingHighSurrogate = 0;
 						pushText('\ufffd', state);
 					}
+					// (A caption in a cell is the cell's; it is not the paragraph's after the table.)
+					paragraphIsCaption = false;
+					const figure = cellFigure();
 					currentRowCells.push({
-						html: trimSpaces(renderRuns(runs)),
-						onWhite: cellOnWhite(),
+						html: figure ?? trimSpaces(renderRuns(runs)),
+						onWhite: figure ? undefined : cellOnWhite(),
 						// The alignment of the cell's last paragraph, also where that paragraph
 						// was ended inside a group ({\pard\intbl\qr 1.0\par}\cell, as this writer
 						// wrote cells up to 1.9.0).
-						align: alignHere(state)
+						align: alignHere(state),
+						header: cellMarkedHeader
 					});
+					cellMarkedHeader = false;
 					newRuns();
 					// The paragraph mark that ends a cell's last paragraph adds no line.
 					cellBreaks = 0;
@@ -2473,8 +2637,8 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		}
 
 		const align = block.align;
-		// The paragraph's style attribute: its alignment, then its indents.
-		const blockStyle = [align !== 'left' ? `text-align:${align}` : '', block.inTable ? '' : indentStyle(block)]
+		// The paragraph's style attribute: its alignment, then its indents and its spacing.
+		const blockStyle = [align !== 'left' ? `text-align:${align}` : '', block.inTable ? '' : indentStyle(block), block.inTable ? '' : spacingStyle(block)]
 			.filter(Boolean)
 			.join(';');
 		const styleAttr = blockStyle ? ` style="${blockStyle}"` : '';
@@ -2510,7 +2674,8 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 				// The caption is given by a function: as a replacement string, a "$&" or a "$`"
 				// in the caption's own text would be read as the match or as the figure before it.
 				const caption = `<figcaption>${stripWrappingEm(trimmed)}</figcaption></figure>`;
-				rendered[last] = rendered[last].replace('</figure>', () => caption);
+				// (The space after a picture is written after its caption.)
+				rendered[last] = withStyle(rendered[last].replace('</figure>', () => caption), block.inTable ? '' : spacingStyle(block, 'after'));
 				continue;
 			}
 		}
@@ -2518,7 +2683,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		// A paragraph holding nothing but pictures becomes a figure, so it can carry
 		// a caption and be aligned/resized as a unit in the editor.
 		if (IMAGE_ONLY_PARAGRAPH.test(trimmed)) {
-			const figureStyle = [align !== 'left' ? `text-align:${align}` : '', block.inTable ? '' : figureIndentStyle(block)]
+			const figureStyle = [align !== 'left' ? `text-align:${align}` : '', block.inTable ? '' : figureIndentStyle(block), block.inTable ? '' : spacingStyle(block, 'before'), block.inTable ? '' : spacingStyle(block, 'after')]
 				.filter(Boolean)
 				.join(';');
 			rendered.push(`<figure${figureStyle ? ` style="${figureStyle}"` : ''}>${trimmed}</figure>`);

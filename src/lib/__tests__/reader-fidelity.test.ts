@@ -539,12 +539,15 @@ describe('a table with many columns reads in time', () => {
 });
 
 describe('deep nesting around many rows reads in time', () => {
-	it('100,000 nested groups around 50,000 rows read in well under two seconds', () => {
+	it('100,000 nested groups around 50,000 rows read in a second or two, not in minutes', () => {
+		// (A second where this is run by hand, and up to 2.2 s on the machines CI runs on, where a
+		// limit of two seconds failed a release that changed no code. The limit is for the fault,
+		// which copies what is open for every row: far from both.)
 		const depth = 100000;
 		const rtf = `{\\rtf1\\ansi ${'{'.repeat(depth)}\\trowd\\cellx1000 ${'\\intbl x\\cell\\row '.repeat(50000)}${'}'.repeat(depth)}}`;
 		const t0 = performance.now();
 		rtfToHtml(rtf);
-		expect(performance.now() - t0).toBeLessThan(2000);
+		expect(performance.now() - t0).toBeLessThan(8000);
 	});
 });
 

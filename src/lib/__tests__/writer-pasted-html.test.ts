@@ -107,7 +107,8 @@ describe('formatting set by a style (issue 21, items 3 and 4)', () => {
 			'<p dir="ltr" style="line-height:1.38;"><span style="font-size:12pt;font-weight:400;font-style:normal;text-decoration:none;vertical-align:baseline;">Margins are </span>' +
 			'<span style="font-size:12pt;font-weight:700;font-style:normal;text-decoration:none;vertical-align:baseline;">negative</span>' +
 			'<span style="font-size:12pt;font-weight:400;font-style:italic;text-decoration:underline;vertical-align:baseline;"> (see note)</span></p></b>';
-		expect(back(docs)).toBe('<p>Margins are <strong>negative</strong><u><em> (see note)</em></u></p>');
+		// (And its line spacing, which is written and read since 1.14.0: the screen shows it.)
+		expect(back(docs)).toBe('<p style="line-height:1.38">Margins are <strong>negative</strong><u><em> (see note)</em></u></p>');
 	});
 });
 

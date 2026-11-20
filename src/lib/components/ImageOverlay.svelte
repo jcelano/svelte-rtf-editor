@@ -7,9 +7,19 @@
 	 * `bounds`, which must be a positioned ancestor of the editing surface.
 	 *
 	 * Provides drag-to-resize corner handles plus a small toolbar for
-	 * placement (left / centre / right), width presets, caption editing and
-	 * deletion.
+	 * placement (left / centre / right), width presets, moving the picture up
+	 * or down the document, putting it beside the picture above it (or back on
+	 * a line of its own), caption editing and deletion.
 	 */
+
+	/** Where the selected picture can go from where it is. */
+	export interface PicturePlace {
+		/** There is something above it to move over, and something below. */
+		up: boolean;
+		down: boolean;
+		/** 'join': it can go beside the picture above it. 'leave': it is beside another, and can go on a line of its own. */
+		beside: 'join' | 'leave' | null;
+	}
 
 	interface Props {
 		/** Image currently selected in the editor, or null when nothing is selected. */
@@ -23,9 +33,15 @@
 		onchange?: () => void;
 		onremove?: () => void;
 		oncaption?: (img: HTMLImageElement) => void;
+		/** Where the picture can go; without it the frame has no buttons for moving it. */
+		place?: () => PicturePlace;
+		/** Move the picture over the block above it (-1) or below it (1). */
+		onmove?: (direction: -1 | 1) => void;
+		/** Put the picture beside the one above it, or back on a line of its own. */
+		onbeside?: () => void;
 	}
 
-	let { target = null, bounds = null, within = null, maxWidth, onchange, onremove, oncaption }: Props = $props();
+	let { target = null, bounds = null, within = null, maxWidth, onchange, onremove, oncaption, place, onmove, onbeside }: Props = $props();
 
 	const MIN_WIDTH = 40;
 	const CORNERS = ['nw', 'ne', 'sw', 'se'] as const;
@@ -34,6 +50,27 @@
 	let visible = $state(false);
 	let dragging = $state(false);
 	let sizeLabel = $state('');
+	/** Where the picture can go: read again whenever the frame is placed again, as a move changes it. */
+	const where = $derived.by(() => (frame && target && place ? place() : null));
+	let toolsEl: HTMLElement | null = $state(null);
+	/** How far the tools are moved off the middle of the picture, to stay inside `bounds`. */
+	let toolsShift = $state(0);
+
+	// The tools sit over the middle of the picture, and are wider than a small one: over a
+	// picture at the edge of the page (the left one of two side by side) they would hang out
+	// over that edge, half of them out of reach.
+	$effect(() => {
+		const width = toolsEl?.offsetWidth ?? 0;
+		const room = bounds?.clientWidth ?? 0;
+		if (!visible || !width || !room) {
+			toolsShift = 0;
+			return;
+		}
+		const middle = frame.left + frame.width / 2;
+		const least = 4 + width / 2;
+		const most = room - 4 - width / 2;
+		toolsShift = most < least ? room / 2 - middle : Math.round(Math.min(Math.max(middle, least), most) - middle);
+	});
 
 	/** Recompute the frame position — call after anything that reflows content. */
 	export function reposition(): void {
@@ -113,20 +150,37 @@
 		handle.addEventListener('pointercancel', onUp);
 	}
 
+	/**
+	 * What says where the picture is aligned: its figure, or the block it is in. A picture
+	 * alone in a table cell (one of two side by side) is aligned by the cell, which is where
+	 * the RTF has it and where it is read back.
+	 */
+	function alignBlock(): HTMLElement | null {
+		if (!target) return null;
+		const figure = target.closest('figure');
+		const cell = (figure ?? target).parentElement;
+		if (cell && /^(TD|TH)$/.test(cell.tagName) && cell.children.length === 1) return cell;
+		return figure ?? target.parentElement;
+	}
+
 	function align(value: 'left' | 'center' | 'right'): void {
-		if (!target) return;
-		const block = target.closest('figure') ?? target.parentElement;
-		if (!block) return;
-		if (value === 'left') block.removeAttribute('style');
-		else (block as HTMLElement).style.textAlign = value;
+		const block = alignBlock();
+		if (!block || !target) return;
+		const figure = target.closest('figure');
+		if (figure && figure !== block) {
+			figure.style.textAlign = '';
+			if (!figure.getAttribute('style')) figure.removeAttribute('style');
+		}
+		// (A header cell says so when it is left: a browser centers one that does not. Only the
+		// alignment is changed: a picture's indent and the space around it stay.)
+		block.style.textAlign = value === 'left' && block.tagName !== 'TH' ? '' : value;
+		if (!block.getAttribute('style')) block.removeAttribute('style');
 		reposition();
 		onchange?.();
 	}
 
-	function currentAlign(): string {
-		const block = target?.closest('figure') ?? target?.parentElement;
-		return (block as HTMLElement | null)?.style?.textAlign || 'left';
-	}
+	/** How the picture is aligned: read again whenever the frame is placed again, as a button here changes it. */
+	const aligned = $derived.by(() => (frame && target ? alignBlock()?.style?.textAlign || 'left' : 'left'));
 
 	function scaleTo(percent: number): void {
 		const max = maxWidth?.() ?? 0;
@@ -144,11 +198,11 @@
 		class:dragging
 		style="left:{frame.left}px;top:{frame.top}px;width:{frame.width}px;height:{frame.height}px"
 	>
-		<div class="ink-img-tools">
+		<div class="ink-img-tools" bind:this={toolsEl} style={toolsShift ? `transform:translateX(calc(-50% + ${toolsShift}px))` : undefined}>
 			<button
 				type="button"
 				title="Align left"
-				class:active={currentAlign() === 'left'}
+				class:active={aligned === 'left'}
 				onclick={() => align('left')}
 			>
 				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="18" y2="18"/></svg>
@@ -156,7 +210,7 @@
 			<button
 				type="button"
 				title="Align center"
-				class:active={currentAlign() === 'center'}
+				class:active={aligned === 'center'}
 				onclick={() => align('center')}
 			>
 				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="6" y1="12" x2="18" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>
@@ -164,7 +218,7 @@
 			<button
 				type="button"
 				title="Align right"
-				class:active={currentAlign() === 'right'}
+				class:active={aligned === 'right'}
 				onclick={() => align('right')}
 			>
 				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="9" y1="12" x2="21" y2="12"/><line x1="6" y1="18" x2="21" y2="18"/></svg>
@@ -177,6 +231,26 @@
 			<button type="button" title="Full width" onclick={() => scaleTo(100)}>100%</button>
 
 			<span class="ink-img-sep"></span>
+
+			{#if where}
+				<button type="button" title="Move up" disabled={!where.up} onclick={() => onmove?.(-1)}>
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="6 11 12 5 18 11"/></svg>
+				</button>
+				<button type="button" title="Move down" disabled={!where.down} onclick={() => onmove?.(1)}>
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="6 13 12 19 18 13"/></svg>
+				</button>
+				{#if where.beside === 'leave'}
+					<button type="button" class="active" title="Place on its own line" onclick={() => onbeside?.()}>
+						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="8" height="12" rx="1"/><rect x="13" y="6" width="8" height="12" rx="1"/></svg>
+					</button>
+				{:else}
+					<button type="button" title="Place beside the picture above" disabled={where.beside !== 'join'} onclick={() => onbeside?.()}>
+						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="8" height="12" rx="1"/><rect x="13" y="6" width="8" height="12" rx="1"/></svg>
+					</button>
+				{/if}
+
+				<span class="ink-img-sep"></span>
+			{/if}
 
 			<button type="button" title="Edit description" onclick={() => target && oncaption?.(target)}>
 				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7V5h16v2"/><line x1="9" y1="19" x2="15" y2="19"/><line x1="12" y1="5" x2="12" y2="19"/></svg>
@@ -267,9 +341,14 @@
 		transition: all 150ms cubic-bezier(0.4, 0, 0.2, 1);
 	}
 
-	.ink-img-tools button:hover {
+	.ink-img-tools button:hover:not(:disabled) {
 		background: var(--surface, #f2f0ec);
 		color: var(--text, #2c2520);
+	}
+
+	.ink-img-tools button:disabled {
+		opacity: 0.35;
+		cursor: default;
 	}
 
 	.ink-img-tools button.active {
