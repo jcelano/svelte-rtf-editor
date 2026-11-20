@@ -187,7 +187,8 @@ describe('rtfToHtml: words colored to stand on shading that is not shown', () =>
 	it('a table TextEdit wrote: a shaded header row with white words, a white title on a bar, yellow on black', () => {
 		// (textutil -convert rtf, from HTML with those backgrounds: \clcbpat on the cells, \cb on the lines.)
 		const html = rtfToHtml(readFileSync('test-files/shaded-header-textedit.rtf', 'ascii'));
-		expect(html).toContain('<p>A white title on a shaded bar</p>');
+		// (With the space TextEdit puts after it, which is read since 1.14.0.)
+		expect(html).toContain('<p style="margin-bottom:12pt">A white title on a shaded bar</p>');
 		for (const word of ['Marker', 'Patient result', 'Control']) expect(html).toContain(`<strong>${word}</strong></td>`);
 		expect(html).toContain('<span style="color:rgb(176,0,4)">Positive (3+)</span>');
 		expect(html).toContain('After yellow on black and <span style="color:rgb(255,255,11)">yellow on nothing</span>.');

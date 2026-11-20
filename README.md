@@ -13,7 +13,9 @@ RTF viewer and rich-text editor components for **Svelte 5**.
 - **`InkEditor`** — Full rich-text editor that reads and writes RTF, built on `contenteditable`
   - Formatting toolbar: bold, italic, underline, strikethrough, font colour
   - Block-level controls: headings (H1–H3), paragraph, blockquote, code block
-  - Images: upload, paste or drag-and-drop, with a description below each picture, drag-to-resize and left/centre/right placement — embedded in the RTF, not linked
+  - Line spacing, and the space before and after a paragraph, in points. See [Line and paragraph spacing](#line-and-paragraph-spacing)
+  - Tables: insert one with or without borders; the borders are in the RTF. See [Tables](#tables)
+  - Images: upload, paste or drag-and-drop, with a description below each picture, drag-to-resize, left/centre/right placement, move up and down, and two or more side by side, each with its own description — embedded in the RTF, not linked
   - Import an RTF file from disk; export as RTF, HTML, or Markdown
   - Optional auto-save to `localStorage` (off unless asked for)
   - HTML from outside (the `content` prop, `setHTML`, a restored draft, a paste, a drop) is made safe before it is shown. See [HTML from outside](#html-from-outside)
@@ -167,6 +169,9 @@ editor.importRtf()        // → void    — open the file picker to import .rtf
 editor.setFontSize(14)    // → void    — size, in points, of the selected text, or of what is typed next
 editor.setFont('Calibri') // → void    — font of the selected text, or of what is typed next: one of `fonts`, or '' for the document font
 editor.clearFormatting()  // → void    — take bold, italic, underline, strike, color, size and font off the selected text
+editor.setLineSpacing(1.5) // → void   — line spacing of the selected paragraphs, in lines; null for the document's own
+editor.setParagraphSpacing({ before: 6, after: 12 }) // → void — space before and after them, in points; either may be left out, 0 or null is none
+editor.insertTable(3, 2, { borders: true, header: false }) // → void — a table of empty cells after the paragraph the caret is in
 ```
 
 #### Auto-save
@@ -383,6 +388,8 @@ A `<p>` or `<div>` keeps its own indents, spacing and tab stops in the RTF, so a
 | `margin-right: 0.5in` | `\ri720` |
 | `text-indent: -1.75in` | `\fi-2520` |
 | `margin-top: 5pt` / `margin-bottom: 5pt` | `\sb100` / `\sa100` |
+| `line-height: 1.5` (or `150%`) | `\sl360\slmult1` |
+| `line-height: 14pt` | `\sl-280\slmult0` (exactly 14 pt) |
 | `break-after: avoid` or `page-break-after: avoid` | `\keepn` |
 | `data-rtf-tab-stops="1.75in"` (comma-separated) | `\tx2520` |
 
@@ -392,7 +399,21 @@ A `<p>` or `<div>` keeps its own indents, spacing and tab stops in the RTF, so a
 - Inside a table cell the cell declares its own paragraph: only alignment and the left indent are written there, not the right or first-line indent, spacing, tab stops or keep-with-next.
 - `rtfToHtml` reads the three indents back, in points: `\li720\ri720\fi-720` becomes `margin-left:36pt;margin-right:36pt;text-indent:-36pt`, and `RtfViewer` shows them. As in RTF, they hold from one paragraph to the next until `\pard`. Indents inside a table cell are not read.
 - A heading outside a table cell also writes its right and first-line indents, so a heading read from RTF with a hanging number goes back as it came. A picture is read with a left margin only, where its line starts.
-- `rtfToHtml` does not yet read spacing, keep-with-next or tab stops back.
+- `rtfToHtml` reads spacing back too: `\sb120\sa240\sl360\slmult1` becomes `margin-top:6pt;margin-bottom:12pt;line-height:1.5`, on a paragraph, a heading or a picture, and holds until `\pard` as the indents do. Line spacing "at least" (a positive `\sl` without `\slmult1`) is not something CSS can say, and is left out. Spacing inside a table cell is not read.
+- `rtfToHtml` does not yet read keep-with-next or tab stops back.
+
+### Line and paragraph spacing
+
+The **Spacing** list in the toolbar sets, for the paragraphs the selection touches:
+
+- **Line spacing**: 1, 1.15, 1.5 or 2 lines, or Default (the document's own).
+- **Space before paragraph** and **Space after paragraph**: 0, 6 or 12 pt.
+
+The list marks what the paragraph at the caret has, and shows a value it does not offer (`7.5 pt` from a pasted document) so that it can be seen and changed. A heading takes spacing as a paragraph does; a list item and a table cell do not. With a picture selected, the space before and after is the picture's, which is how the distance between two pictures, one under the other, is set. Each change is one step for Undo.
+
+`setLineSpacing(lines)` and `setParagraphSpacing({ before, after })` do the same from code, with any value: up to 10 lines, and up to 144 pt. Copy format carries a paragraph's spacing with its alignment and indents.
+
+In the editor and in `RtfViewer` a picture has no space of its own around it, as it has none in the RTF: what is set is what shows. (Through 1.13 a picture was drawn with 20 px above and below it that no reader of the RTF showed.)
 
 ---
 
@@ -437,7 +458,9 @@ RTF has no table element: each row says where its cells end (`\cellx`), so colum
 - **`<caption>`** is written as a centered paragraph before the table, where a browser shows it, and is read back as that paragraph.
 - **A column no cell starts in is not a column.** `colspan="100"` on a cell meant to cross the whole table adds none.
 - **A row short of cells** is filled with empty ones, so its edges are the table's.
-- **`<th>`** gets a bottom border, on that cell only, which is how `rtfToHtml` knows a header cell: a bare `\clbrdrb\brdrs` and no border on any other side. A bottom border with a width or a color (`\brdrw`, `\brdrcf`), which is how Word and TextEdit write a line someone drew under a cell, is not a header: a signature line stays an ordinary cell.
+- **Borders.** A cell's own borders are written, each side by itself: `border: 1px solid` is `\clbrdrt\brdrs\brdrw15` and the same for `l`, `b` and `r`. The line is `solid`, `double`, `dotted` or `dashed` (any other that draws one is a plain line), the width is in twentieths of a point up to the 3.75 pt RTF allows, and a color other than black is written by its place in the color table (`\brdrcf`). `rtfToHtml` reads them back as `border:1px solid` where the four sides are one, else as `border-top`, `border-right`, and so on. A border set on the `<table>` or by a style sheet is not a cell's own, and is not written.
+- **Insert table.** The toolbar's table button asks for rows and columns (up to 50 by 12), whether the cells have borders, and whether the first row is a header, and puts the table after the paragraph the caret is in. `insertTable(rows, columns, { borders, header })` does the same from code. A table with no borders has none in the RTF; while it is edited its cells are drawn with a faint dashed line, which is not in `getHTML()` or the RTF. Adding and removing rows and columns is not there yet.
+- **`<th>`** with no borders of its own gets a bottom border, on that cell only, which is how `rtfToHtml` knows a header cell: a bare `\clbrdrb\brdrs` and no border on any other side. A header cell that has borders is written with those, and marked in what it holds by `{\*\inkth}`, a group other readers skip: Word and TextEdit put a border on every cell of a gridded table, so a border cannot say which cells are headers there. A bottom border with a width or a color (`\brdrw`, `\brdrcf`), which is how Word and TextEdit write a line someone drew under a cell, is not a header: a signature line stays an ordinary cell.
 - **Each cell ends with `\cell` inside its group**, with no `\par` before it, and the last row of a table carries `\lastrow`. Through 1.9.0 a cell ended `\par}\cell`, which Apple's reader (TextEdit, Pages, Mail) showed as an empty second paragraph in every cell, and two tables with nothing between them were read back as one. `rtfToHtml` reads both shapes.
 - **`<thead>` and `<tfoot>`** are written first and last, wherever the source has them.
 - **A cell's `text-align`** is written on its paragraphs (`\qc`, `\qr`, `\qj`), and read back onto the cell.
@@ -594,7 +617,17 @@ Three ways to add a picture:
 
 Each picture is inserted as a `<figure>` with a `<figcaption>` under it. Click the caption line and type to describe the image — the description travels with the picture through every export. Insert as many images as a document needs.
 
-Click an image to select it. A frame appears with corner handles you can drag to resize (the aspect ratio is kept and the width is capped at the editor's text width), buttons for 25% / 50% / 100% width, left / centre / right placement, a shortcut to its description, and a remove button.
+Click an image to select it. A frame appears with corner handles you can drag to resize (the aspect ratio is kept and the width is capped at the editor's text width), buttons for 25% / 50% / 100% width, left / centre / right placement, moving it, a shortcut to its description, and a remove button.
+
+### Where a picture is on the page
+
+- **Move up** and **Move down** take the selected picture, with its description, over the block above or below it: a paragraph, a table, another picture.
+- **Place beside the picture above** puts the selected picture to the right of the picture before it, each with its own description under it. A third and a fourth can join the row. Pictures too wide for their share of the page are made to fit; after that each is resized and aligned inside its own share, which is also how the distance between two of them is set (the left one aligned right and the right one aligned left are as close as they go).
+- **Place on its own line** takes a picture out of a row, and puts it under the row. Removing a picture from a row closes the row up; the last picture left is on a line of its own again.
+- A row of pictures is moved up and down as one.
+- **The space above and below a picture** is set from the toolbar's Spacing list while the picture is selected (see [Line and paragraph spacing](#line-and-paragraph-spacing)). A row of pictures has none to set.
+
+In the document a row of pictures is a table of one row with no borders, a `<figure>` in each cell, and that is what the RTF holds: a row of cells, each with a picture and its description. Word and other readers show the pictures side by side; `rtfToHtml` reads the row back as it was written. A picture in a row that has no description is read back as the picture alone in its cell, and is given a `<figure>` again when one is typed (the frame's Edit description button). There is no wrapping of text around a picture: RTF can say it, but the systems these documents go to do not show it reliably.
 
 ### How images are stored
 

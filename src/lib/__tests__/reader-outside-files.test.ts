@@ -268,10 +268,12 @@ describe('a rule under a cell (issue 21, item 18)', () => {
 	const header = (text: string) => `<th style="border-bottom:1px solid;padding:2px 6px;text-align:left;width:100.0%">${text}</th>`;
 
 	it('a bottom border with a width or a color is a line someone drew, not a header cell', () => {
-		// A signature line, as Word and as TextEdit write the border.
-		expect(read(R`\trowd\clbrdrb\brdrs\brdrw10\cellx6000\pard\intbl Jane Roe, MD\cell\row`)).toBe(`${TABLE}<tr>${cell('Jane Roe, MD', '100.0')}</tr></table>`);
-		expect(read(R`\trowd\clbrdrb\brdrs\brdrw20\brdrcf1\cellx6000\pard\intbl Jane Roe, MD\cell\row`)).toBe(`${TABLE}<tr>${cell('Jane Roe, MD', '100.0')}</tr></table>`);
-		expect(read(R`\trowd\clbrdrb\brdrdb\cellx6000\pard\intbl Total\cell\row`)).toBe(`${TABLE}<tr>${cell('Total', '100.0')}</tr></table>`);
+		// A signature line, as Word and as TextEdit write the border. (And the line is shown,
+		// since 1.14.0: a cell's borders are read.)
+		const lined = (border: string, text: string) => `${TABLE}<tr><td style="border-bottom:${border};padding:2px 6px;width:100.0%">${text}</td></tr></table>`;
+		expect(read(R`\trowd\clbrdrb\brdrs\brdrw10\cellx6000\pard\intbl Jane Roe, MD\cell\row`)).toBe(lined('0.67px solid', 'Jane Roe, MD'));
+		expect(read(R`\trowd\clbrdrb\brdrs\brdrw20\brdrcf1\cellx6000\pard\intbl Jane Roe, MD\cell\row`)).toBe(lined('1.33px solid rgb(255,0,0)', 'Jane Roe, MD'));
+		expect(read(R`\trowd\clbrdrb\brdrdb\cellx6000\pard\intbl Total\cell\row`)).toBe(lined('1px double', 'Total'));
 	});
 
 	it('the bare border this writer marks a header cell with is still a header cell', () => {

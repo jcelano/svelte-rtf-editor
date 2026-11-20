@@ -9,6 +9,7 @@
 		onblock?: (tag: string) => void;
 		oninsertlink?: () => void;
 		oninsertimage?: () => void;
+		oninserttable?: () => void;
 		/** The size of the text at the caret, in points; null where the selection has more than one. */
 		fontSize?: number | null;
 		/** The sizes offered, in points. */
@@ -21,6 +22,8 @@
 		/** The document font's name: the first of the list, and what '' is shown as. */
 		documentFont?: string;
 		onfont?: (name: string) => void;
+		/** The spacing of the paragraph at the caret: lines apart (null: none set), and points before and after. */
+		spacing?: { line: number | null; before: number; after: number };
 		/** The Copy format brush is in hand: the button shows as pressed. */
 		copyingFormat?: boolean;
 		oncopyformat?: () => void;
@@ -33,6 +36,7 @@
 		onblock,
 		oninsertlink,
 		oninsertimage,
+		oninserttable,
 		fontSize = null,
 		fontSizes = [],
 		onfontsize,
@@ -40,6 +44,7 @@
 		fonts = [],
 		documentFont = '',
 		onfont,
+		spacing = { line: null, before: 0, after: 0 },
 		copyingFormat = false,
 		oncopyformat
 	}: Props = $props();
@@ -52,6 +57,23 @@
 
 	function exec(cmd: string, value: string | null = null) {
 		onexec?.(cmd, value);
+	}
+
+	// What the spacing list offers. The paragraph's own setting is offered too where it is
+	// another (8 pt after, in a document from elsewhere), so the list shows what the paragraph has.
+	const offered = (choices: number[], current: number | null) =>
+		current !== null && !choices.includes(current) ? [...choices, current].sort((a, b) => a - b) : choices;
+	const lineChoices = $derived(offered([1, 1.15, 1.5, 2], spacing.line));
+	const beforeChoices = $derived(offered([0, 6, 12], spacing.before));
+	const afterChoices = $derived(offered([0, 6, 12], spacing.after));
+	const mark = (on: boolean) => (on ? '\u2713 ' : '\u2003');
+
+	/** One choice of the spacing list is a command; the list goes back to showing its name. */
+	function chooseSpacing(e: Event) {
+		const list = e.target as HTMLSelectElement;
+		const [cmd, value] = list.value.split(':');
+		list.value = '';
+		if (cmd) exec(cmd, value === 'none' ? null : value);
 	}
 </script>
 
@@ -205,6 +227,31 @@
 
 	<div class="toolbar-divider"></div>
 
+	<!-- Spacing -->
+	<div class="toolbar-group">
+		<select class="tb-select tb-spacing" title="Line and paragraph spacing" aria-label="Line and paragraph spacing" value="" onchange={chooseSpacing}>
+			<option value="" hidden>Spacing</option>
+			<optgroup label="Line spacing">
+				{#each lineChoices as lines (lines)}
+					<option value="lineSpacing:{lines}">{mark(spacing.line === lines)}{lines === 1 ? '1.0' : lines === 2 ? '2.0' : lines}</option>
+				{/each}
+				<option value="lineSpacing:none">{mark(spacing.line === null)}Default</option>
+			</optgroup>
+			<optgroup label="Space before paragraph">
+				{#each beforeChoices as points (points)}
+					<option value="spaceBefore:{points}">{mark(spacing.before === points)}{points} pt</option>
+				{/each}
+			</optgroup>
+			<optgroup label="Space after paragraph">
+				{#each afterChoices as points (points)}
+					<option value="spaceAfter:{points}">{mark(spacing.after === points)}{points} pt</option>
+				{/each}
+			</optgroup>
+		</select>
+	</div>
+
+	<div class="toolbar-divider"></div>
+
 	<!-- Copy format -->
 	<div class="toolbar-group">
 		<ToolbarButton active={copyingFormat} title="Copy format" onclick={oncopyformat}>
@@ -221,6 +268,9 @@
 		</ToolbarButton>
 		<ToolbarButton title="Insert image" onclick={oninsertimage}>
 			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+		</ToolbarButton>
+		<ToolbarButton title="Insert table" onclick={oninserttable}>
+			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="3" y1="10" x2="21" y2="10"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="4" x2="9" y2="20"/><line x1="15" y1="4" x2="15" y2="20"/></svg>
 		</ToolbarButton>
 		<ToolbarButton title="Horizontal rule" onclick={() => exec('insertHorizontalRule')}>
 			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="12" x2="21" y2="12"/></svg>
@@ -303,6 +353,11 @@
 	/* Two or three digits: narrower than the list of paragraph kinds. */
 	.tb-size {
 		min-width: 62px;
+	}
+
+	/* It shows its name, not the longest of its choices. */
+	.tb-spacing {
+		width: 6.6em;
 	}
 
 	/* (The color alone: `background` would take the arrow off with it.) */

@@ -860,6 +860,14 @@ export function estimateRtfBytes(editorEl: HTMLElement, options: RtfWriteOptions
 		if (tag === 'td' || tag === 'th') {
 			// (Its own, or the one a block around the table hands down.)
 			if (el.closest('center, [style*="text-align"], [align]')) total += 3;
+			// Its borders, in each row it is written in, with a color numbered as high as any,
+			// and the mark of a header cell that has borders ("{\*\inkth}", 10).
+			const borders = cellBordersRtf(el, () => 999).length;
+			if (borders > 0) {
+				const down = Math.max(1, parseInt(el.getAttribute('rowspan') ?? '', 10) || 1);
+				const rowCount = el.closest('table')?.querySelectorAll('tr').length ?? 1;
+				total += borders * Math.min(rowCount, el.getAttribute('rowspan') === '0' ? rowCount : down) + 10;
+			}
 			const rows = parseInt(el.getAttribute('rowspan') ?? '', 10);
 			if (rows !== 1 && Number.isFinite(rows) && !el.parentElement?.closest('td, th')) {
 				// rowspan="0" reaches the last row; no span reaches past the table.
@@ -905,6 +913,8 @@ export function estimateRtfBytes(editorEl: HTMLElement, options: RtfWriteOptions
 				counter++;
 			}
 		}
+		// A heading's spacing, and a picture's (before the picture, after its caption).
+		if ((HEADING_TAGS.has(tag) || tag === 'figure') && !el.closest('td, th')) total += spacingControls(el).length;
 		// A figure with no picture is a paragraph of what it holds: "\pard\intbl\qc\liN " and
 		// "\par " (at most 30).
 		if (tag === 'figure' && !el.querySelector('img')) total += 30;
@@ -1232,8 +1242,77 @@ function collectColors(root: HTMLElement, colorMap: Map<string, RGB>): void {
 		addColor(el.style?.color, colorMap, el, root);
 		// <font color="..."> is produced by execCommand('foreColor')
 		if (el.tagName?.toLowerCase() === 'font') addColor(el.getAttribute('color'), colorMap, el, root);
+		// The color of a table cell's borders.
+		if (el.tagName === 'TD' || el.tagName === 'TH') {
+			for (const [side] of BORDER_SIDES) {
+				const color = cellBorder(el, side)?.color;
+				if (color) colorMap.set(colorKey(color), color);
+			}
+		}
 	}
 }
+
+// ── Table cell borders ──
+
+const BORDER_SIDES = [['top', 't'], ['left', 'l'], ['bottom', 'b'], ['right', 'r']] as const;
+type BorderSide = (typeof BORDER_SIDES)[number][0];
+/** The line of a border, as RTF names it; any other that draws one is a plain line. */
+const BORDER_LINES: ReadonlyMap<string, string> = new Map(Object.entries({ solid: 'brdrs', double: 'brdrdb', dotted: 'brdrdot', dashed: 'brdrdash' }));
+const BORDER_WIDTHS: ReadonlyMap<string, number> = new Map(Object.entries({ thin: 15, medium: 45, thick: 75 }));
+/** The widest border RTF has (\brdrw75, 3.75 pt). */
+const MAX_BORDER_TWIPS = 75;
+
+/**
+ * One border of a table cell as its own style sets it, or null where it sets none: the line,
+ * its width in twips, and its color where that is not the text's own (black, or one this file
+ * cannot read, is left to the reader). Read from the side's own properties, and from
+ * `border-top` and `border` where a DOM does not spread those over them.
+ */
+function cellBorder(el: HTMLElement, side: BorderSide): { line: string; twips: number; color: RGB | null } | null {
+	const style = el.style;
+	if (!style) return null;
+	const value = (name: string) => (style.getPropertyValue(name) || '').trim().toLowerCase();
+	let line = value(`border-${side}-style`);
+	let width = value(`border-${side}-width`);
+	let color = value(`border-${side}-color`);
+	if (!line) {
+		for (const short of [`border-${side}`, 'border']) {
+			const words = value(short).split(/\s+(?![^(]*\))/).filter(Boolean);
+			if (words.length === 0) continue;
+			for (const word of words) {
+				if (BORDER_STYLE_WORDS.has(word)) line = word;
+				else if (BORDER_WIDTHS.has(word) || /^[\d.]/.test(word)) width = word;
+				else color = word;
+			}
+			break;
+		}
+		line ||= value('border-style');
+		width ||= value('border-width');
+		color ||= value('border-color');
+	}
+	if (!BORDER_STYLE_WORDS.has(line) || line === 'none' || line === 'hidden') return null;
+	const twips = width === '' ? BORDER_WIDTHS.get('medium')! : (BORDER_WIDTHS.get(width) ?? lengthTwips(width));
+	if (!twips) return null;
+	const rgb = parseColor(color);
+	return { line: BORDER_LINES.get(line) ?? 'brdrs', twips: Math.min(MAX_BORDER_TWIPS, twips), color: rgb && colorKey(rgb) !== '0,0,0' ? rgb : null };
+}
+
+const BORDER_STYLE_WORDS = new Set(['none', 'hidden', 'solid', 'double', 'dotted', 'dashed', 'groove', 'ridge', 'inset', 'outset']);
+
+/** A cell's borders for its row's definition: "\clbrdrt\brdrs\brdrw15" for each side that has one. */
+function cellBordersRtf(el: HTMLElement, colorIndex: (color: RGB) => number | undefined): string {
+	let rtf = '';
+	for (const [side, letter] of BORDER_SIDES) {
+		const border = cellBorder(el, side);
+		if (!border) continue;
+		const index = border.color ? colorIndex(border.color) : undefined;
+		rtf += `\\clbrdr${letter}\\${border.line}\\brdrw${border.twips}${index ? `\\brdrcf${index}` : ''}`;
+	}
+	return rtf;
+}
+
+/** The one border the reader gives a header cell: see tableRtf. */
+const HEADER_MARK_BORDER = '\\clbrdrb\\brdrs\\brdrw15';
 
 /** How many elements deep the walker is (see MAX_ELEMENT_DEPTH). */
 let walkDepth = 0;
@@ -1492,8 +1571,11 @@ function walkNodeAt(node: Node, ctx: WalkContext, restate: boolean, endLooseText
 			const caption = (captionEl ? shownText(captionEl) : '').trim();
 			const align = `${ownAlign(el) ?? (cellAlign(ctx) || '\\ql')}${liControl(ctx.indent + leftMarginTwips(el))}`;
 
+			// The space before a picture is before the picture, and the space after it is after
+			// its caption, where it has one. (Not in a table cell, as for any paragraph there.)
+			const spaced = (part: 'before' | 'after') => (ctx.inTableCell ? '' : spacingControls(el, part));
 			if (img) {
-				rtf += `\\pard${inCell(ctx)}${align} ${imageBody(img as HTMLElement)}\\par `;
+				rtf += `\\pard${inCell(ctx)}${align}${spaced('before')}${caption ? '' : spaced('after')} ${imageBody(img as HTMLElement)}\\par `;
 			} else {
 				// A figure with no picture is a block of what it holds: its lines end with \par, as a
 				// <div>'s do, or its text ran into the next paragraph. Its caption is written below.
@@ -1502,7 +1584,7 @@ function walkNodeAt(node: Node, ctx: WalkContext, restate: boolean, endLooseText
 			}
 
 			if (caption) {
-				rtf += `{\\*\\inkcap}\\pard${inCell(ctx)}${align}\\i ${escapeRtf(caption)}${ctx.italic ? '' : '\\i0'}\\par `;
+				rtf += `{\\*\\inkcap}\\pard${inCell(ctx)}${align}${img ? spaced('after') : ''}\\i ${escapeRtf(caption)}${ctx.italic ? '' : '\\i0'}\\par `;
 			}
 			break;
 		}
@@ -1857,7 +1939,16 @@ function tableRtf(table: HTMLElement, ctx: WalkContext): string {
 			if (cell && origin) started.add(cell);
 			const merged = cell !== null && cell.rowspan > 1;
 			if (merged) definition += origin ? '\\clvmgf' : '\\clvmrg';
-			if (cell?.el.tagName.toLowerCase() === 'th') definition += '\\clbrdrb\\brdrs';
+			// A cell's own borders. A header cell with none (or with the line under it alone,
+			// which is how one is read back) is marked as it always was, by a bare line under
+			// it. One with borders of its own has those, and is marked in what it holds:
+			// Word and TextEdit put borders on every cell of a gridded table, so a border
+			// cannot say which cells are headers there.
+			const borders = cell ? cellBordersRtf(cell.el, (color) => ctx.colorIndex.get(colorKey(color))) : '';
+			const header = cell?.el.tagName.toLowerCase() === 'th';
+			const plainHeader = header && (borders === '' || borders === HEADER_MARK_BORDER);
+			definition += plainHeader ? '\\clbrdrb\\brdrs' : borders;
+			const headerMark = header && !plainHeader && origin ? '{\\*\\inkth}' : '';
 			definition += `\\cellx${edges[last]}`;
 
 			// A cell with no alignment of its own takes that of what the table is in.
@@ -1869,7 +1960,7 @@ function tableRtf(table: HTMLElement, ctx: WalkContext): string {
 				const own = charFormat(cell.el, 'td', { ...ctx, inTableCell: true, cellAlign: align }, true);
 				content = `${own.on}${withoutTrailingPar(walkChildren(cell.el, own.ctx))}`;
 			}
-			bodies += `{\\pard\\intbl${align} \\f${ctx.font} \\sa0 \\li0 \\fi0 ${content}\\cell}`;
+			bodies += `{\\pard\\intbl${align} \\f${ctx.font} \\sa0 \\li0 \\fi0 ${headerMark}${content}\\cell}`;
 			c = last + 1;
 		}
 
@@ -2167,10 +2258,48 @@ function paragraphLayout(el: HTMLElement, ctx: WalkContext): string {
 
 /**
  * A heading's layout: its alignment and left indent, and outside a table cell its right and
- * first-line indents too, so a heading read from RTF with a hanging number goes back as it came.
+ * first-line indents too, so a heading read from RTF with a hanging number goes back as it came,
+ * and its spacing.
  */
 function headingLayout(el: HTMLElement, ctx: WalkContext): string {
-	return `${paragraphLayout(el, ctx)}${ctx.inTableCell ? '' : edgeIndents(el)}`;
+	return `${paragraphLayout(el, ctx)}${ctx.inTableCell ? '' : `${edgeIndents(el)}${spacingControls(el)}`}`;
+}
+
+/** The most a line is spaced by: ten lines, as the sanitizer lets through. */
+const MOST_LINES = 10;
+
+/**
+ * The space before and after a paragraph, and between its lines, or nothing where the element
+ * sets none:
+ *
+ * - `margin-top` and `margin-bottom` as \sbN and \saN. Zero writes nothing, which is what \pard
+ *   sets.
+ * - `line-height` as a number or a percentage ("1.5", "150%") as \slN\slmult1, a multiple of a
+ *   line (240 to a line), and "1" too: it is what was chosen, and is read back as that. As a
+ *   length ("14pt") as \sl-N\slmult0, which is exactly that height.
+ *
+ * `part` leaves out what is written on another paragraph: a picture's caption has the space
+ * after it, the picture the space before.
+ */
+function spacingControls(el: HTMLElement, part: 'all' | 'before' | 'after' = 'all'): string {
+	const style = el.style;
+	if (!style) return '';
+	let out = '';
+	const sb = part === 'after' ? null : lengthTwips(style.marginTop);
+	if (sb) out += `\\sb${sb}`;
+	const sa = part === 'before' ? null : lengthTwips(style.marginBottom);
+	if (sa) out += `\\sa${sa}`;
+	if (part !== 'all') return out;
+	const line = (style.lineHeight ?? '').trim().toLowerCase();
+	const multiple = line.match(/^(\d+(?:\.\d+)?|\.\d+)(%?)$/);
+	if (multiple) {
+		const lines = parseFloat(multiple[1]) / (multiple[2] ? 100 : 1);
+		if (lines > 0 && lines <= MOST_LINES) out += `\\sl${Math.round(lines * 240)}\\slmult1`;
+	} else {
+		const exact = lengthTwips(line);
+		if (exact) out += `\\sl-${exact}\\slmult0`;
+	}
+	return out;
 }
 
 /** \\riN for margin-right and \\fiN for text-indent, or nothing where the element sets none. */
@@ -2205,6 +2334,7 @@ function inheritedAlign(el: HTMLElement, ctx: WalkContext): string {
  * | margin-right: 0.5in                              | \ri720            |
  * | text-indent: -1.75in                             | \fi-2520          |
  * | margin-top: 5pt / margin-bottom: 5pt             | \sb100 / \sa100   |
+ * | line-height: 1.5 (or 150%) / line-height: 14pt   | \sl360\slmult1 / \sl-280\slmult0 |
  * | break-after: avoid, or page-break-after: avoid   | \keepn            |
  *
  * CSS has no absolute tab stop, hence the data- attribute. A value that cannot be read writes
@@ -2222,10 +2352,7 @@ function paragraphControls(el: HTMLElement, leftTwips: number): string {
 	const style = el.style;
 	if (!style) return out;
 	out += edgeIndents(el);
-	const sb = lengthTwips(style.marginTop);
-	if (sb) out += `\\sb${sb}`;
-	const sa = lengthTwips(style.marginBottom);
-	if (sa) out += `\\sa${sa}`;
+	out += spacingControls(el);
 	const keep = (prop: string) => style.getPropertyValue(prop).trim() === 'avoid';
 	if (keep('break-after') || keep('page-break-after')) out += '\\keepn';
 	return out;

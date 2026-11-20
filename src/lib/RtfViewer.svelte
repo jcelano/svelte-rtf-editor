@@ -187,8 +187,16 @@
         height: auto;
     }
 
+    /* (The space of a paragraph, as in the editor: the space before and after a picture is
+       what the document sets.) */
     .rtf-viewer :global(figure) {
-        margin: 1em 0;
+        margin: 0 0 0.2em;
+    }
+
+    /* Pictures side by side are a row of cells, each picture at the top of its own, as the
+       RTF has them. */
+    .rtf-viewer :global(:is(td, th):has(> figure, > img)) {
+        vertical-align: top;
     }
 
     .rtf-viewer :global(figcaption) {

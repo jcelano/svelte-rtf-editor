@@ -583,8 +583,9 @@ describe('rtfToHtml: the item a lettered one is read by', () => {
 		const html = read(rtf);
 		const took = performance.now() - start;
 		expect((html.match(/<ol/g) ?? []).length).toBe(120000);
-		// (Half a second here. Twelve before, when each item looked through all that followed
-		// it: the limit is far from both, for a machine that is slow or busy.)
-		expect(took).toBeLessThan(4000);
+		// (Half a second here, and up to 2.8 s on the machines CI runs on. Twelve seconds here
+		// before, when each item looked through all that followed it: the limit is far from
+		// both, for a machine that is slow or busy.)
+		expect(took).toBeLessThan(8000);
 	}, 60000);
 });
