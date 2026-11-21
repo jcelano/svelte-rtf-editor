@@ -2147,10 +2147,18 @@ test.describe('the layout of a report: spacing, tables with borders, pictures si
 		await page.mouse.move(target.x + target.width * at.x, target.y + target.height * at.y, { steps: 12 });
 		await page.mouse.up();
 	}
+	/**
+	 * Playwright's WebKit on Linux (the GTK build, which CI runs) hangs on the first mouse move
+	 * of any picture dragged by the mouse: on a bare page with no editor too, editable or not.
+	 * Safari's engine on a Mac drags it, and these run there.
+	 */
+	const NO_PICTURE_DRAG = 'WebKit on Linux hangs on a picture dragged by the mouse, on any page';
+	const noPictureDrag = (browserName: string) => browserName === 'webkit' && process.platform === 'linux';
 	const RIGHT = { x: 0.8, y: 0.5 };
 	const LEFT = { x: 0.2, y: 0.5 };
 
-	test('a picture dragged onto another is put beside it, each with its own caption under it', async ({ page }) => {
+	test('a picture dragged onto another is put beside it, each with its own caption under it', async ({ page, browserName }) => {
+		test.skip(noPictureDrag(browserName), NO_PICTURE_DRAG);
 		// (The browser put the dragged picture in the other's figure, and its caption was left
 		// behind as an empty line: both captions under the two pictures, at the left.)
 		await twoPictures(page);
@@ -2167,13 +2175,15 @@ test.describe('the layout of a report: spacing, tables with borders, pictures si
 		await expect.poll(() => blocks(page)).toEqual(['Gross description', 'Figure 1. H&E', 'Figure 2. Ki-67', 'Diagnosis']);
 	});
 
-	test('dropped on the left half of a picture, it is put before it', async ({ page }) => {
+	test('dropped on the left half of a picture, it is put before it', async ({ page, browserName }) => {
+		test.skip(noPictureDrag(browserName), NO_PICTURE_DRAG);
 		await twoPictures(page);
 		await dragPicture(page, 1, `${content} img >> nth=0`, LEFT);
 		await expect.poll(() => blocks(page)).toEqual(['Gross description', '[Figure 2. Ki-67|Figure 1. H&E]', 'Diagnosis']);
 	});
 
-	test('in a row, a picture dragged onto the other changes places with it; dragged onto a paragraph, it leaves the row', async ({ page }) => {
+	test('in a row, a picture dragged onto the other changes places with it; dragged onto a paragraph, it leaves the row', async ({ page, browserName }) => {
+		test.skip(noPictureDrag(browserName), NO_PICTURE_DRAG);
 		await twoPictures(page);
 		await dragPicture(page, 1, `${content} img >> nth=0`, RIGHT);
 		await expect.poll(() => blocks(page)).toEqual(['Gross description', '[Figure 1. H&E|Figure 2. Ki-67]', 'Diagnosis']);

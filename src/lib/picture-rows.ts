@@ -42,9 +42,26 @@ export const pointsOf = (twips: number): string => `${Math.round(twips) / 20}pt`
 
 const isCell = (el: Element) => /^(td|th)$/i.test(el.tagName);
 
-/** A cell with nothing in it: the gap between two pictures. */
+/**
+ * A cell nothing is drawn on or around: no border, no background. A table that has them is a
+ * table of its own, whatever it holds, and is written and read as one.
+ */
+export function isPlainCell(cell: Element): boolean {
+	if (cell.hasAttribute('bgcolor') || cell.hasAttribute('background')) return false;
+	const style = (cell as HTMLElement).style;
+	if (!style) return true;
+	for (const name of Array.from(style)) if (/^(border|background)/.test(name) && !/^(none|0|0px|transparent|initial)$/.test(style.getPropertyValue(name).trim())) return false;
+	return true;
+}
+
+/**
+ * The gap between two pictures: a plain cell with a width of its own and nothing in it. (A
+ * line break or blanks are nothing: the caret put in the cell and taken out again leaves a
+ * <br> there in Chromium, and that is still the gap.)
+ */
 export function isGapCell(cell: Element): boolean {
-	return isCell(cell) && cell.childNodes.length === 0;
+	if (!isCell(cell) || !isPlainCell(cell) || lengthTwips(cell) === null) return false;
+	return Array.from(cell.childNodes).every((node) => (node.nodeType === 1 ? (node as Element).tagName === 'BR' : node.nodeType === 3 ? (node.textContent ?? '').trim() === '' : node.nodeType === 8));
 }
 
 /** A cell that holds one picture and nothing else: alone, or in its figure with its caption. */
@@ -61,8 +78,8 @@ export function holdsOnePicture(cell: Element): boolean {
 
 /**
  * Each column's width in twips, where the table is a row of pictures with set gaps: one row,
- * a picture's cell first and last and between each two of them a gap cell, every cell with a
- * length of its own, and the table with no width. Null for any other table, which is written
+ * a picture's cell first and last and between each two of them a gap cell, every cell plain
+ * and with a length of its own, and the table with no width. Null for any other table, which is written
  * across the page as it always was.
  */
 export function gappedRowWidths(table: Element): number[] | null {
@@ -75,7 +92,7 @@ export function gappedRowWidths(table: Element): number[] | null {
 	for (let i = 0; i < cells.length; i++) {
 		const cell = cells[i];
 		if ((cell.getAttribute('colspan') ?? '1') !== '1' || (cell.getAttribute('rowspan') ?? '1') !== '1') return null;
-		if (i % 2 === 0 ? !holdsOnePicture(cell) : !isGapCell(cell)) return null;
+		if (i % 2 === 0 ? !holdsOnePicture(cell) || !isPlainCell(cell) : !isGapCell(cell)) return null;
 		const twips = lengthTwips(cell);
 		if (twips === null) return null;
 		widths.push(twips);

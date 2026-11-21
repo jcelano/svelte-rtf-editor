@@ -94,7 +94,7 @@
 	import { givePastedPictures, pastePictures, type PastePictures } from '../paste-pictures.js';
 	import { readRtfFile, DEFAULT_MAX_RTF_BYTES } from '../rtf-parser.js';
 	import { createHistory, type DocumentHistory } from '../history.js';
-	import { GAPPED_ROW_STYLE, MOST_GAP_PT, isGapCell, lengthTwips, pointsOf } from '../picture-rows.js';
+	import { GAPPED_ROW_STYLE, MOST_GAP_PT, isGapCell, isPlainCell, lengthTwips, pointsOf } from '../picture-rows.js';
 	import { toggleList, nestItems, unnestItems, leaveList, inEmptyItem, atItemStart, listKindAt, type ListKind } from '../lists.js';
 	import {
 		htmlToRtf,
@@ -2731,6 +2731,9 @@
 		const gaps = fixed ? all.filter(isGapCell) : [];
 		const cells = all.filter((cell) => !gaps.includes(cell));
 		if (cells.length === 0 || !cells.every((cell) => pictureInCell(cell))) return null;
+		// (A row with gaps is laid out by the editor, which writes each cell's style: one with
+		// a border or a background of its own is a table of its own, and is left as it is.)
+		if (gaps.length > 0 && !all.every(isPlainCell)) return null;
 		const twips = gaps.length > 0 ? lengthTwips(gaps[0]) : null;
 		return { table, cells, gap: twips === null ? null : twips / 20 };
 	}
@@ -2845,19 +2848,48 @@
 			return;
 		}
 		table.setAttribute('style', GAPPED_ROW_STYLE);
-		const widths = cells.map((cell) => Math.round(pictureWidth(cell.querySelector('img')!)));
-		const room = contentWidth() - (gap * 4) / 3 * (cells.length - 1);
+		const page = contentWidth();
+		// (No wider a gap than leaves each picture its least width on the page.)
+		gap = Math.min(gap, fittingGap(page, cells.length) ?? gap);
+		const imgs = cells.map((cell) => cell.querySelector('img')!);
+		// (A picture not yet loaded has no width to go by: it is laid out once it has one.)
+		const widths = imgs.map((img) => Math.round(pictureWidth(img)));
+		const room = page - (gap * 4) / 3 * (cells.length - 1);
 		const total = widths.reduce((a, b) => a + b, 0);
 		const scale = room > 0 && total > room ? room / total : 1;
 		cells.forEach((cell, i) => {
-			const width = Math.max(MIN_PICTURE_IN_ROW, Math.floor(widths[i] * scale) || MIN_PICTURE_IN_ROW);
-			sizePicture(cell.querySelector('img')!, width);
-			cell.setAttribute('style', `padding:0;width:${pointsOf(width * 15)}`);
+			if (widths[i] > 0) {
+				const width = Math.max(MIN_PICTURE_IN_ROW, Math.floor(widths[i] * scale));
+				sizePicture(imgs[i], width);
+				cell.setAttribute('style', `padding:0;width:${pointsOf(width * 15)}`);
+			} else {
+				cell.setAttribute('style', 'padding:0');
+				imgs[i].addEventListener(
+					'load',
+					() => {
+						if (!table.isConnected) return;
+						if (history) history.quietly(() => relayoutPictureRow(table));
+						else relayoutPictureRow(table);
+						overlayRef?.reposition();
+					},
+					{ once: true }
+				);
+			}
 			if (i === 0) return;
 			const between = document.createElement('td');
 			between.setAttribute('style', `padding:0;width:${pointsOf(gap * 20)}`);
 			cell.before(between);
 		});
+	}
+
+	/**
+	 * The widest gap, in points, that leaves `count` pictures their least width each on a page
+	 * this wide (px); null where the page has no width to go by (not laid out).
+	 */
+	function fittingGap(page: number, count: number): number | null {
+		if (page <= 0 || count < 2) return null;
+		const px = (page - MIN_PICTURE_IN_ROW * count) / (count - 1);
+		return Math.max(0, Math.floor(px * 0.75 * 20) / 20);
 	}
 
 	/** Lay a row of pictures out again, as it was laid out: with the gap it has. */
@@ -2873,7 +2905,13 @@
 	function setPictureGap(gap: number | null): void {
 		const row = !readonly && selectedImage ? pictureRowOf(selectedImage) : null;
 		if (!row) return;
-		const pt = gap === null || !Number.isFinite(gap) ? null : Math.min(MOST_GAP_PT, Math.max(1, Math.round(gap * 20) / 20));
+		let pt = gap === null || !Number.isFinite(gap) ? null : Math.min(MOST_GAP_PT, Math.max(1, Math.round(gap * 20) / 20));
+		// (On a page too narrow for the gap asked for, the widest that fits; and none where not even 1 pt does.)
+		const fits = fittingGap(contentWidth(), row.cells.length);
+		if (pt !== null && fits !== null) {
+			if (fits < 1) return;
+			pt = Math.min(pt, fits);
+		}
 		if (pt === row.gap) return;
 		history?.step();
 		layoutPictureRow(row.table, row.cells, pt);
@@ -3096,7 +3134,9 @@
 		if (row.gap === null) return Math.max(0, Math.floor(whole / row.cells.length) - PICTURE_CELL_PADDING);
 		// (With a set gap: the page, less the gaps and the other pictures.)
 		const others = row.cells.reduce((sum, cell) => (cell.contains(selectedImage) ? sum : sum + pictureWidth(cell.querySelector('img')!)), 0);
-		return Math.max(0, Math.floor(whole - (row.gap * 4) / 3 * (row.cells.length - 1) - others));
+		// (At least a little over the least width a picture is given here: the frame takes 40 px
+		// and less as no limit at all.)
+		return Math.max(MIN_PICTURE_IN_ROW + 1, Math.floor(whole - (row.gap * 4) / 3 * (row.cells.length - 1) - others));
 	}
 
 	function removeSelectedImage(): void {
