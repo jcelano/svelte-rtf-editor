@@ -1929,6 +1929,37 @@ test.describe('the layout of a report: spacing, tables with borders, pictures si
 		expect(again).toBe('<p style="margin-bottom:12pt">Specimen A: skin, left forearm, shave biopsy.</p>\n<p>Specimen B: skin, right forearm.</p>');
 	});
 
+	test('the Spacing list spaces a list item and a line in a table cell, on the page and in the RTF', async ({ page }) => {
+		await open(page, {
+			content: '<ul><li>Margins free of tumor.</li><li>No lymphovascular invasion.</li></ul><table><tbody><tr><td>Specimen A</td><td>Skin</td></tr><tr><td>Specimen B</td><td>Skin</td></tr></tbody></table>'
+		});
+		const top = (selector: string) => page.evaluate((s) => document.querySelector(s)!.getBoundingClientRect().top, selector);
+		const second = await top('.ink-content li:nth-child(2)');
+		await page.click('.ink-content li >> nth=0');
+		await page.selectOption(spacing, 'spaceAfter:12');
+		// The next item is further down: by 12 pt (16 px), in place of the 4 px an item has by itself.
+		expect((await top('.ink-content li:nth-child(2)')) - second).toBeGreaterThan(10);
+		await page.selectOption(spacing, 'lineSpacing:1.5');
+		expect(await page.evaluate(() => document.querySelector('.ink-content ul')!.outerHTML)).toBe(
+			'<ul><li style="margin-bottom: 12pt; line-height: 1.5;">Margins free of tumor.</li><li>No lymphovascular invasion.</li></ul>'
+		);
+		expect(await page.locator(`${spacing} option[value="spaceAfter:12"]`).textContent()).toContain('✓');
+		const rowTwo = await top('.ink-content tr:nth-child(2)');
+		await page.click('.ink-content td >> nth=0');
+		await page.selectOption(spacing, 'spaceAfter:12');
+		expect(await page.evaluate(() => document.querySelector('.ink-content td')!.innerHTML)).toBe('<p style="margin-bottom: 12pt;">Specimen A</p>');
+		expect((await top('.ink-content tr:nth-child(2)')) - rowTwo).toBeGreaterThan(10);
+		const out = await rtf(page);
+		expect(out).toContain('\\pard\\li720\\sl360\\slmult1\\sa240\\fi-360\\bullet\\tab Margins free of tumor.\\par ');
+		expect(out).toContain('\\pard\\intbl\\sa240 Specimen A');
+		// Read back the same, and each step is undone by itself.
+		const again = await page.evaluate(() => window.lib.rtfToHtml(window.ed.getRTF()));
+		expect(again).toContain('<li style="margin-bottom:12pt;line-height:1.5">Margins free of tumor.</li>');
+		expect(again).toContain('<p style="margin-bottom:12pt">Specimen A</p>');
+		await page.keyboard.press('ControlOrMeta+z');
+		expect(await page.evaluate(() => document.querySelector('.ink-content td')!.innerHTML)).toBe('Specimen A');
+	});
+
 	test('Insert table puts in a table with borders, to type in; the RTF has the borders and the viewer shows them', async ({ page }) => {
 		await open(page, { content: '<p>Results</p>' });
 		await page.click(`${content} p`);

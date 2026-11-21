@@ -116,10 +116,10 @@ describe('the two-column report', () => {
 });
 
 describe('inside a table cell', () => {
-	it('the cell keeps its own paragraph: only the indent is written, as Indent sets it in a cell', () => {
+	it('the cell keeps its own paragraph: the indent and the spacing are written, as Indent and Spacing set them in a cell', () => {
 		const out = body('<table><tr><td><p style="margin-left: 1in; margin-top: 5pt" data-rtf-tab-stops="1in">x</p></td></tr></table>');
-		expect(out).toContain('{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 \\pard\\intbl\\li1440 x');
-		expect(out).not.toMatch(/\\sb100|\\tx1440/);
+		expect(out).toContain('{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 \\pard\\intbl\\li1440\\sb100 x');
+		expect(out).not.toMatch(/\\tx1440/);
 	});
 
 	it('a plain paragraph in a cell is written as before', () => {

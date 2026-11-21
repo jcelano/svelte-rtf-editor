@@ -69,10 +69,18 @@ describe('htmlToRtf: spacing', () => {
 		expect(body(`<figure style="margin-top:6pt;margin-bottom:12pt"><img src="${PNG}"><figcaption></figcaption></figure>`)).toMatch(/^\\pard\\ql\\sb120\\sa240 \{\\pict/);
 	});
 
-	it('not in a table cell, where the cell says what its paragraph is', () => {
+	it('in a table cell too, on a paragraph of its own after the one the cell declares', () => {
 		const rtf = body('<table><tr><td><p style="margin-bottom:6pt;line-height:2">In a cell</p></td></tr></table>');
-		expect(rtf).not.toMatch(/\\sa120|\\sl480/);
-		expect(rtf).toContain('In a cell');
+		expect(rtf).toContain('{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 \\pard\\intbl\\sa120\\sl480\\slmult1 In a cell\\cell}');
+	});
+
+	it('on a list item: the space before on its first paragraph, the space after on its last, its lines on each', () => {
+		expect(body('<ul><li style="margin-bottom:12pt;line-height:1.5">one</li></ul>')).toBe('\\pard\\li720\\sl360\\slmult1\\sa240\\fi-360\\bullet\\tab one\\par ');
+		expect(body('<ol><li style="margin-top:6pt;margin-bottom:6pt;line-height:2"><p>first</p><p>second</p></li></ol>')).toBe(
+			'\\pard\\li720\\sb120\\sl480\\slmult1\\fi-360 1.\\tab first\\par \\pard\\li720\\sl480\\slmult1\\sa120 second\\par '
+		);
+		// (An item without spacing is written as it always was.)
+		expect(body('<ul><li>plain</li></ul>')).toBe('\\pard\\li720\\fi-360\\bullet\\tab plain\\par ');
 	});
 
 	it('the size estimate counts it', () => {
@@ -131,9 +139,24 @@ describe('rtfToHtml: spacing', () => {
 		expect(bare).toMatch(/^<figure style="margin-top:6pt;margin-bottom:12pt"><img /);
 	});
 
-	it('not in a table cell', () => {
-		const html = read(R`{\trowd\cellx3000\pard\intbl\sa120\sl480\slmult1 cell\cell\row}\pard after\par`);
-		expect(html).not.toMatch(/margin-bottom|line-height/);
+	it('in a table cell: each paragraph of a cell where one is spaced, as Word writes them', () => {
+		const html = read(R`{\trowd\cellx3000\cellx6000\pard\intbl\sa160\sl259\slmult1 one\par\pard\intbl two\cell\pard\intbl three\par four\cell\row}\pard after\par`);
+		expect(html).toContain('<p style="margin-bottom:8pt;line-height:1.08">one</p><p>two</p></td>');
+		// A cell none of whose paragraphs is spaced is read as it always was: lines.
+		expect(html).toContain('>three<br>four</td>');
+	});
+
+	it('on a list item, as the <li>\'s style', () => {
+		const html = read(R`\pard\fi-360\li720\sa240\sl360\slmult1{\listtext\'95\tab}one\par\pard\fi-360\li720{\listtext\'95\tab}two\par`);
+		expect(html).toBe('<ul><li style="margin-bottom:12pt;line-height:1.5">one</li><li>two</li></ul>');
+	});
+
+	it('a list item and a table cell go back as they came', () => {
+		const html = '<ul><li style="margin-top:6pt;margin-bottom:12pt;line-height:1.5">item</li></ul><table><tr><td><p style="margin-bottom:6pt;line-height:2">spaced</p><p>plain</p></td></tr></table>';
+		const back = rtfToHtml(htmlToRtf(el(html)));
+		expect(back).toContain('<li style="margin-top:6pt;margin-bottom:12pt;line-height:1.5">item</li>');
+		expect(back).toContain('<p style="margin-bottom:6pt;line-height:2">spaced</p><p>plain</p></td>');
+		expect(estimateRtfBytes(el(html))).toBeGreaterThanOrEqual(new TextEncoder().encode(htmlToRtf(el(html))).length);
 	});
 
 	it('what is read is let through when it is made safe', () => {
@@ -277,18 +300,34 @@ describe('the spacing list of the toolbar', () => {
 		expect(editor.innerHTML).toBe('loose line<br>second line');
 	});
 
-	it('spaces a heading; not a list, and nothing in a table cell, where the RTF would not have it', () => {
-		const { editor, list } = open('<h2>Diagnosis</h2><ul><li>item</li></ul><table><tbody><tr><td><p>cell</p></td></tr></tbody></table>');
+	it('spaces a heading, a list item and a paragraph in a table cell, and shows what each has', () => {
+		const { editor, list } = open('<h2>Diagnosis</h2><ul><li>item</li><li>other</li></ul><table><tbody><tr><td><p>cell</p></td><td>loose</td></tr></tbody></table>');
 		caret(editor, 'Diagnosis');
 		choose(list, 'spaceAfter:6');
 		expect(editor.querySelector('h2')!.getAttribute('style')).toBe('margin-bottom: 6pt;');
-		for (const words of ['item', 'cell']) {
+		for (const words of ['item', 'cell', 'loose']) {
 			caret(editor, words);
 			choose(list, 'spaceAfter:6');
 			choose(list, 'lineSpacing:2');
+			caret(editor, words);
+			expect(marked(list)).toEqual(['lineSpacing:2', 'spaceBefore:0', 'spaceAfter:6']);
 		}
-		expect(editor.querySelector('ul')!.outerHTML).toBe('<ul><li>item</li></ul>');
-		expect(editor.querySelector('td')!.innerHTML).toBe('<p>cell</p>');
+		expect(editor.querySelector('ul')!.outerHTML).toBe('<ul><li style="margin-bottom: 6pt; line-height: 2;">item</li><li>other</li></ul>');
+		// (A line typed straight into a cell is made a paragraph to carry it.)
+		expect(Array.from(editor.querySelectorAll('td')).map((cell) => cell.innerHTML)).toEqual([
+			'<p style="margin-bottom: 6pt; line-height: 2;">cell</p>',
+			'<p style="margin-bottom: 6pt; line-height: 2;">loose</p>'
+		]);
+	});
+
+	it('spaces the item the caret is in, not the list around it, in a list within a list too', () => {
+		const { editor, list } = open('<ol><li><p>outer</p><ul><li>inner</li></ul></li></ol>');
+		caret(editor, 'inner');
+		choose(list, 'spaceBefore:12');
+		expect(editor.innerHTML).toBe('<ol><li><p>outer</p><ul><li style="margin-top: 12pt;">inner</li></ul></li></ol>');
+		caret(editor, 'outer');
+		choose(list, 'lineSpacing:1.5');
+		expect(editor.innerHTML).toBe('<ol><li style="line-height: 1.5;"><p>outer</p><ul><li style="margin-top: 12pt;">inner</li></ul></li></ol>');
 	});
 
 	it('is not there to change a document that cannot be edited', () => {

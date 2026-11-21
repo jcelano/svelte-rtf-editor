@@ -428,10 +428,10 @@ A `<p>` or `<div>` keeps its own indents, spacing and tab stops in the RTF, so a
 - Lengths in `in`, `pt`, `cm`, `mm` or `px` (15 twips per px), rounded to whole twips. Only `text-indent` may be negative. A value the writer cannot read, or zero, writes nothing.
 - CSS has no absolute tab stop, hence the `data-` attribute. On screen, `white-space: pre-wrap; tab-size: 1.75in` with that hanging indent puts the browser's first stop at the same place, and `pre-wrap` makes the writer send the tab as `\tab`.
 - `margin-left` adds to the indent of the blocks around the paragraph (an indent pasted from a browser, or a `<div>` with a margin that holds paragraphs), and is written as one `\li`.
-- Inside a table cell the cell declares its own paragraph: only alignment and the left indent are written there, not the right or first-line indent, spacing, tab stops or keep-with-next.
+- Inside a table cell the cell declares its own paragraph: alignment, the left indent and spacing are written there, not the right or first-line indent, tab stops or keep-with-next.
 - `rtfToHtml` reads the three indents back, in points: `\li720\ri720\fi-720` becomes `margin-left:36pt;margin-right:36pt;text-indent:-36pt`, and `RtfViewer` shows them. As in RTF, they hold from one paragraph to the next until `\pard`. Indents inside a table cell are not read.
 - A heading outside a table cell also writes its right and first-line indents, so a heading read from RTF with a hanging number goes back as it came. A picture is read with a left margin only, where its line starts.
-- `rtfToHtml` reads spacing back too: `\sb120\sa240\sl360\slmult1` becomes `margin-top:6pt;margin-bottom:12pt;line-height:1.5`, on a paragraph, a heading or a picture, and holds until `\pard` as the indents do. Line spacing "at least" (a positive `\sl` without `\slmult1`) is not something CSS can say, and is left out. Spacing inside a table cell is not read.
+- `rtfToHtml` reads spacing back too: `\sb120\sa240\sl360\slmult1` becomes `margin-top:6pt;margin-bottom:12pt;line-height:1.5`, on a paragraph, a heading, a list item (as the `<li>`'s style) or a picture, and holds until `\pard` as the indents do. Line spacing "at least" (a positive `\sl` without `\slmult1`) is not something CSS can say, and is left out. In a table cell where a paragraph is spaced, as Word writes a cell's paragraphs, each of the cell's paragraphs is read as a `<p>` with its spacing; a cell with none spaced is read as lines, as before.
 - `rtfToHtml` does not yet read keep-with-next or tab stops back.
 
 ### Line and paragraph spacing
@@ -441,7 +441,7 @@ The **Spacing** list in the toolbar sets, for the paragraphs the selection touch
 - **Line spacing**: 1, 1.15, 1.5 or 2 lines, or Default (the document's own).
 - **Space before paragraph** and **Space after paragraph**: 0, 6 or 12 pt.
 
-The list marks what the paragraph at the caret has, and shows a value it does not offer (`7.5 pt` from a pasted document) so that it can be seen and changed. A heading takes spacing as a paragraph does; a list item and a table cell do not. With a picture selected, the space before and after is the picture's, which is how the distance between two pictures, one under the other, is set. Each change is one step for Undo.
+The list marks what the paragraph at the caret has, and shows a value it does not offer (`7.5 pt` from a pasted document) so that it can be seen and changed. A heading takes spacing as a paragraph does, and so does a list item: the item the caret is in, as one paragraph, its style on the `<li>`. In the RTF its space before is on its first paragraph, its space after on its last, and its line spacing on each. In a table cell the paragraph the caret is in is spaced; a line typed straight into the cell is made a paragraph first. With a picture selected, the space before and after is the picture's, which is how the distance between two pictures, one under the other, is set. Each change is one step for Undo.
 
 `setLineSpacing(lines)` and `setParagraphSpacing({ before, after })` do the same from code, with any value: up to 10 lines, and up to 144 pt. Copy format carries a paragraph's spacing with its alignment and indents.
 
