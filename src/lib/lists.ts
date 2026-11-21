@@ -334,6 +334,16 @@ function unnest(item: HTMLLIElement): boolean {
 	} else {
 		for (const node of after) node.parentNode?.removeChild(node);
 	}
+	// What the item it was under holds after this list comes after the item in the document,
+	// and still does: it is under the item now, with what followed it in its own list. (An
+	// item may hold two lists, bullets and then numbers, or a paragraph after its list, as
+	// Word pastes one. Left where it was, it was before the item that had been above it:
+	// "Negative for dysplasia" went under "See comment".)
+	if (isItem(above)) {
+		const rest: Node[] = [];
+		for (let next = list.nextSibling; next; next = next.nextSibling) rest.push(next);
+		if (rest.some((node) => !isBlank(node))) item.append(...rest);
+	}
 	// (A list straight inside a list, as some editors nest, is parted where the item was.)
 	(isItem(above) ? above : list).after(item);
 	if (!Array.from(list.childNodes).some((node) => !isBlank(node))) list.remove();
