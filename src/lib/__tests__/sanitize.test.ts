@@ -568,10 +568,10 @@ describe('InkEditor: what a review of these changes found', () => {
 	it('a button that does something once is not announced as pressed or not; one that is on or off is', () => {
 		open({ content: '<p>x</p>' });
 		const button = (title: string) => host!.querySelector(`.toolbar button[title="${title}"]`)!;
-		for (const title of ['Undo (Ctrl+Z)', 'Redo', 'Insert image', 'Horizontal rule', 'Bullet list', 'Clear formatting']) {
+		for (const title of ['Undo (Ctrl+Z)', 'Redo', 'Insert image', 'Horizontal rule', 'Insert table', 'Clear formatting']) {
 			expect(button(title).hasAttribute('aria-pressed'), title).toBe(false);
 		}
-		for (const title of ['Bold (Ctrl+B)', 'Italic (Ctrl+I)', 'Underline (Ctrl+U)', 'Strikethrough', 'Copy format']) {
+		for (const title of ['Bold (Ctrl+B)', 'Italic (Ctrl+I)', 'Underline (Ctrl+U)', 'Strikethrough', 'Bullet list', 'Numbered list', 'Copy format']) {
 			expect(button(title).getAttribute('aria-pressed'), title).toBe('false');
 		}
 	});

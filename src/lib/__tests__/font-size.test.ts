@@ -323,181 +323,197 @@ describe('InkEditor: setting the size of selected text', () => {
 });
 
 describe('InkEditor: a change of size through undo and redo', () => {
-	// Found by clicking the real Undo and Redo buttons in Chromium. The browser undoes and redoes
-	// its own step: the element it made, the size it took off one, and the mark for size 7. It
-	// knows nothing of the size given afterwards. What it does at each step is stood in here, as
-	// Chromium 156 was seen to do it, followed by the input event it sends.
-
-	const history = (kind: 'historyUndo' | 'historyRedo', change: () => void) => {
-		change();
-		const event = new Event('input', { bubbles: true });
-		Object.defineProperty(event, 'inputType', { value: kind });
-		contentEl().dispatchEvent(event);
+	// Undo and Redo are the editor's own (history.ts): each change of size is a step, and what
+	// comes back is the document as that step left it, with the size in points. (The browser's
+	// own Redo did its part of the change again, the mark for size 7 and nothing after it, and
+	// the text came back at 36 pt.)
+	const press = (title: 'Undo (Ctrl+Z)' | 'Redo') => {
+		(host.querySelector(`button[title="${title}"]`) as HTMLElement).click();
 		flushSync();
 	};
-	const typed = () => {
-		const event = new Event('input', { bubbles: true });
-		Object.defineProperty(event, 'inputType', { value: 'insertText' });
-		contentEl().dispatchEvent(event);
+	const key = (init: KeyboardEventInit) => {
+		contentEl().dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }));
 		flushSync();
 	};
-	/** The browser redoing a change of size on an element that was there: it marks it and takes its size off. */
-	const markAgain = (font: HTMLElement) => {
-		font.setAttribute('size', '7');
-		font.style.removeProperty('font-size');
+	const font = () => contentEl().querySelector('font') as HTMLElement | null;
+	/** Words typed at the end of an element, as the browser says them: before, and after. */
+	const type = (into: Element, text: string) => {
+		for (const name of ['beforeinput', 'input']) {
+			if (name === 'input') into.append(text);
+			const event = new Event(name, { bubbles: true, cancelable: true });
+			Object.defineProperty(event, 'inputType', { value: 'insertText' });
+			contentEl().dispatchEvent(event);
+		}
+		flushSync();
 	};
+	/** Select the word that was sized, where it is now. */
+	const selectSized = () => selectText(font()!, 0, 4);
 
-	it('a redone change gets its size again: it came back as the mark alone, at 36 pt', async () => {
+	it('Undo takes a change of size back and Redo makes it again, at its size: it came back as the mark alone, at 36 pt', () => {
 		mountEditor();
 		selectText(contentEl().querySelector('p')!, 7, 11);
 		choose(16);
+		selectSized();
 		choose(9);
-		const font = contentEl().querySelector('font') as HTMLElement;
+		expect(font()!.style.fontSize).toBe('9pt');
 
-		history('historyUndo', () => (font.style.fontSize = '16pt'));
-		expect(font.style.fontSize).toBe('16pt');
-		history('historyRedo', () => markAgain(font));
+		press('Undo (Ctrl+Z)');
+		expect(font()!.style.fontSize).toBe('16pt');
+		press('Redo');
 
-		expect(font.hasAttribute('size')).toBe(false);
-		expect(font.style.fontSize).toBe('9pt');
+		expect(font()!.hasAttribute('size')).toBe(false);
+		expect(font()!.style.fontSize).toBe('9pt');
 		expect(editor!.getRTF()).toContain('\\fs18 body');
 		expect(editor!.getRTF()).not.toContain('\\fs72');
 	});
 
 	it('three sizes, all undone and all redone, come back in order', () => {
 		mountEditor();
-		const p = contentEl().querySelector('p')!;
-		selectText(p, 7, 11);
+		selectText(contentEl().querySelector('p')!, 7, 11);
 		choose(16);
+		selectSized();
 		choose(9);
+		selectSized();
 		choose(20);
-		const font = contentEl().querySelector('font') as HTMLElement;
-		const text = font.firstChild!;
 
-		history('historyUndo', () => (font.style.fontSize = '9pt'));
-		history('historyUndo', () => (font.style.fontSize = '16pt'));
-		history('historyUndo', () => font.replaceWith(text));
-		expect(p.innerHTML).toBe('Report body text');
+		press('Undo (Ctrl+Z)');
+		expect(font()!.style.fontSize).toBe('9pt');
+		press('Undo (Ctrl+Z)');
+		expect(font()!.style.fontSize).toBe('16pt');
+		press('Undo (Ctrl+Z)');
+		expect(contentEl().querySelector('p')!.innerHTML).toBe('Report body text');
+		// (And there is no more to undo.)
+		press('Undo (Ctrl+Z)');
+		expect(contentEl().querySelector('p')!.innerHTML).toBe('Report body text');
 
-		history('historyRedo', () => {
-			text.parentNode!.insertBefore(font, text);
-			font.appendChild(text);
-		});
-		expect(font.style.fontSize).toBe('16pt');
-		history('historyRedo', () => markAgain(font));
-		expect(font.style.fontSize).toBe('9pt');
-		history('historyRedo', () => markAgain(font));
-		expect(font.style.fontSize).toBe('20pt');
-		expect(font.hasAttribute('size')).toBe(false);
+		press('Redo');
+		expect(font()!.style.fontSize).toBe('16pt');
+		press('Redo');
+		expect(font()!.style.fontSize).toBe('9pt');
+		press('Redo');
+		expect(font()!.style.fontSize).toBe('20pt');
+		expect(font()!.hasAttribute('size')).toBe(false);
 	});
 
 	it('undone, redone, undone and redone again', () => {
 		mountEditor();
 		selectText(contentEl().querySelector('p')!, 7, 11);
 		choose(16);
+		selectSized();
 		choose(9);
-		const font = contentEl().querySelector('font') as HTMLElement;
 
 		for (let round = 0; round < 3; round++) {
-			history('historyUndo', () => (font.style.fontSize = '16pt'));
-			history('historyRedo', () => markAgain(font));
-			expect(font.style.fontSize, `round ${round}`).toBe('9pt');
+			press('Undo (Ctrl+Z)');
+			expect(font()!.style.fontSize, `round ${round}`).toBe('16pt');
+			press('Redo');
+			expect(font()!.style.fontSize, `round ${round}`).toBe('9pt');
 		}
 	});
 
-	it('the toolbar\'s own Undo and Redo buttons do the same', () => {
+	it('the keys do the same, and the browser\'s own Undo is never asked', () => {
 		mountEditor();
 		selectText(contentEl().querySelector('p')!, 7, 11);
 		choose(16);
+		selectSized();
 		choose(9);
-		const font = contentEl().querySelector('font') as HTMLElement;
+		const commands: string[] = [];
 		const doc = document as unknown as { execCommand: (command: string, ui?: boolean, value?: string) => boolean };
-		const before = doc.execCommand;
-		doc.execCommand = (command, ui, value) => {
-			if (command === 'undo') font.style.fontSize = '16pt';
-			else if (command === 'redo') markAgain(font);
-			else return before(command, ui, value);
-			return true;
-		};
-		(host.querySelector('button[title="Undo (Ctrl+Z)"]') as HTMLElement).click();
-		flushSync();
-		expect(font.style.fontSize).toBe('16pt');
-		(host.querySelector('button[title="Redo"]') as HTMLElement).click();
+		const browser = doc.execCommand;
+		doc.execCommand = (command, ui, value) => (commands.push(command), browser(command, ui, value));
+
+		key({ key: 'z', ctrlKey: true });
+		expect(font()!.style.fontSize).toBe('16pt');
+		key({ key: 'z', ctrlKey: true, shiftKey: true });
+		expect(font()!.style.fontSize).toBe('9pt');
+		key({ key: 'z', metaKey: true });
+		expect(font()!.style.fontSize).toBe('16pt');
+		key({ key: 'y', ctrlKey: true });
+		expect(font()!.style.fontSize).toBe('9pt');
+		expect(commands).toEqual([]);
+	});
+
+	it('the browser\'s own menu leads to the same Undo: what it was about to do is not done', () => {
+		mountEditor();
+		selectText(contentEl().querySelector('p')!, 7, 11);
+		choose(16);
+
+		const event = new Event('beforeinput', { bubbles: true, cancelable: true });
+		Object.defineProperty(event, 'inputType', { value: 'historyUndo' });
+		contentEl().dispatchEvent(event);
 		flushSync();
 
-		expect(font.hasAttribute('size')).toBe(false);
-		expect(font.style.fontSize).toBe('9pt');
+		expect(event.defaultPrevented).toBe(true);
+		expect(contentEl().querySelector('p')!.innerHTML).toBe('Report body text');
 	});
 
 	it('other edits undone and redone in between do not lose the place', () => {
 		mountEditor();
 		selectText(contentEl().querySelector('p')!, 7, 11);
 		choose(16);
+		selectSized();
 		choose(9);
-		const font = contentEl().querySelector('font') as HTMLElement;
-		const p = contentEl().querySelector('p')!;
 
 		// A word is typed after the two changes, and everything is undone.
-		p.append(' more');
-		typed();
-		history('historyUndo', () => p.lastChild!.remove());
-		history('historyUndo', () => (font.style.fontSize = '16pt'));
+		type(contentEl().querySelector('p')!, ' more');
+		press('Undo (Ctrl+Z)');
+		expect(contentEl().querySelector('p')!.textContent).toBe('Report body text');
+		expect(font()!.style.fontSize).toBe('9pt');
+		press('Undo (Ctrl+Z)');
+		expect(font()!.style.fontSize).toBe('16pt');
 		// Redone: the change of size, then the typing.
-		history('historyRedo', () => markAgain(font));
-		expect(font.style.fontSize).toBe('9pt');
-		history('historyRedo', () => p.append(' more'));
-		expect(font.style.fontSize).toBe('9pt');
+		press('Redo');
+		expect(font()!.style.fontSize).toBe('9pt');
+		press('Redo');
+		expect(font()!.style.fontSize).toBe('9pt');
+		expect(contentEl().querySelector('p')!.textContent).toBe('Report body text more');
 	});
 
-	it('after a new edit, what was undone cannot be redone: a mark that comes with no change to go with it is taken off', () => {
+	it('after a new edit, what was undone cannot be redone', () => {
 		mountEditor();
 		selectText(contentEl().querySelector('p')!, 7, 11);
 		choose(16);
+		selectSized();
 		choose(9);
-		const font = contentEl().querySelector('font') as HTMLElement;
-		history('historyUndo', () => (font.style.fontSize = '16pt'));
-		contentEl().querySelector('p')!.append('!');
-		typed();
+		press('Undo (Ctrl+Z)');
+		type(contentEl().querySelector('p')!, '!');
 
-		history('historyRedo', () => markAgain(font));
+		press('Redo');
 
-		// Not 36 pt: the size of the text around it.
-		expect(font.hasAttribute('size')).toBe(false);
-		expect(font.style.fontSize).toBe('1em');
+		expect(font()!.style.fontSize).toBe('16pt');
+		expect(contentEl().querySelector('p')!.textContent).toBe('Report body text!');
 	});
 
 	it('a new size chosen after an undo takes the place of the one that was undone', () => {
 		mountEditor();
-		const p = contentEl().querySelector('p')!;
-		selectText(p, 7, 11);
+		selectText(contentEl().querySelector('p')!, 7, 11);
 		choose(16);
+		selectSized();
 		choose(9);
-		const font = contentEl().querySelector('font') as HTMLElement;
-		const text = font.firstChild!;
-		history('historyUndo', () => (font.style.fontSize = '16pt'));
+		press('Undo (Ctrl+Z)');
 		// 9 pt can no longer be redone: 20 pt is the change after 16 pt now.
-		selectText(font, 0, 4);
+		selectSized();
 		choose(20);
 
-		history('historyUndo', () => (font.style.fontSize = '16pt'));
-		history('historyUndo', () => font.replaceWith(text));
-		history('historyRedo', () => {
-			text.parentNode!.insertBefore(font, text);
-			font.appendChild(text);
-		});
-		history('historyRedo', () => markAgain(font));
+		press('Undo (Ctrl+Z)');
+		expect(font()!.style.fontSize).toBe('16pt');
+		press('Undo (Ctrl+Z)');
+		expect(font()).toBeNull();
+		press('Redo');
+		press('Redo');
 
-		expect(font.style.fontSize).toBe('20pt');
+		expect(font()!.style.fontSize).toBe('20pt');
 	});
 
 	it('text that came in marked size 7 from an old page is left alone by undo and redo', () => {
 		mountEditor({ content: '<p>Report body text</p><p><font size="7">Old page</font></p>' });
 		selectText(contentEl().querySelector('p')!, 7, 11);
 		choose(16);
-		const font = contentEl().querySelector('font') as HTMLElement;
-		history('historyUndo', () => font.replaceWith(font.firstChild!));
+		press('Undo (Ctrl+Z)');
+		expect(contentEl().querySelectorAll('p')[1].innerHTML).toBe('<font size="7">Old page</font>');
+		press('Redo');
 
 		expect(contentEl().querySelectorAll('p')[1].innerHTML).toBe('<font size="7">Old page</font>');
+		expect((contentEl().querySelector('p font') as HTMLElement).style.fontSize).toBe('16pt');
 	});
 
 	it('a <font> element that was there with no size is given 1em before the change, so that undo has a size to put back', () => {

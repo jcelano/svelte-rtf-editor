@@ -78,51 +78,48 @@ describe('InkEditor: Clear formatting', () => {
 		expect(editor.querySelector('b')).toBeNull();
 	});
 
-	it('Undo puts back what was written on the elements, with what the browser puts back', () => {
+	const press = (editor: HTMLElement, init: KeyboardEventInit): boolean => {
+		const key = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init });
+		editor.dispatchEvent(key);
+		flushSync();
+		return key.defaultPrevented;
+	};
+
+	it('Undo puts back what was written on the elements, and the elements, in one step; Redo clears it again', () => {
 		const editor = open('<p style="color: red; text-align: right;">a <b>bold</b></p><p>end</p>');
 		const before = editor.innerHTML;
 		selectAll(editor);
 		api().clearFormatting();
-		expect(editor.innerHTML).toBe('<p style="text-align: right;">a bold</p><p>end</p>');
-		const undo = new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true, cancelable: true });
-		editor.dispatchEvent(undo);
-		expect(undo.defaultPrevented).toBe(true);
-		expect(commands).toEqual(['removeFormat', 'undo']);
+		const cleared = '<p style="text-align: right;">a bold</p><p>end</p>';
+		expect(editor.innerHTML).toBe(cleared);
+		expect(press(editor, { key: 'z', ctrlKey: true })).toBe(true);
 		expect(editor.innerHTML).toBe(before);
-	});
-
-	it('is no longer the editor\'s to undo once the document has been edited', () => {
-		const editor = open('<p style="color: red;">a <b>bold</b></p>');
-		selectAll(editor);
-		api().clearFormatting();
-		editor.querySelector('p')!.append(' typed');
-		editor.dispatchEvent(new Event('input', { bubbles: true }));
-		const undo = new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true, cancelable: true });
-		editor.dispatchEvent(undo);
-		// The key is left to the browser, whose history has the typing first.
-		expect(undo.defaultPrevented).toBe(false);
+		// (The editor's own history: the browser's Undo, which knew nothing of the color taken
+		// off the paragraph, is not asked.)
+		expect(commands).toEqual(['removeFormat']);
+		// And Redo, by Ctrl+Y, clears it again.
+		expect(press(editor, { key: 'y', ctrlKey: true })).toBe(true);
+		expect(editor.innerHTML).toBe(cleared);
 		expect(commands).toEqual(['removeFormat']);
 	});
 
-	it('puts the color back when the browser itself undoes the command, after more was typed', () => {
+	it('is undone after more was typed as well: the typing first, then the clearing', () => {
 		const editor = open('<p style="color: red; text-align: right;">a <b>bold</b></p><p>end</p>');
 		const before = editor.innerHTML;
 		selectAll(editor);
 		api().clearFormatting();
-		const typed = document.createTextNode(' typed');
-		editor.querySelectorAll('p')[1].append(typed);
+		editor.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', bubbles: true, cancelable: true }));
+		editor.querySelectorAll('p')[1].append(' typed');
 		editor.dispatchEvent(new InputEvent('input', { inputType: 'insertText', bubbles: true }));
-		// The browser's Undo, twice: what was typed, then its command. The <b> is back; the
-		// paragraph's color is not the browser's to put back.
-		typed.remove();
-		editor.dispatchEvent(new InputEvent('input', { inputType: 'historyUndo', bubbles: true }));
+		expect(press(editor, { key: 'z', ctrlKey: true })).toBe(true);
 		expect(editor.innerHTML).toBe('<p style="text-align: right;">a bold</p><p>end</p>');
-		doc.execCommand!('undo');
-		editor.dispatchEvent(new InputEvent('input', { inputType: 'historyUndo', bubbles: true }));
+		// (Once anything was typed after it, the color did not come back.)
+		expect(press(editor, { key: 'z', ctrlKey: true })).toBe(true);
 		expect(editor.innerHTML).toBe(before);
+		expect(commands).toEqual(['removeFormat']);
 	});
 
-	it('is the editor\'s to undo again when what was typed after it has been undone, where the command left nothing', () => {
+	it('a clearing that changed only what is written on a paragraph is a step like any other', () => {
 		// (No <b> here: all there is to clear is written on the paragraph.)
 		const editor = open('<p style="color: red; text-align: right;">red</p><p>end</p>');
 		const before = editor.innerHTML;
@@ -130,20 +127,9 @@ describe('InkEditor: Clear formatting', () => {
 		api().clearFormatting();
 		const cleared = editor.innerHTML;
 		expect(cleared).toBe('<p style="text-align: right;">red</p><p>end</p>');
-		const typed = document.createTextNode(' typed');
-		editor.querySelectorAll('p')[1].append(typed);
-		editor.dispatchEvent(new InputEvent('input', { inputType: 'insertText', bubbles: true }));
-		typed.remove();
-		editor.dispatchEvent(new InputEvent('input', { inputType: 'historyUndo', bubbles: true }));
-		expect(editor.innerHTML).toBe(cleared);
-		const undo = new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true, cancelable: true });
-		editor.dispatchEvent(undo);
-		expect(undo.defaultPrevented).toBe(true);
+		expect(press(editor, { key: 'z', metaKey: true })).toBe(true);
 		expect(editor.innerHTML).toBe(before);
-		// And Redo, by Ctrl+Y, clears it again.
-		const redo = new KeyboardEvent('keydown', { key: 'y', ctrlKey: true, bubbles: true, cancelable: true });
-		editor.dispatchEvent(redo);
-		expect(redo.defaultPrevented).toBe(true);
+		expect(press(editor, { key: 'z', metaKey: true, shiftKey: true })).toBe(true);
 		expect(editor.innerHTML).toBe(cleared);
 	});
 

@@ -13,6 +13,8 @@ RTF viewer and rich-text editor components for **Svelte 5**.
 - **`InkEditor`** — Full rich-text editor that reads and writes RTF, built on `contenteditable`
   - Formatting toolbar: bold, italic, underline, strikethrough, font colour
   - Block-level controls: headings (H1–H3), paragraph, blockquote, code block
+  - Bullet and numbered lists, and lists within lists, made the same in every browser. See [Lists](#lists)
+  - Undo and Redo of everything the editor changes, a picture or a table put in as much as typing. See [Undo and Redo](#undo-and-redo)
   - Line spacing, and the space before and after a paragraph, in points. See [Line and paragraph spacing](#line-and-paragraph-spacing)
   - Tables: insert one with or without borders; the borders are in the RTF. See [Tables](#tables)
   - Images: upload, paste or drag-and-drop, with a description below each picture, drag-to-resize, left/centre/right placement, move up and down, and two or more side by side, each with its own description — embedded in the RTF, not linked
@@ -172,6 +174,8 @@ editor.clearFormatting()  // → void    — take bold, italic, underline, strik
 editor.setLineSpacing(1.5) // → void   — line spacing of the selected paragraphs, in lines; null for the document's own
 editor.setParagraphSpacing({ before: 6, after: 12 }) // → void — space before and after them, in points; either may be left out, 0 or null is none
 editor.insertTable(3, 2, { borders: true, header: false }) // → void — a table of empty cells after the paragraph the caret is in
+editor.undo()             // → boolean — take back the last step; false if there was none
+editor.redo()             // → boolean — make a step that was taken back again; false if there was none
 ```
 
 #### Auto-save
@@ -372,11 +376,39 @@ The toolbar's Clear formatting button, next to the text color, takes the formatt
 
 - Only the selected words change: clearing two words of a bold sentence leaves the rest bold.
 - The result is the same HTML in Chromium, Firefox and Safari (the browser tests run in all three engines, on every push). The browsers' own command is not: one takes a paragraph's alignment with its color, another leaves the color on the paragraph, a third takes out the element your mark is on.
-- Undo puts the formatting back and Redo takes it off again, from the keyboard and from the toolbar, also after more has been typed and undone. In Safari one Undo may take back the step before it as well.
-- On a very long selection it takes time, and four times as long for twice the length. The time is the browser's own command, which the editor uses so that the browser's Undo knows of the change: measured on paragraphs with four formatted runs each, 250 of them (about eight pages) clear in a quarter of a second in Chromium, 1,000 in three seconds, 2,000 in twelve; Safari's engine takes about two thirds of that and Firefox a tenth. A report of ordinary length is not affected.
+- Undo puts the formatting back and Redo takes it off again, from the keyboard and from the toolbar, also after more has been typed and undone.
+- On a very long selection it takes time, and four times as long for twice the length. The time is the browser's own command: measured on paragraphs with four formatted runs each, 250 of them (about eight pages) clear in a quarter of a second in Chromium, 1,000 in three seconds, 2,000 in twelve; Safari's engine takes about two thirds of that and Firefox a tenth. A report of ordinary length is not affected.
 - A mark stays whole in all three browsers, whatever part of it is selected. In Firefox the words inside it keep the bold or italic they have there: its command cannot clear them without cutting the mark in two.
 
 ---
+
+## Lists
+
+The toolbar's **Bullet list** and **Numbered list** buttons are the editor's own, not the browser's list commands, so a list is made the same in Chrome, Edge, Safari and Firefox, and its HTML is the same.
+
+- **Making a list.** Every line the selection touches becomes an item: a paragraph, a heading, or a line of words in no paragraph. Lines next to each other are one list, and a line made an item next to a list of the same kind is an item of that list, whichever is made first; the numbers run on. The caret stays in the words where it was.
+- **Taking it off.** The button of the kind the items already are makes them paragraphs again, one paragraph for each item. One item taken off in the middle leaves a list before it and a list after it.
+- **The other kind.** With the caret in a list, the other button changes the whole list, bullets to numbers or back. With items selected, it changes those items.
+- **A list within a list.** `Tab` at the start of an item, or Increase indent anywhere in it, puts the item under the item before it; `Shift+Tab` or Decrease indent takes it out again. Several items selected go together. The first item of a list has none before it to go under: there Increase indent moves the whole list, as it moves a paragraph, and `Tab` types a tab.
+- **Leaving a list.** `Enter` in an item with nothing in it, and `Backspace` at the start of an item, take the item one list out; from a list that is in no other, it becomes a paragraph.
+- The buttons are lit while the caret is in a list of their kind. In a list within a list, the kind is the inner list's.
+- Not made an item: a picture with its caption, a table as a whole (a line inside a cell is), a code block.
+- A lettered list or one in Roman numerals (`<ol type="A">`) is kept as it is and takes new items; the buttons make bullets and plain numbers only.
+
+How a list is written to RTF and read back is under [What is written, and what is read back](#what-is-written-and-what-is-read-back).
+
+## Undo and Redo
+
+The editor keeps its own history. `Ctrl+Z` / `Cmd+Z`, `Ctrl+Shift+Z` / `Cmd+Shift+Z`, `Ctrl+Y`, the toolbar's buttons, the browser's Edit menu, and `editor.undo()` / `editor.redo()` all go through it.
+
+A browser's history knows only its own commands and what was typed. It knew nothing of a picture or a table put in, a picture moved, placed beside another or resized, an indent, a spacing, or a list: its Undo went past those to the typing before them, and after some of them it could undo nothing at all. The editor's history takes back whatever changed the document, in the order it was done.
+
+- **A step** is one press of a button, one paste, one drop, a new paragraph, or a run of typing. Typing is one step until the writer pauses for a second, moves the caret, or changes from typing to deleting.
+- **The caret** is put back where it was before the step.
+- **Redo** makes a step again that Undo took back, until something else is changed.
+- **A new document starts a new history.** After `setHTML()`, `clear()`, or an RTF file imported, Undo does not lead back into the document that was there before.
+- What Undo puts back is checked as everything that reaches the editor is (see [HTML from outside](#html-from-outside)).
+- 200 steps are kept. A step holds the document's HTML with each embedded picture kept once, not once per step, so a report with megabytes of pictures does not hold them 200 times.
 
 ## Paragraph formatting
 
@@ -438,6 +470,7 @@ In the editor and in `RtfViewer` a picture has no space of its own around it, as
 | `<table>` | one `\trowd … \row` per row; see [Tables](#tables) | `<table>` |
 | `<br>` | `\line` | `<br>` |
 
+- **The HTML of a list made in the editor** is a `<ul>` or `<ol>` beside the paragraphs around it, and a list within a list is inside the item it is under (`<ul><li>skin<ul><li>left arm</li></ul></li></ul>`): the shape `rtfToHtml` returns, so what is kept reads back as the same document. See [Lists](#lists). A block a browser leaves inside a paragraph (Firefox leaves pasted paragraphs inside the paragraph they were pasted in), which no HTML can say, is put beside the paragraph as soon as it is there, and `getHTML()`, `onchange`, `onsave`, the draft kept by `autosave` and the HTML export never hand one out.
 - **Lists.** Only the shape above is read back as a list: a bullet or `N.`, a tab, and a paragraph that hangs by 360 twips and has no right indent or alignment of its own. Word's lists have that shape and are read as lists, including the bullet it writes in a `{\listtext}` group. Anything else stays the paragraph it is, marker and all, because it could not be written back the same: a line typed as `- Invasive adenocarcinoma.`, a list hung by another distance, one marked `a)` or `1)`, a centered one. A list in a table cell is read as lines of text.
 - **Lettered lists.** A list numbered in letters or Roman numerals (`type="A"`, `a`, `I`, `i`, or the same as `list-style-type`, on the list or on each item as Google Docs writes it) is written with the markers the screen shows, from the list's `start` and an item's own `value`: specimen parts lettered A, B, C are A, B, C in the RTF, and "see part B" finds its item. Through 1.12.0 they were written 1, 2, 3. Such a list is read back as a list of its kind. Letters that are numerals too are told apart by what comes next: `C.` before `D.` is the third letter, before `CI.` it is a hundred. A letter and a tab typed on a line of another shape (`A.`, a tab, the specimen, as other systems write a report) stay what was typed.
 - **Colors and backgrounds.** A text color is written (`\cf`). A background is not, neither a highlight nor the shading of a table cell, and shading in an RTF is not shown: every word ends up on white. So a color that can be read on its background and not on white is left out, and the words are in the reader's own color: the white header of a table with a dark header row, a sentence copied from a page with a dark theme. Through 1.12.0 such words were written white, and could not be seen in the report. A color that can be read on white is written whatever is behind it, and a light color with no background behind it is written as the screen shows it. The editor still shows a pasted table with its shading; the RTF has the same words without it. A picture or a gradient as a background is not kept at all (nothing is loaded for a document), so light words that stood on one are put in the page's own color when the document is made safe, in the editor as in the RTF, unless there is a background color behind them still.
@@ -540,6 +573,10 @@ The components use CSS custom properties with sensible fallbacks, so they work o
 }
 ```
 
+### In a page with styles of its own
+
+The editor and the viewer say for themselves how a list is shown: a bullet, a circle and a square by depth, and numbers. A page that takes the markers off its own lists (`ol, ul { list-style: none }`, as Tailwind's base styles and most CSS resets do) does not take them off a document's; through 1.13 a list in such a page was indented lines with nothing in front of them. A list that says its own marker by `list-style-type` keeps it. One that says it by `type="A"` alone is still at the mercy of such a rule: CSS cannot tell `type="A"` from `type="a"` in every browser, so the editor has no rule of its own for it.
+
 ---
 
 ## Keyboard shortcuts
@@ -555,11 +592,14 @@ The components use CSS custom properties with sensible fallbacks, so they work o
 | `Backspace` / `Delete` | Remove the selected image |
 | `Ctrl+]` / `Cmd+]` | Increase indent of the selected paragraphs by 0.5 in (RTF `\li720` per step) |
 | `Ctrl+[` / `Cmd+[` | Decrease indent |
-| `Tab`      | Insert a tab (sent to RTF as `\tab`); two spaces in a code block. With several lines selected, increase their indent |
-| `Shift+Tab` | Remove one tab from the start of the line. With several lines selected, decrease their indent |
+| `Tab`      | Insert a tab (sent to RTF as `\tab`); two spaces in a code block. With several lines selected, increase their indent. At the start of a list item, put the item under the item before it |
+| `Shift+Tab` | Remove one tab from the start of the line. With several lines selected, decrease their indent. In an item of a list within a list, take the item out from under the item it is under |
+| `Enter` in an empty list item, `Backspace` at the start of one | Take the item out of its list: one list out, then a paragraph |
+| `Ctrl+Z` / `Cmd+Z` | Undo |
+| `Ctrl+Shift+Z` / `Cmd+Shift+Z`, `Ctrl+Y` | Redo |
 | `Esc`, then `Tab` / `Shift+Tab` | Move focus out of the editor |
 
-The toolbar's Increase indent and Decrease indent buttons do the same as `Ctrl+]` and `Ctrl+[`. Undo reverses an indent step until the next edit.
+The toolbar's Increase indent and Decrease indent buttons do the same as `Ctrl+]` and `Ctrl+[`. Each press is one Undo step. In a list they put the selected items under the item before them, and take them out again (see [Lists](#lists)).
 
 Four more toolbar buttons set the other two RTF indents, 0.5 in per press, on a paragraph outside a table cell (not on a list, a heading, a quotation or a code block):
 
@@ -623,11 +663,13 @@ Click an image to select it. A frame appears with corner handles you can drag to
 
 - **Move up** and **Move down** take the selected picture, with its description, over the block above or below it: a paragraph, a table, another picture.
 - **Place beside the picture above** puts the selected picture to the right of the picture before it, each with its own description under it. A third and a fourth can join the row. Pictures too wide for their share of the page are made to fit; after that each is resized and aligned inside its own share, which is also how the distance between two of them is set (the left one aligned right and the right one aligned left are as close as they go).
+- **Dragging a picture** with the mouse does the same as the buttons. Dropped on the left or right half of another picture, it is put beside it, in a row, each picture with its own description under it; dropped on a picture of a row, it joins the row there, or changes places in its own row; dropped anywhere else, it is moved there whole, with its description, before or after the block it is dropped on. (Through 1.13 the browser moved the picture alone into the line it was dropped in, inside the other picture's figure, and its description was left behind as an empty line.)
+- **Gap** sets an exact distance between the pictures of a row, in points (72 pt = 1 inch), from the field in the frame of any picture in the row. Each picture's cell is then as wide as the picture and the gap is an empty cell between each two, so the distance is the same on the screen, in the RTF (`\cellx` edges, no padding inside a cell) and in Word; the row is as wide as what it holds, not stretched across the page. Pictures too wide for the page together with their gaps are made smaller alike. A picture that joins the row or leaves it keeps the gap; resizing one keeps it too. Left empty, the row shares the page equally again. `rtfToHtml` reads such a row back with the same widths.
 - **Place on its own line** takes a picture out of a row, and puts it under the row. Removing a picture from a row closes the row up; the last picture left is on a line of its own again.
 - A row of pictures is moved up and down as one.
 - **The space above and below a picture** is set from the toolbar's Spacing list while the picture is selected (see [Line and paragraph spacing](#line-and-paragraph-spacing)). A row of pictures has none to set.
 
-In the document a row of pictures is a table of one row with no borders, a `<figure>` in each cell, and that is what the RTF holds: a row of cells, each with a picture and its description. Word and other readers show the pictures side by side; `rtfToHtml` reads the row back as it was written. A picture in a row that has no description is read back as the picture alone in its cell, and is given a `<figure>` again when one is typed (the frame's Edit description button). There is no wrapping of text around a picture: RTF can say it, but the systems these documents go to do not show it reliably.
+In the document a row of pictures is a table of one row with no borders, a `<figure>` in each cell (and, with a gap set, an empty cell between each two), and that is what the RTF holds: a row of cells, each with a picture and its description. Word and other readers show the pictures side by side; `rtfToHtml` reads the row back as it was written. A picture in a row that has no description is read back as the picture alone in its cell, and is given a `<figure>` again when one is typed (the frame's Edit description button). There is no wrapping of text around a picture: RTF can say it, but the systems these documents go to do not show it reliably.
 
 ### How images are stored
 

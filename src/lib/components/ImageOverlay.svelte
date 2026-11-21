@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { MOST_GAP_PT } from '../picture-rows.js';
+
 	/**
 	 * ImageOverlay — selection frame for an image inside the editor.
 	 *
@@ -19,6 +21,8 @@
 		down: boolean;
 		/** 'join': it can go beside the picture above it. 'leave': it is beside another, and can go on a line of its own. */
 		beside: 'join' | 'leave' | null;
+		/** For a picture beside another: the space set between the pictures of its row, in points; null where they share the page equally. */
+		gap?: number | null;
 	}
 
 	interface Props {
@@ -39,9 +43,26 @@
 		onmove?: (direction: -1 | 1) => void;
 		/** Put the picture beside the one above it, or back on a line of its own. */
 		onbeside?: () => void;
+		/** Set the space between the pictures of the row, in points; null: they share the page equally. */
+		ongap?: (points: number | null) => void;
+		/** The picture's width changed, and a resize is not over yet. */
+		onresizing?: () => void;
 	}
 
-	let { target = null, bounds = null, within = null, maxWidth, onchange, onremove, oncaption, place, onmove, onbeside }: Props = $props();
+	let { target = null, bounds = null, within = null, maxWidth, onchange, onremove, oncaption, place, onmove, onbeside, ongap, onresizing }: Props = $props();
+
+	/** The gap typed: a number of points, or nothing (the row shares the page equally). */
+	function gapTyped(e: Event): void {
+		const input = e.currentTarget as HTMLInputElement;
+		const value = input.value.trim();
+		const points = value === '' ? null : Number(value);
+		if (points !== null && !(points > 0)) {
+			// (Not a gap: what the row has is shown again.)
+			input.value = where?.gap == null ? '' : String(where.gap);
+			return;
+		}
+		ongap?.(points);
+	}
 
 	const MIN_WIDTH = 40;
 	const CORNERS = ['nw', 'ne', 'sw', 'se'] as const;
@@ -110,6 +131,7 @@
 		target.removeAttribute('height');
 		target.style.width = `${width}px`;
 		target.style.height = 'auto';
+		onresizing?.();
 		reposition();
 	}
 
@@ -243,6 +265,20 @@
 					<button type="button" class="active" title="Place on its own line" onclick={() => onbeside?.()}>
 						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="8" height="12" rx="1"/><rect x="13" y="6" width="8" height="12" rx="1"/></svg>
 					</button>
+					<label class="ink-img-gap" title="Space between the pictures, in points (72 pt = 1 inch). Empty: the pictures share the width of the page.">
+						<span>Gap</span>
+						<input
+							type="number"
+							min="1"
+							max={MOST_GAP_PT}
+							step="1"
+							placeholder="auto"
+							aria-label="Gap between the pictures, in points"
+							value={where.gap ?? ''}
+							onchange={gapTyped}
+						/>
+						<span>pt</span>
+					</label>
 				{:else}
 					<button type="button" title="Place beside the picture above" disabled={where.beside !== 'join'} onclick={() => onbeside?.()}>
 						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="8" height="12" rx="1"/><rect x="13" y="6" width="8" height="12" rx="1"/></svg>
@@ -364,6 +400,27 @@
 	.ink-img-tools svg {
 		width: 14px;
 		height: 14px;
+	}
+
+	.ink-img-gap {
+		display: inline-flex;
+		align-items: center;
+		gap: 3px;
+		margin: 0 2px;
+		font-family: 'DM Sans', sans-serif;
+		font-size: 11px;
+		font-weight: 500;
+		color: var(--text-muted, #8a7e72);
+	}
+
+	.ink-img-gap input {
+		width: 4.2em;
+		padding: 1px 3px;
+		font: inherit;
+		color: inherit;
+		background: transparent;
+		border: 1px solid var(--border, #e5e2dc);
+		border-radius: 3px;
 	}
 
 	.ink-img-sep {

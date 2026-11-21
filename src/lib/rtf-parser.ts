@@ -229,6 +229,8 @@ interface RowCell {
 interface TableRow {
 	cells: RowCell[];
 	defs: CellDef[];
+	/** \trgaph: half the space between the text of two cells, in twips; null where the row says none. */
+	gaph?: number | null;
 }
 
 // ── Highlight palette (RTF \highlight 1-16) ──
@@ -1155,6 +1157,9 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 	let currentRowDefs: CellDef[] = [];
 	/** The definition of the row before, which a row with no \trowd of its own repeats. */
 	let lastRowDefs: CellDef[] = [];
+	/** The row's \trgaph, and the row before's, which a row with no \trowd of its own repeats. */
+	let rowGaph: number | null = null;
+	let lastRowGaph: number | null = null;
 	let pendingDef = newCellDef();
 	/** The side a \clbrdrX just named, until a border type (\brdrs...) confirms or \brdrnone clears it. */
 	let pendingSide: 'b' | 'other' | null = null;
@@ -1711,6 +1716,28 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			}
 		}
 
+		// Pictures side by side with a set gap: one row, a picture in each cell and an empty
+		// cell between each two, written with no space inside a cell (\trgaph0) and nothing
+		// drawn or shaded. It is read at its own widths, as it was written, and not stretched
+		// across the page: what was set is the distance between the pictures. (See
+		// picture-rows.ts.) A table that only looks like one, with borders, shading, or the
+		// space a reader puts inside its cells, is read as the table it is.
+		const plain = rows.length === 1 && rows[0].gaph === 0 && rows[0].defs.every((def) => !def.shade && Object.keys(def.borders).length === 0);
+		const only = plain && placedRows.length === 1 ? placedRows[0] : null;
+		const onePicture = (html: string) => /^<(figure|img)\b/.test(html) && html.split('<img').length === 2;
+		if (
+			only &&
+			only.length >= 3 &&
+			only.length % 2 === 1 &&
+			only.every((cell, i) => !cell.merged && !cell.header && cell.rowspan === 1 && cell.end === cell.start && cell.right > cell.left && (i % 2 === 0 ? onePicture(cell.html) : cell.html === ''))
+		) {
+			const cells = only.map((cell) => `<td style="padding:0;width:${(cell.right - cell.left) / 20}pt">${cell.html}</td>`).join('');
+			blocks.push({ kind: 'table', html: `<table style="border-collapse:collapse;margin:4px 0"><tr>${cells}</tr></table>` });
+			for (const aside of tableAsides) blocks.push(aside);
+			tableAsides = [];
+			return;
+		}
+
 		const total = edges[edges.length - 1] || 1;
 		// A cell's width is the difference of where it ends and where it starts, each as a
 		// share of the table rounded to a hundredth of a percent. Written that way the widths
@@ -2130,6 +2157,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 					// A row's definition, not its start: Word writes the definition before the
 					// cells and again before \row, so the cells read so far are kept.
 					currentRowDefs = [];
+					rowGaph = null;
 					pendingDef = newCellDef();
 					pendingSide = null;
 					borderSide = null;
@@ -2140,6 +2168,10 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 					lastRow = true;
 					break;
 				case 'trgaph':
+					rowGaph = p ?? null;
+					pendingSide = null;
+					pendingDef.edge = null;
+					break;
 				case 'trkeep':
 				case 'trleft':
 				case 'trhdr':
@@ -2293,8 +2325,10 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 					}
 					// A row with no definition of its own repeats the one before it.
 					const defs = currentRowDefs.length > 0 ? currentRowDefs : lastRowDefs;
-					tableRows.push({ cells: currentRowCells, defs });
+					const gaph: number | null = currentRowDefs.length > 0 ? rowGaph : lastRowGaph;
+					tableRows.push({ cells: currentRowCells, defs, gaph });
 					lastRowDefs = defs;
+					lastRowGaph = gaph;
 					currentRowCells = [];
 					currentRowDefs = [];
 					pendingDef = newCellDef();

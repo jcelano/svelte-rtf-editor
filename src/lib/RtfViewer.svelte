@@ -161,6 +161,29 @@
         margin-bottom: 0;
     }
 
+    /* The bullets and the numbers are said here: a page that takes them off its own lists
+       (`ol, ul { list-style: none }`, as Tailwind's base styles and most CSS resets do) does
+       not take them off a document's. A list that says its own marker keeps it. */
+    .rtf-viewer :global(ul:not([type])) {
+        list-style-type: disc;
+    }
+
+    .rtf-viewer :global(:is(ul, ol) ul:not([type])) {
+        list-style-type: circle;
+    }
+
+    .rtf-viewer :global(:is(ul, ol) :is(ul, ol) ul:not([type])) {
+        list-style-type: square;
+    }
+
+    .rtf-viewer :global(ol:not([type])) {
+        list-style-type: decimal;
+    }
+
+    .rtf-viewer :global(li) {
+        display: list-item;
+    }
+
     /* Code keeps the font the RTF names for it. A code block wraps, so a long line stays in
        the viewer. */
     .rtf-viewer :global(code),

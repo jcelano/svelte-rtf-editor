@@ -239,7 +239,7 @@ describe('Copy format', () => {
 		expect(target.getAttribute('data-rtf-tab-stops')).toBe('150px');
 		expect(api.getRTF()).toContain('\\pard\\tx2250\\li2250\\fi-2250 B.\\tab one\\par ');
 		key(editor, 'z', true);
-		expect(target.outerHTML).toBe('<p>B.<span style="white-space:pre">\t</span>one</p>');
+		expect(editor.querySelectorAll('p')[1].outerHTML).toBe('<p>B.<span style="white-space:pre">\t</span>one</p>');
 
 		click(button());
 		click(button());

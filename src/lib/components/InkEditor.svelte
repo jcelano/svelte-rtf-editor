@@ -93,6 +93,9 @@
 	import { keptMarks, pasteHasWords, pasteNotes, pasteWithoutFrames, removeWordHidden, sanitizedNodes, sanitizeTree, type PasteNotes } from '../sanitize.js';
 	import { givePastedPictures, pastePictures, type PastePictures } from '../paste-pictures.js';
 	import { readRtfFile, DEFAULT_MAX_RTF_BYTES } from '../rtf-parser.js';
+	import { createHistory, type DocumentHistory } from '../history.js';
+	import { GAPPED_ROW_STYLE, MOST_GAP_PT, isGapCell, isPlainCell, lengthTwips, pointsOf } from '../picture-rows.js';
+	import { toggleList, nestItems, unnestItems, leaveList, inEmptyItem, atItemStart, listKindAt, type ListKind } from '../lists.js';
 	import {
 		htmlToRtf,
 		estimateRtfBytes,
@@ -234,7 +237,9 @@
 		bold: false,
 		italic: false,
 		underline: false,
-		strikeThrough: false
+		strikeThrough: false,
+		bulletList: false,
+		numberedList: false
 	});
 
 	// Modal state
@@ -267,7 +272,82 @@
 
 	// ── Public API (exposed via bind:this) ──
 	export function getHTML(): string {
-		return editorEl?.innerHTML || '';
+		return documentHtml();
+	}
+
+	/** What a paragraph cannot hold in HTML: a parser that meets one ends the paragraph there. */
+	const BLOCKS = 'ul, ol, div, p, table, blockquote, pre, h1, h2, h3, h4, h5, h6, hr, figure';
+
+	/**
+	 * Put what no paragraph can hold beside the paragraph it is in, in the document itself.
+	 *
+	 * A browser leaves a block inside a paragraph in more than one way: Firefox leaves the
+	 * paragraphs of a paste inside the paragraph they were pasted in, and Chromium's and
+	 * Safari's list commands left the list inside the paragraph it was made from. No HTML can
+	 * say that. Read again, by an application that keeps what getHTML() or onsave gave it, or
+	 * by the editor's own Undo, it is an empty paragraph, the block, and another empty
+	 * paragraph, and the RTF of that has an empty line before and after. So each such block is
+	 * put where a parser would put it, with no empty paragraph around it; what the paragraph
+	 * held before a block and after it are paragraphs of their own.
+	 *
+	 * `live` says it is the document being edited: the caret stays in the words it was in, and
+	 * an empty line it is in stays to be typed in.
+	 */
+	function liftBlocks(root: HTMLElement, live: boolean): void {
+		if (!root.querySelector(`p > :is(${BLOCKS})`)) return;
+		const sel = live ? window.getSelection() : null;
+		const holds = (el: Element) => (el.textContent ?? '').trim() !== '' || !!el.querySelector(':not(br)');
+		const caretIn = (el: Element) => !!sel && sel.rangeCount > 0 && (el.contains(sel.anchorNode) || el.contains(sel.focusNode));
+		for (const paragraph of Array.from(root.querySelectorAll('p'))) {
+			if (!root.contains(paragraph) || !Array.from(paragraph.children).some((child) => child.matches(BLOCKS))) continue;
+			// A caret that is said by the paragraph itself (before its third child) is at that child.
+			const caretAt = sel && sel.isCollapsed && sel.anchorNode === paragraph ? { child: paragraph.childNodes[sel.anchorOffset] ?? null } : null;
+			const parts: Element[] = [];
+			const lines = new Set<Element>();
+			let line: Element | null = null;
+			for (const child of Array.from(paragraph.childNodes)) {
+				if (child instanceof Element && child.matches(BLOCKS)) {
+					line = null;
+					parts.push(child);
+				} else {
+					if (!line) {
+						line = paragraph.cloneNode(false) as Element;
+						lines.add(line);
+						parts.push(line);
+					}
+					line.appendChild(child);
+				}
+			}
+			// (A line with nothing in it is the paragraph the block was put in: the empty line
+			// the browser left before it or after it. It is no paragraph; a comment in it,
+			// which is an application's own mark, stays where it was.)
+			const kept = parts.flatMap((part): Node[] =>
+				!lines.has(part) || holds(part) || caretIn(part) ? [part] : Array.from(part.childNodes).filter((node) => node.nodeType === Node.COMMENT_NODE)
+			);
+			paragraph.replaceWith(...kept);
+			if (!caretAt || !sel) continue;
+			const at = caretAt.child?.isConnected ? caretAt.child : kept[kept.length - 1];
+			if (!at) continue;
+			const caret = document.createRange();
+			if (at instanceof Text) caret.setStart(at, caretAt.child === at ? 0 : at.length);
+			else caret.selectNodeContents(at);
+			caret.collapse(caretAt.child === at);
+			sel.removeAllRanges();
+			sel.addRange(caret);
+		}
+	}
+
+	/**
+	 * The document as HTML that says what the document is: see liftBlocks. (The document is
+	 * kept that way as it is edited. This is for one that is not, at the moment it is asked
+	 * for: it is never handed out as HTML that reads back as another document.)
+	 */
+	function documentHtml(): string {
+		if (!editorEl) return '';
+		if (!editorEl.querySelector(`p > :is(${BLOCKS})`)) return editorEl.innerHTML;
+		const copy = editorEl.cloneNode(true) as HTMLElement;
+		liftBlocks(copy, false);
+		return copy.innerHTML;
 	}
 
 	export function getText(): string {
@@ -279,6 +359,7 @@
 			selectedImage = null;
 			documentReplaced();
 			const shown = showDocument(html);
+			newDocument();
 			updateCounts();
 			if (!shown) {
 				// The caller is told, and the editor is empty: see showDocument.
@@ -373,6 +454,7 @@
 		} catch {
 			editorEl.innerHTML = EMPTY_DOCUMENT;
 			documentReplaced();
+			newDocument();
 			clearTimeout(saveTimer);
 			showError(NOT_SHOWN);
 			return false;
@@ -484,6 +566,7 @@
 			selectedImage = null;
 			documentReplaced();
 			editorEl.innerHTML = EMPTY_DOCUMENT;
+			newDocument();
 			dropDraft();
 			updateCounts();
 			fireChange();
@@ -498,7 +581,7 @@
 		if (!editorEl) return;
 		switch (format) {
 			case 'html': {
-				const html = `<!DOCTYPE html>\n<html lang="en">\n<head><meta charset="UTF-8"><title>Document</title></head>\n<body>\n${editorEl.innerHTML}\n</body>\n</html>`;
+				const html = `<!DOCTYPE html>\n<html lang="en">\n<head><meta charset="UTF-8"><title>Document</title></head>\n<body>\n${documentHtml()}\n</body>\n</html>`;
 				downloadFile('document.html', html, 'text/html');
 				break;
 			}
@@ -522,11 +605,11 @@
 
 	/**
 	 * The whole document is about to be replaced (setHTML, clear, an RTF import): nothing that
-	 * points into the old one may act on the new one. Indent steps no longer undo, the Copy format
-	 * brush is put down, and a paste that inserted nothing is forgotten.
+	 * points into the old one may act on the new one. The Copy format brush is put down, and a
+	 * paste that inserted nothing is forgotten. (And once the new one is shown, the history is
+	 * forgotten: see newDocument.)
 	 */
 	function documentReplaced(): void {
-		indentUndo = [];
 		pastedOver = null;
 		pastedLoss = null;
 		pastedPictures = null;
@@ -538,8 +621,15 @@
 		broughtIn.clear();
 		pastesWithWords.length = 0;
 		hiddenTaken.length = 0;
-		clearUndo = clearRedo = clearPast = null;
 		stopCopyFormat();
+	}
+
+	/**
+	 * Another document is shown: Undo does not lead back into the one before it. (It is one
+	 * patient's report, and this another's.)
+	 */
+	function newDocument(): void {
+		history?.reset();
 	}
 
 	// The frame around the paragraph copied from follows it when the text reflows: typing is caught
@@ -638,26 +728,14 @@
 	// (<font style="font-size:14pt">), which is what the RTF writer reads. Only attributes are
 	// changed, never the elements, so the browser's undo still finds what it made.
 	//
-	// Undo puts back what the browser itself recorded, which is right: the element goes, or gets
-	// back the size it had. Redo is not: the browser does its own step again, the mark for size 7
-	// and nothing after it, and the text came back at 36 pt. So each change of size is remembered
-	// here with the size every element was given, and after a redo the elements that are marked
-	// again are given theirs again.
-	//
-	// And undo is only right where the browser recorded something to put back. It records the
-	// size it takes off an element, not the one given here afterwards. So a <font> element is
-	// never left without a size of its own: where the text is to have the size of the text around
-	// it, the size stated is 1em, which is that size. The writer reads 1em as no size.
+	// A <font> element is never left without a size of its own: where the text is to have the
+	// size of the text around it, the size stated is 1em, which is that size. The writer reads
+	// 1em as no size. (The browser's Undo put back only a size its command had taken off an
+	// element, which is why one was always there; Undo is the editor's own now, see history.ts,
+	// and the HTML of a document is left as it has been.)
 	const SIZE_MARK = '7';
 	/** The size that is the size of the text around: what "no size of its own" is written as. */
 	const SIZE_AROUND = '1em';
-	/** One change of size: the elements it sized, each with the font-size it was given. */
-	type SizeStep = Map<HTMLElement, string>;
-	/** The changes of size made, in order; those from `sizeStepsApplied` on were undone and can be redone. */
-	let sizeSteps: SizeStep[] = [];
-	let sizeStepsApplied = 0;
-	/** Every element this editor has given a size: a mark on one of these is the browser redoing a step. */
-	const sizedHere = new WeakSet<Element>();
 	/** The size chosen and not yet given to an element: a caret has no text to carry it until something is typed. */
 	let pendingSize: number | null = null;
 	/** Elements that were marked size 7 before the command (pasted that way): not ours to change. */
@@ -678,10 +756,9 @@
 	const markedElements = (): HTMLElement[] =>
 		editorEl ? Array.from(editorEl.querySelectorAll<HTMLElement>(`font[size="${SIZE_MARK}"]`)) : [];
 
-	/** Give the elements the command marked the size that was chosen, and remember the step. */
+	/** Give the elements the command marked the size that was chosen. */
 	function applyPendingSize(): void {
 		if (!editorEl || pendingSize === null) return;
-		const step: SizeStep = new Map();
 		for (const font of markedElements()) {
 			if (markedBefore.has(font)) continue;
 			sizeElement(font, SIZE_AROUND);
@@ -689,39 +766,6 @@
 			// size, a heading to the heading's), it stays at the size around it: the text then
 			// follows the document's size, as text that was never sized does.
 			if (shownSize(font) !== pendingSize) sizeElement(font, `${pendingSize}pt`);
-			step.set(font, font.style.fontSize);
-			sizedHere.add(font);
-		}
-		if (step.size === 0) return;
-		// A new change: what was undone before it can no longer be redone.
-		sizeSteps = [...sizeSteps.slice(0, sizeStepsApplied), step];
-		sizeStepsApplied = sizeSteps.length;
-	}
-
-	/** Whether a change of size is in the document as it was made: every element there, with its size. */
-	function stepStands(step: SizeStep | undefined): boolean {
-		if (!step) return false;
-		for (const [font, fontSize] of step) {
-			if (!font.isConnected || font.getAttribute('size') === SIZE_MARK || font.style.fontSize !== fontSize) return false;
-		}
-		return true;
-	}
-
-	/** After an undo or a redo: follow which changes of size are in the document, and finish a redone one. */
-	function afterHistory(): void {
-		const next = sizeSteps[sizeStepsApplied];
-		const marked = markedElements().filter((font) => sizedHere.has(font));
-		if (marked.length > 0) {
-			// The browser redid its part of a change of size. (A mark with no step to go with it
-			// should not happen; it is then taken off, and the text has the size around it,
-			// which is better than 36 pt.)
-			for (const font of marked) sizeElement(font, next?.get(font) ?? SIZE_AROUND);
-			if (next) sizeStepsApplied++;
-		} else if (stepStands(next)) {
-			// Redone, and nothing was marked: the step only made elements, which came back as they were.
-			sizeStepsApplied++;
-		} else if (sizeStepsApplied > 0 && !stepStands(sizeSteps[sizeStepsApplied - 1])) {
-			sizeStepsApplied--;
 		}
 	}
 
@@ -749,8 +793,7 @@
 		if (typeof points !== 'number' || !Number.isFinite(points) || points <= 0) return;
 		restoreSelection();
 		editorEl.focus();
-		// The document changes outside an input event: earlier indent steps no longer undo.
-		indentUndo = [];
+		history?.step();
 		const size = normalizeFontSize(points);
 		// Nothing to change: no step is made that would undo to the same thing.
 		if (selectionHasSize(size)) {
@@ -764,7 +807,7 @@
 			if (!font.style.fontSize && !markedBefore.has(font)) font.style.fontSize = SIZE_AROUND;
 		}
 		pendingSize = size;
-		document.execCommand('fontSize', false, SIZE_MARK);
+		browserCommand('fontSize', false, SIZE_MARK);
 		applyPendingSize();
 		// With text selected the size is on it now. At a caret it waits for the typing.
 		const selection = window.getSelection();
@@ -829,7 +872,7 @@
 		}
 		// (Given the document font as the screen has it, Chromium and Safari take the font off
 		// the text; Firefox writes it, which the writer and the font list read as no font.)
-		document.execCommand('fontName', false, choice ? choice.css : screenFontFamily);
+		browserCommand('fontName', false, choice ? choice.css : screenFontFamily);
 		// With text selected the font is on it now. At a caret it waits for the typing.
 		pendingFont = selection.isCollapsed ? wanted : null;
 		updateToolbarState();
@@ -938,8 +981,15 @@
 			clearFormatting();
 			return;
 		}
+		if (cmd === 'undo' || cmd === 'redo') {
+			stepBack(cmd === 'undo');
+			return;
+		}
 		restoreSelection();
 		editorEl?.focus();
+		// Each command is a step of its own in the history: what was typed before it is the
+		// step before.
+		history?.step();
 		// Color commands require an actual text selection — a collapsed cursor
 		// would silently apply the color to nothing (or to subsequently typed
 		// text), which causes accidental color spans to appear in the RTF output.
@@ -962,11 +1012,136 @@
 			else applySpacing(cmd === 'spaceBefore' ? { before: n } : { after: n });
 			return;
 		}
-		if (cmd === 'undo' && (undoIndent() || undoClear())) return;
-		if (cmd === 'redo' && redoClear()) return;
-		document.execCommand(cmd, false, value ?? undefined);
-		if (cmd === 'undo' || cmd === 'redo') afterHistory();
+		if (cmd === 'insertUnorderedList' || cmd === 'insertOrderedList') {
+			listCommand(cmd === 'insertOrderedList' ? 'ol' : 'ul');
+			return;
+		}
+		browserCommand(cmd, false, value ?? undefined);
 		updateToolbarState();
+	}
+
+	// ── Undo and Redo ──
+	// The editor's own (see history.ts): the browser's history knows nothing of a picture or a
+	// table put in, a picture moved or an indent, and its Undo went past them to the typing
+	// before. Every way to it leads here: the toolbar, the keys, and the browser's own menu.
+	let history: DocumentHistory | null = null;
+
+	/** Undo the last step, or redo the one last undone. Returns whether there was one. */
+	function stepBack(undo: boolean): boolean {
+		if (readonly || !editorEl || !history) return false;
+		let shown = true;
+		const done = (undo ? history.undo : history.redo)(() => {
+			// Nothing that points into the document as it was may act on it as it is now.
+			selectedImage = null;
+			pendingSize = null;
+			pendingFont = null;
+			pastedOver = null;
+			pastedLoss = null;
+			pastedPictures = null;
+			commentsBefore = null;
+			savedSelection = null;
+			dialogSelection = null;
+			if (copySource && !copySource.isConnected) stopCopyFormat();
+			// What is put back was checked when it was first in the document; it is HTML that
+			// was kept as text all the same, and is checked as any other is.
+			shown = checkDocument();
+		});
+		if (!done) return false;
+		// (A document that could not be checked is not shown, and has no history.)
+		if (!shown) history.reset();
+		if (document.activeElement !== editorEl && selectionInEditor()) editorEl.focus({ preventScroll: true });
+		placeCopySourceBox();
+		overlayRef?.reposition();
+		updateToolbarState();
+		keepCaretInSight();
+		fireChange();
+		if (autosave && shown) scheduleAutoSave();
+		return true;
+	}
+
+	/** Undo the last step: what was typed, a command, a picture or a table put in, a picture moved. */
+	export function undo(): boolean {
+		return stepBack(true);
+	}
+
+	/** Redo the step last undone. */
+	export function redo(): boolean {
+		return stepBack(false);
+	}
+
+	/**
+	 * A command of the browser's, run by the editor. Safari says what such a command is about
+	 * to do as it says a key: heard as one, it ended the step the editor's command was in the
+	 * middle of, and a Clear formatting was two steps to undo, the first of them half done. So
+	 * what is said while one runs is not input to the history.
+	 */
+	let inCommand = 0;
+	function browserCommand(cmd: string, ui = false, value?: string): boolean {
+		inCommand++;
+		try {
+			return document.execCommand(cmd, ui, value);
+		} finally {
+			inCommand--;
+		}
+	}
+
+	/**
+	 * Take back the browser's own last command, inside a command of the editor's that tried
+	 * it and found it wanting. (The browser's history is used for nothing else.)
+	 */
+	function browserUndo(): void {
+		browserCommand('undo');
+	}
+
+	/** What the browser is about to do to the document: the history is told, and Undo and Redo are the editor's. */
+	function handleBeforeInput(e: InputEvent): void {
+		const kind = e.inputType;
+		if (inCommand > 0) return;
+		if (kind === 'historyUndo' || kind === 'historyRedo') {
+			e.preventDefault();
+			stepBack(kind === 'historyUndo');
+			return;
+		}
+		if (readonly) return;
+		// Words dragged from one place in the document to another are two inputs, the words
+		// taken out and the words dropped: one move, and one step. (As two, the first Undo took
+		// the dropped words out, and they were nowhere until the second.)
+		const dropAfterTaking = kind === 'insertFromDrop' && dragTaken;
+		dragTaken = kind === 'deleteByDrag';
+		if (dropAfterTaking) return;
+		// (Text an input method composes, and what Safari makes of it at the end, is typing.)
+		const typed = /^insert(Text|CompositionText|ReplacementText|FromComposition)$/.test(kind) || kind === 'deleteCompositionText';
+		const deleted = /^delete(Content|Word|SoftLine|HardLine)/.test(kind);
+		history?.typing(typed ? 'insert' : deleted ? 'delete' : null);
+	}
+
+	/** The last input was words dragged in the document taken out where they were: the drop that follows is the same step. */
+	let dragTaken = false;
+
+	// ── Lists ──
+	// The editor's own (see lists.ts): each browser's list command made something else of the
+	// same click, and none of them puts an item under the one before it.
+
+	/** The toolbar's list buttons: make the lines selected a list of this kind, or paragraphs again. */
+	function listCommand(kind: ListKind): void {
+		if (readonly || !editorEl) return;
+		if (toggleList(editorEl, window.getSelection(), kind)) indentChanged();
+		else updateToolbarState();
+	}
+
+	/**
+	 * Enter in an item with nothing in it, and Backspace at the start of an item, take the item
+	 * one step out of its list: out of a list within a list, and then a paragraph. Returns
+	 * whether the key was that.
+	 */
+	function leaveListAt(e: KeyboardEvent): boolean {
+		if (readonly || !editorEl || e.isComposing || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return false;
+		const sel = window.getSelection();
+		if (e.key === 'Enter' ? !inEmptyItem(editorEl, sel) : e.key !== 'Backspace' || !atItemStart(editorEl, sel)) return false;
+		e.preventDefault();
+		history?.step();
+		if (leaveList(editorEl, sel)) indentChanged();
+		return true;
 	}
 
 	// ── Clear formatting ──
@@ -974,8 +1149,7 @@
 	// Safari take a paragraph's alignment and first-line indent with its color; Firefox leaves
 	// the color on the paragraph, and takes out the element an application's mark is on; Safari
 	// leaves a size where it is. So the command is used for what only it can do, which is to
-	// take the <b>, <i> and <font> elements out with an entry in the browser's own history
-	// (taken out by the editor instead, the next Undo in Safari empties the document). What is
+	// take the <b>, <i> and <font> elements out, cutting them where the selection ends. What is
 	// written on the elements is the editor's to change: before the command, the looks of the
 	// text are taken off every element whose text is all selected, and after it, whatever the
 	// command took off that is not a look of the text is written back.
@@ -996,48 +1170,8 @@
 	const LOOKS = ['style', 'color', 'size', 'face'] as const;
 	type Looks = Record<(typeof LOOKS)[number], string | null>;
 
-	/** One Clear formatting: what was written on each element before and after, to put back. */
-	interface ClearStep {
-		before: Map<Element, Looks>;
-		after: Map<Element, Looks>;
-		/** The browser's command changed something, and has an entry in its history. */
-		native: boolean;
-		/** The document as the editor handed it to the command: where the browser's Undo of the command leads back to. */
-		pre: string;
-		/** The document as the step left it. */
-		cleared: string;
-		/** The document as it is now, the step done or undone: it is undone, or redone, only from there. */
-		html: string;
-	}
-	let clearUndo: ClearStep | null = null;
-	let clearRedo: ClearStep | null = null;
-	/** The last one made, also after more was typed: the browser's Undo may yet lead back to it. */
-	let clearPast: ClearStep | null = null;
 	/** The input events of the editor's own commands, while it clears: what they leave is not yet the document. */
 	let clearing = false;
-
-	/**
-	 * After the browser's own Undo. A Clear formatting is the editor's to undo only while nothing
-	 * else has been done. After that the browser undoes its command with everything else, and
-	 * knows nothing of what the editor took off the elements: bold was back, and the color was
-	 * not. Where its Undo has led back to the document as the command was given it, the rest is
-	 * put back here. A step the command left nothing of (a paragraph's color and no more) has no
-	 * such place to be led back to: it is the editor's to undo again once the document is as
-	 * that step left it, which is when what was typed after it has been undone.
-	 */
-	function afterUndoOfClear(): void {
-		const step = clearPast;
-		if (!step || !editorEl || clearing) return;
-		const now = editorEl.innerHTML;
-		if (step.native && step.pre !== step.cleared) {
-			if (now !== step.pre) return;
-			writeLooks(step.before);
-			clearUndo = null;
-			clearRedo = { ...step, html: editorEl.innerHTML };
-		} else if (now === step.cleared) {
-			clearUndo = { ...step, html: now };
-		}
-	}
 
 	const looksOf = (el: Element): Looks => ({
 		style: el.getAttribute('style'),
@@ -1045,17 +1179,6 @@
 		size: el.getAttribute('size'),
 		face: el.getAttribute('face')
 	});
-
-	function writeLooks(looks: Map<Element, Looks>): void {
-		for (const [el, wanted] of looks) {
-			if (!el.isConnected) continue;
-			for (const name of LOOKS) {
-				if (el.getAttribute(name) === wanted[name]) continue;
-				if (wanted[name] === null) el.removeAttribute(name);
-				else el.setAttribute(name, wanted[name]);
-			}
-		}
-	}
 
 	/** Whether all the text of an element is selected. (One with no text is, if it is in the selection.) */
 	function allSelected(range: Range, el: Element): boolean {
@@ -1110,12 +1233,12 @@
 			// At a caret there is nothing to clear but what was chosen for the words typed next.
 			pendingSize = null;
 			pendingFont = null;
-			document.execCommand('removeFormat');
+			history?.step();
+			browserCommand('removeFormat');
 			updateToolbarState();
 			return;
 		}
-		// The document changes outside an input event: earlier indent steps no longer undo.
-		indentUndo = [];
+		history?.step();
 		const range = sel.getRangeAt(0);
 		const touched = Array.from(editorEl.querySelectorAll<HTMLElement>('*')).filter((el) => range.intersectsNode(el));
 		const before = new Map(touched.map((el) => [el, looksOf(el)]));
@@ -1140,7 +1263,7 @@
 			removeFormat(selected, kept, closed);
 			const lost = kept.filter((el) => !el.isConnected || el.textContent !== marks.get(el));
 			if (lost.length > 0) {
-				document.execCommand('undo');
+				browserUndo();
 				if (lost.some((el) => el.tagName === 'SPAN')) spansAreTakenOut = true;
 				closed = Array.from(new Set([...closed, ...lost])).filter((el) => el.isConnected);
 				removeFormat(selected, kept.filter((el) => el.isConnected), closed);
@@ -1165,9 +1288,6 @@
 		for (const el of whole) if (el.isConnected) plain(el);
 		const after = new Map(touched.map((el) => [el, looksOf(el)]));
 		const changed = native || touched.some((el) => LOOKS.some((name) => before.get(el)![name] !== after.get(el)![name]));
-		const cleared = editorEl.innerHTML;
-		clearUndo = clearPast = changed ? { before, after, native, pre: html, cleared, html: cleared } : null;
-		clearRedo = null;
 		updateToolbarState();
 		if (!changed) return;
 		fireChange();
@@ -1200,7 +1320,7 @@
 		const was = closed.map((el) => el.getAttribute('contenteditable'));
 		for (const el of kept) el.setAttribute(KEEP_MARK, '');
 		for (const el of closed) el.setAttribute('contenteditable', 'false');
-		document.execCommand('removeFormat');
+		browserCommand('removeFormat');
 		// (Also off the copy the command makes of an element it cuts in two.)
 		for (const el of [...kept, ...Array.from(editorEl?.querySelectorAll(`[${KEEP_MARK}]`) ?? [])]) el.removeAttribute(KEEP_MARK);
 		closed.forEach((el, i) => {
@@ -1209,57 +1329,12 @@
 		});
 	}
 
-	/** Undo the last Clear formatting, if nothing has changed since. */
-	function undoClear(): boolean {
-		const step = clearUndo;
-		clearUndo = null;
-		if (!step || !editorEl || editorEl.innerHTML !== step.html) return false;
-		clearing = true;
-		try {
-			if (step.native) document.execCommand('undo');
-		} finally {
-			clearing = false;
-		}
-		writeLooks(step.before);
-		// (Safari may take the step before back with it, and that may be a change of size.)
-		afterHistory();
-		clearRedo = { ...step, html: editorEl.innerHTML };
-		clearChanged();
-		return true;
-	}
-
-	/** Do it again, if nothing has changed since it was undone. */
-	function redoClear(): boolean {
-		const step = clearRedo;
-		clearRedo = null;
-		if (!step || !editorEl || editorEl.innerHTML !== step.html) return false;
-		// (In the order it was done: the command read the elements as the editor had left them.)
-		writeLooks(step.after);
-		clearing = true;
-		try {
-			if (step.native) document.execCommand('redo');
-		} finally {
-			clearing = false;
-		}
-		writeLooks(step.after);
-		clearUndo = { ...step, html: editorEl.innerHTML };
-		clearChanged();
-		return true;
-	}
-
-	function clearChanged(): void {
-		updateToolbarState();
-		fireChange();
-		if (autosave) scheduleAutoSave();
-	}
-
 	// ── Indent ──
 	// Indent and Outdent move the paragraphs the selection touches by half an inch (48px, written
 	// to RTF as \li720) per press, as margin-left on each paragraph. The browser's own commands are
 	// not used: Chromium's Outdent strips the first paragraph to loose text ("one<br>"), and the
 	// browsers disagree on the markup. Only a style changes (and a line of loose text gets a
-	// paragraph of its own), so earlier typing stays undoable; the editor keeps its own undo for
-	// these steps until the next edit.
+	// paragraph of its own). Each press is a step of the editor's history.
 	//
 	// The right indent and the hanging indent move by the same step, on a paragraph (a <p>, or a
 	// <div> that holds text) outside a table cell, which is where the RTF writer sends them:
@@ -1286,23 +1361,20 @@
 	/** CSS lengths a margin is written in, in px. */
 	const PX_PER_UNIT: Record<string, number> = { px: 1, pt: 96 / 72, in: 96, cm: 96 / 2.54, mm: 96 / 25.4 };
 
-	/** One block an Indent or Outdent changed, and how to put it back. */
-	interface IndentChange {
-		el: HTMLElement;
-		before: string | null;
-		after: string | null;
-		/** The block is a paragraph this step made around loose text, and the <br> that ended it. */
-		wrapped: { br: HTMLBRElement | null } | null;
-		/** The paragraph's data-rtf-tab-stops before a step that changed it. */
-		stops?: { before: string | null; after: string | null };
-	}
-	let indentUndo: IndentChange[][] = [];
-
 	function indentBlocks(cmd: IndentCommand): void {
 		if (readonly || !editorEl) return;
 		editorEl.focus();
 		const sel = window.getSelection();
 		if (!sel || sel.rangeCount === 0 || !sel.anchorNode || !editorEl.contains(sel.anchorNode)) return;
+		history?.step();
+		// In a list, an indent puts the items under the item before them, and an outdent
+		// takes them out from under it, as a word processor's do. (The first item of a list
+		// has none before it, and an item of a list in no other list is under none: there
+		// the list itself is moved, as a paragraph is.)
+		if ((cmd === 'indent' && nestItems(editorEl, sel)) || (cmd === 'outdent' && unnestItems(editorEl, sel))) {
+			indentChanged();
+			return;
+		}
 		const { anchorNode, anchorOffset, focusNode, focusOffset } = sel;
 		const wrapped = new Map<HTMLElement, HTMLBRElement | null>();
 		const targets = indentTargets(sel.getRangeAt(0), cmd, wrapped);
@@ -1311,9 +1383,8 @@
 		if (wrapped.size > 0 && anchorNode instanceof Text && focusNode instanceof Text && anchorNode.isConnected && focusNode.isConnected) {
 			sel.setBaseAndExtent(anchorNode, anchorOffset, focusNode, focusOffset);
 		}
-		const step: IndentChange[] = [];
+		let moved = wrapped.size > 0;
 		for (const el of targets) {
-			const before = el.getAttribute('style');
 			const left = marginLeftPx(el);
 			const first = textIndentPx(el);
 			const setPx = (prop: 'marginLeft' | 'marginRight' | 'textIndent', px: number) => {
@@ -1343,11 +1414,9 @@
 				setPx('textIndent', first + back);
 			}
 			if (!el.getAttribute('style')) el.removeAttribute('style');
-			const br = wrapped.get(el);
-			step.push({ el, before, after: el.getAttribute('style'), wrapped: br === undefined ? null : { br } });
+			moved = true;
 		}
-		if (step.length === 0) return;
-		indentUndo.push(step);
+		if (!moved) return;
 		indentChanged();
 	}
 
@@ -1363,7 +1432,7 @@
 	// | lines 1.5 apart      | line-height: 1.5       | \sl360\slmult1   |
 	//
 	// Not in a table cell, where the writer sends a paragraph's alignment and left indent only,
-	// and not on a list. Each change is one step of the editor's own Undo, as an indent is.
+	// and not on a list. Each change is one step of the editor's history, as an indent is.
 
 	/** A paragraph's spacing as its own style sets it: lines apart (null: the editor's own), and points before and after. */
 	interface ParagraphSpacing {
@@ -1410,6 +1479,7 @@
 		if (selectedImage?.closest('td, th')) return;
 		const wrapped = new Map<HTMLElement, HTMLBRElement | null>();
 		let targets: HTMLElement[];
+		history?.step();
 		if (figure && editorEl.contains(figure)) {
 			targets = [figure];
 		} else {
@@ -1424,7 +1494,7 @@
 			}
 		}
 		const points = (n: number) => `${Math.round(n * 100) / 100}pt`;
-		const step: IndentChange[] = [];
+		let spaced = false;
 		for (const el of targets) {
 			const before = el.getAttribute('style');
 			// (A picture has no lines to space.)
@@ -1432,13 +1502,9 @@
 			if (change.before !== undefined) el.style.marginTop = change.before ? points(change.before) : '';
 			if (change.after !== undefined) el.style.marginBottom = change.after ? points(change.after) : '';
 			if (!el.getAttribute('style')) el.removeAttribute('style');
-			const after = el.getAttribute('style');
-			const br = wrapped.get(el);
-			if (after === before && br === undefined) continue;
-			step.push({ el, before, after, wrapped: br === undefined ? null : { br } });
+			if (el.getAttribute('style') !== before || wrapped.has(el)) spaced = true;
 		}
-		if (step.length === 0) return;
-		indentUndo.push(step);
+		if (!spaced) return;
 		indentChanged();
 		overlayRef?.reposition();
 	}
@@ -1528,6 +1594,7 @@
 		const offset = caret.startOffset;
 		const el = node instanceof Element ? node : node.parentElement;
 		if (!el || el.closest('td, th, li, pre, figure, h1, h2, h3, h4, h5, h6')) return;
+		history?.step();
 		const x = caretLeft(caret);
 		if (x === null) return;
 
@@ -1591,7 +1658,6 @@
 		const after = block.getAttribute('style');
 		const stopsAfter = block.getAttribute(TAB_STOPS);
 		if (!wrapped && after === before && stopsAfter === stopsBefore) return;
-		indentUndo.push([{ el: block, before, after, wrapped, stops: { before: stopsBefore, after: stopsAfter } }]);
 		indentChanged();
 	}
 
@@ -1767,6 +1833,7 @@
 			return;
 		}
 		if (block && block === copySource) return;
+		history?.step();
 		let target = block;
 		let wrapped: { br: HTMLBRElement | null } | null = null;
 		if (!target && loose) {
@@ -1805,31 +1872,8 @@
 		const after = target.getAttribute('style');
 		const stopsAfter = target.getAttribute(TAB_STOPS);
 		if (!wrapped && after === before && stopsAfter === stopsBefore) return;
-		indentUndo.push([{ el: target, before, after, wrapped, stops: { before: stopsBefore, after: stopsAfter } }]);
 		indentChanged();
 		placeCopySourceBox();
-	}
-
-	/** Undo the last Indent or Outdent, if nothing has changed since. */
-	function undoIndent(): boolean {
-		const step = indentUndo.pop();
-		if (!step) return false;
-		// Content replaced or edited since (setHTML, an import, a link): the step no longer applies.
-		if (step.some(({ el, after }) => !el.isConnected || el.getAttribute('style') !== after)) {
-			indentUndo = [];
-			return false;
-		}
-		for (const { el, before, wrapped, stops } of step) {
-			if (before === null) el.removeAttribute('style');
-			else el.setAttribute('style', before);
-			if (stops) {
-				if (stops.before === null) el.removeAttribute(TAB_STOPS);
-				else el.setAttribute(TAB_STOPS, stops.before);
-			}
-			if (wrapped) undoWrap(el, wrapped);
-		}
-		indentChanged();
-		return true;
 	}
 
 	function indentChanged(): void {
@@ -1942,7 +1986,8 @@
 	function setBlock(tag: string): void {
 		restoreSelection();
 		editorEl?.focus();
-		document.execCommand('formatBlock', false, tag);
+		history?.step();
+		browserCommand('formatBlock', false, tag);
 		updateToolbarState();
 	}
 
@@ -1956,11 +2001,15 @@
 		const spaced = spacedBlockAtCaret();
 		currentSpacing = spaced ? spacingOf(spaced) : { line: null, before: 0, after: 0 };
 
+		// The list the caret's item is in: the innermost, for an item of a list within a list.
+		const listKind = editorEl ? listKindAt(editorEl, window.getSelection()) : null;
 		formatState = {
 			bold: document.queryCommandState('bold'),
 			italic: document.queryCommandState('italic'),
 			underline: document.queryCommandState('underline'),
-			strikeThrough: document.queryCommandState('strikeThrough')
+			strikeThrough: document.queryCommandState('strikeThrough'),
+			bulletList: listKind === 'ul',
+			numberedList: listKind === 'ol'
 		};
 
 		const block = document.queryCommandValue('formatBlock');
@@ -2044,7 +2093,7 @@
 			let value: { v: T } | null = null;
 			return () => (value ??= { v: read() }).v;
 		};
-		const html = once(() => el?.innerHTML || '');
+		const html = once(() => (el ? documentHtml() : ''));
 		const text = once(() => el?.innerText || '');
 		const estimate = once(() => (el ? estimateRtfBytes(el, options) : 0));
 		onchange({
@@ -2063,7 +2112,7 @@
 	function keepDraft(): void {
 		if (!editorEl) return;
 		try {
-			localStorage.setItem(storageKey, editorEl.innerHTML);
+			localStorage.setItem(storageKey, documentHtml());
 			lastSaved = `Saved ${new Date().toLocaleTimeString()}`;
 		} catch (e) {
 			// Embedded images can push a document past the localStorage quota. Say
@@ -2087,7 +2136,7 @@
 	function autoSaveNow(): void {
 		if (!editorEl || !autosave) return;
 		keepDraft();
-		onsave?.({ html: editorEl.innerHTML });
+		onsave?.({ html: documentHtml() });
 	}
 
 	/**
@@ -2100,7 +2149,7 @@
 		// The save that was waiting is this one.
 		clearTimeout(saveTimer);
 		if (autosave) keepDraft();
-		onsave?.({ html: editorEl.innerHTML });
+		onsave?.({ html: documentHtml() });
 	}
 
 	function scheduleAutoSave(): void {
@@ -2115,14 +2164,16 @@
 	function handleInput(e?: Event): void {
 		placeCopySourceBox();
 		const kind = (e as InputEvent | undefined)?.inputType ?? '';
-		const history = kind === 'historyUndo' || kind === 'historyRedo';
+		// (The editor's own Undo and Redo do not come this way. These are the browser's, where
+		// one could not be stopped: what it puts back is checked as it always was.)
+		const browserHistory = kind === 'historyUndo' || kind === 'historyRedo';
 		// (Words dragged from one place in the document to another are first taken out where
 		// they were, which is an input event of its own: what was dropped has not come in yet.)
 		let shown = true;
 		if (pastedOver && kind !== 'deleteByDrag') {
 			tidyPasted(pastedOver);
 			pastedOver = null;
-		} else if (history || MARKUP_FROM_OUTSIDE.has(kind)) {
+		} else if (browserHistory || MARKUP_FROM_OUTSIDE.has(kind)) {
 			// Undo and Redo put back what the browser remembers, not what the editor made of it:
 			// Redo after a paste brings back the frame that was taken out of the paste, the
 			// style that was taken off what stayed, and Word's hidden text as words. And a drop
@@ -2131,20 +2182,12 @@
 			shown = checkDocument();
 		}
 		followPastes(kind === 'historyUndo');
-		indentUndo = [];
-		if (history) {
-			// (Not in the middle of a Clear formatting or of its Undo: the sizes are then not
-			// yet back on the elements. And what the editor puts back first, for the same reason.)
-			if (kind === 'historyUndo') afterUndoOfClear();
-			if (!clearing) afterHistory();
-		} else {
-			// (And a Clear formatting before this edit is the browser's to undo from here on.)
-			clearUndo = clearRedo = null;
-			// An edit: what was undone can no longer be redone.
-			sizeSteps = sizeSteps.slice(0, sizeStepsApplied);
-			// What was typed at a caret after a size was chosen came in marked: give it the size.
-			applyPendingSize();
-		}
+		// What was typed at a caret after a size was chosen came in marked: give it the size.
+		if (!browserHistory) applyPendingSize();
+		// (Not between the commands of a Clear formatting, which is not yet the document.)
+		if (editorEl && !clearing) liftBlocks(editorEl, true);
+		// (What the editor made of the input is part of the same step as the input.)
+		history?.typed();
 		pendingSize = null;
 		pendingFont = null;
 		updateToolbarState();
@@ -2177,8 +2220,7 @@
 			return;
 		}
 		linkError = '';
-		// Inserting changes the document outside an input event: earlier indent steps no longer undo.
-		indentUndo = [];
+		history?.step();
 		restoreFor(dialogSelection);
 		editorEl?.focus();
 
@@ -2196,7 +2238,7 @@
 				sel.addRange(range);
 			}
 		} else {
-			document.execCommand('createLink', false, linkUrl.trim());
+			browserCommand('createLink', false, linkUrl.trim());
 		}
 		linkModalOpen = false;
 		updateCounts();
@@ -2264,8 +2306,7 @@
 		const borders = options?.borders !== false;
 		const header = options?.header === true;
 		editorEl.focus();
-		// Inserting changes the document outside an input event: earlier indent steps no longer undo.
-		indentUndo = [];
+		history?.step();
 
 		const table = document.createElement('table');
 		table.setAttribute('style', TABLE_STYLE);
@@ -2426,7 +2467,7 @@
 		caption: string
 	): { img: HTMLImageElement; after: HTMLElement } | null {
 		if (!editorEl) return null;
-		indentUndo = [];
+		history?.step();
 
 		const figure = document.createElement('figure');
 		const img = document.createElement('img');
@@ -2474,10 +2515,13 @@
 			fitImage(img);
 			return;
 		}
+		// (Not if the picture has been taken out again by then.)
 		img.addEventListener(
 			'load',
 			() => {
-				fitImage(img);
+				// (Part of putting the picture in, not a step of its own to undo.)
+				if (history) history.quietly(() => fitImage(img));
+				else fitImage(img);
 				updateCounts();
 				fireChange();
 				if (autosave) scheduleAutoSave();
@@ -2672,13 +2716,26 @@
 		return (cell.textContent ?? '').trim() === (unit.textContent ?? '').trim() ? unit : null;
 	}
 
-	/** The row of pictures a picture is in: a table of one row, a picture in each of its cells. */
-	function pictureRowOf(node: Element | null): { table: HTMLTableElement; cells: HTMLTableCellElement[] } | null {
+	/**
+	 * The row of pictures a picture is in: a table of one row, a picture in each of its cells.
+	 * `cells` are the pictures' cells; `gap` is the space set between two of them, in points,
+	 * or null for a row that shares the page equally (see picture-rows.ts).
+	 */
+	function pictureRowOf(node: Element | null): { table: HTMLTableElement; cells: HTMLTableCellElement[]; gap: number | null } | null {
 		const table = node?.closest('table');
 		if (!table || !editorEl || table.parentElement !== editorEl || table.querySelector('table')) return null;
 		if (table.rows.length !== 1 || table.querySelector('caption')) return null;
-		const cells = Array.from(table.rows[0].cells);
-		return cells.length > 0 && cells.every((cell) => pictureInCell(cell)) ? { table, cells } : null;
+		const all = Array.from(table.rows[0].cells);
+		// (Only a row with no width of its own has gaps: an empty cell in a row across the page is no gap.)
+		const fixed = !table.style.width && !table.getAttribute('width');
+		const gaps = fixed ? all.filter(isGapCell) : [];
+		const cells = all.filter((cell) => !gaps.includes(cell));
+		if (cells.length === 0 || !cells.every((cell) => pictureInCell(cell))) return null;
+		// (A row with gaps is laid out by the editor, which writes each cell's style: one with
+		// a border or a background of its own is a table of its own, and is left as it is.)
+		if (gaps.length > 0 && !all.every(isPlainCell)) return null;
+		const twips = gaps.length > 0 ? lengthTwips(gaps[0]) : null;
+		return { table, cells, gap: twips === null ? null : twips / 20 };
 	}
 
 	/** A block of the document that is one picture: its figure, or a paragraph that holds it alone. */
@@ -2706,19 +2763,18 @@
 	}
 
 	function picturePlace(): PicturePlace {
-		const none: PicturePlace = { up: false, down: false, beside: null };
+		const none: PicturePlace = { up: false, down: false, beside: null, gap: null };
 		const block = readonly ? null : movedWith(selectedImage);
 		if (!block) return none;
 		const above = block.previousElementSibling;
 		const below = block.nextElementSibling;
 		const inRow = block.tagName === 'TABLE';
 		const joins = !inRow && !!above && (isPictureBlock(above) || (pictureRowOf(above)?.cells.length ?? MOST_PICTURES_IN_ROW) < MOST_PICTURES_IN_ROW);
-		return { up: !!above, down: !!below && !isLastEmptyLine(below), beside: inRow ? 'leave' : joins ? 'join' : null };
+		const gap = inRow ? (pictureRowOf(block)?.gap ?? null) : null;
+		return { up: !!above, down: !!below && !isLastEmptyLine(below), beside: inRow ? 'leave' : joins ? 'join' : null, gap };
 	}
 
 	function pictureMoved(): void {
-		// A move changes the document outside an input event: earlier indent steps no longer undo.
-		indentUndo = [];
 		const last = editorEl?.lastElementChild;
 		// Somewhere to go on typing after a picture that is now the last thing in the document.
 		if (editorEl && last && (last.tagName === 'FIGURE' || last.tagName === 'TABLE')) {
@@ -2736,6 +2792,7 @@
 		const place = picturePlace();
 		const block = movedWith(selectedImage);
 		if (!block || !(direction < 0 ? place.up : place.down)) return;
+		history?.step();
 		if (direction < 0) block.previousElementSibling!.before(block);
 		else block.nextElementSibling!.after(block);
 		pictureMoved();
@@ -2763,6 +2820,110 @@
 		cell.setAttribute('style', PICTURE_CELL_STYLE);
 		if (align && align !== 'left') cell.style.textAlign = align;
 		return cell;
+	}
+
+	/** How wide a picture is shown, in px. */
+	function pictureWidth(img: HTMLImageElement): number {
+		return parseFloat(img.style.width) || img.getBoundingClientRect().width || img.naturalWidth || 0;
+	}
+
+	/** A picture shown this wide, in px: its style says so, and the RTF writes it so. */
+	function sizePicture(img: HTMLImageElement, px: number): void {
+		img.removeAttribute('width');
+		img.removeAttribute('height');
+		img.style.width = `${px}px`;
+		img.style.height = 'auto';
+	}
+
+	/**
+	 * Lay out a row of pictures: across the page in equal shares (`gap` null), or with `gap`
+	 * points between each two, each picture in a cell as wide as it is. Pictures too wide for
+	 * the page together, with the gaps between them, are made smaller alike until they fit.
+	 */
+	function layoutPictureRow(table: HTMLTableElement, cells: HTMLTableCellElement[], gap: number | null): void {
+		for (const cell of Array.from(table.rows[0]?.cells ?? [])) if (isGapCell(cell)) cell.remove();
+		if (gap === null) {
+			table.setAttribute('style', TABLE_STYLE);
+			fitPictureRow(cells);
+			return;
+		}
+		table.setAttribute('style', GAPPED_ROW_STYLE);
+		const page = contentWidth();
+		// (No wider a gap than leaves each picture its least width on the page.)
+		gap = Math.min(gap, fittingGap(page, cells.length) ?? gap);
+		const imgs = cells.map((cell) => cell.querySelector('img')!);
+		// (A picture not yet loaded has no width to go by: it is laid out once it has one.)
+		const widths = imgs.map((img) => Math.round(pictureWidth(img)));
+		const room = page - (gap * 4) / 3 * (cells.length - 1);
+		const total = widths.reduce((a, b) => a + b, 0);
+		const scale = room > 0 && total > room ? room / total : 1;
+		cells.forEach((cell, i) => {
+			if (widths[i] > 0) {
+				const width = Math.max(MIN_PICTURE_IN_ROW, Math.floor(widths[i] * scale));
+				sizePicture(imgs[i], width);
+				cell.setAttribute('style', `padding:0;width:${pointsOf(width * 15)}`);
+			} else {
+				cell.setAttribute('style', 'padding:0');
+				imgs[i].addEventListener(
+					'load',
+					() => {
+						if (!table.isConnected) return;
+						if (history) history.quietly(() => relayoutPictureRow(table));
+						else relayoutPictureRow(table);
+						overlayRef?.reposition();
+					},
+					{ once: true }
+				);
+			}
+			if (i === 0) return;
+			const between = document.createElement('td');
+			between.setAttribute('style', `padding:0;width:${pointsOf(gap * 20)}`);
+			cell.before(between);
+		});
+	}
+
+	/**
+	 * The widest gap, in points, that leaves `count` pictures their least width each on a page
+	 * this wide (px); null where the page has no width to go by (not laid out).
+	 */
+	function fittingGap(page: number, count: number): number | null {
+		if (page <= 0 || count < 2) return null;
+		const px = (page - MIN_PICTURE_IN_ROW * count) / (count - 1);
+		return Math.max(0, Math.floor(px * 0.75 * 20) / 20);
+	}
+
+	/** Lay a row of pictures out again, as it was laid out: with the gap it has. */
+	function relayoutPictureRow(table: HTMLTableElement): void {
+		const row = pictureRowOf(table.rows[0]?.cells[0] ?? null);
+		if (row) layoutPictureRow(table, row.cells, row.gap);
+	}
+
+	/** The narrowest a picture in a row with a set gap is made, in px. */
+	const MIN_PICTURE_IN_ROW = 40;
+
+	/** Set the space between the pictures of the selected picture's row, in points; null: they share the page equally. */
+	function setPictureGap(gap: number | null): void {
+		const row = !readonly && selectedImage ? pictureRowOf(selectedImage) : null;
+		if (!row) return;
+		let pt = gap === null || !Number.isFinite(gap) ? null : Math.min(MOST_GAP_PT, Math.max(1, Math.round(gap * 20) / 20));
+		// (On a page too narrow for the gap asked for, the widest that fits; and none where not even 1 pt does.)
+		const fits = fittingGap(contentWidth(), row.cells.length);
+		if (pt !== null && fits !== null) {
+			if (fits < 1) return;
+			pt = Math.min(pt, fits);
+		}
+		if (pt === row.gap) return;
+		history?.step();
+		layoutPictureRow(row.table, row.cells, pt);
+		pictureMoved();
+	}
+
+	/** While a picture in a row with a set gap is resized, its cell follows it: the gap stays the gap. */
+	function pictureResizing(): void {
+		const row = selectedImage ? pictureRowOf(selectedImage) : null;
+		if (!row || row.gap === null || !selectedImage) return;
+		const cell = selectedImage.closest('td, th') as HTMLElement;
+		cell.style.width = pointsOf(Math.round(pictureWidth(selectedImage)) * 15);
 	}
 
 	/** The cells of a row of pictures share its width, and no picture is wider than its cell. */
@@ -2798,11 +2959,16 @@
 
 	/** What is left of a row of pictures after one has gone: a narrower row, or the one picture on its own line. */
 	function closeUpPictureRow(table: HTMLTableElement): void {
-		const cells = Array.from(table.rows[0]?.cells ?? []);
+		const all = Array.from(table.rows[0]?.cells ?? []);
+		const fixed = !table.style.width && !table.getAttribute('width');
+		const gapCell = fixed ? all.find(isGapCell) : undefined;
+		const twips = gapCell ? lengthTwips(gapCell) : null;
+		const cells = all.filter((cell) => !(fixed && isGapCell(cell)));
 		if (cells.length > 1) {
-			fitPictureRow(cells);
+			layoutPictureRow(table, cells, twips === null ? null : twips / 20);
 			return;
 		}
+		for (const cell of all) if (!cells.includes(cell)) cell.remove();
 		if (cells.length === 1) pictureOutOfCell(cells[0], table, 'before');
 		table.remove();
 	}
@@ -2816,13 +2982,15 @@
 		const img = selectedImage;
 		const block = movedWith(img);
 		if (!img || !block || !place.beside) return;
+		history?.step();
 		if (place.beside === 'leave') {
 			const cell = img.closest('td, th') as HTMLTableCellElement;
 			pictureOutOfCell(cell, block, 'after');
 			closeUpPictureRow(block as HTMLTableElement);
 		} else {
 			const above = block.previousElementSibling as HTMLElement;
-			let row = pictureRowOf(above)?.table.rows[0];
+			const joined = pictureRowOf(above);
+			let row = joined?.table.rows[0];
 			if (!row) {
 				const table = document.createElement('table');
 				table.setAttribute('style', TABLE_STYLE);
@@ -2834,20 +3002,146 @@
 				row.appendChild(pictureCell(above));
 			}
 			row.appendChild(pictureCell(block));
-			fitPictureRow(Array.from(row.cells));
+			// (With the gap the row has: one more picture, the same distance from the one before.)
+			relayoutPictureRow(row.closest('table')!);
 		}
 		pictureMoved();
+	}
+
+	// ── Pictures: dragged by the mouse ──
+	// A picture dropped on the left or right half of another picture is put beside it, as
+	// Place beside does: the two are a row, each with its caption under it. Dropped on a
+	// picture of a row, it joins the row there (or changes places in its own row). Dropped
+	// anywhere else, it is moved there whole, with its caption, before or after the block it
+	// is dropped on.
+
+	/** A picture of the document being dragged by the mouse. */
+	let draggedPicture: HTMLImageElement | null = null;
+
+	function pictureDragStarted(e: DragEvent): void {
+		const img = e.target instanceof HTMLImageElement ? e.target : null;
+		draggedPicture = !readonly && img && movedWith(img) ? img : null;
+		if (draggedPicture && e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+	}
+
+	/** The block of the document (a child of the editor) at a point; between blocks, the nearest one. */
+	function blockAtPoint(x: number, y: number): HTMLElement | null {
+		if (!editorEl) return null;
+		for (const el of document.elementsFromPoint(x, y)) {
+			if (el === editorEl || !editorEl.contains(el)) continue;
+			let top: Element = el;
+			while (top.parentElement && top.parentElement !== editorEl) top = top.parentElement;
+			return top as HTMLElement;
+		}
+		let nearest: HTMLElement | null = null;
+		let distance = Infinity;
+		for (const child of Array.from(editorEl.children) as HTMLElement[]) {
+			const box = child.getBoundingClientRect();
+			const d = y < box.top ? box.top - y : y > box.bottom ? y - box.bottom : 0;
+			if (d < distance) {
+				distance = d;
+				nearest = child;
+			}
+		}
+		return nearest;
+	}
+
+	/** Take a picture out of where it is, as a block of its own (not yet put anywhere): out of its row, which closes up. */
+	function takePictureOut(img: HTMLImageElement): HTMLElement | null {
+		const row = pictureRowOf(img);
+		if (!row) {
+			const block = movedWith(img);
+			block?.remove();
+			return block;
+		}
+		const cell = img.closest('td, th') as HTMLTableCellElement;
+		const unit = pictureInCell(cell);
+		if (!unit) return null;
+		const { figure } = figureOf(unit);
+		const align = cell.style.textAlign;
+		if (align && align !== 'left') figure.style.textAlign = align;
+		cell.remove();
+		closeUpPictureRow(row.table);
+		return figure;
+	}
+
+	/** Move a picture dragged to a point: beside the picture there, or before or after the block there. Returns whether it moved. */
+	function dropPicture(img: HTMLImageElement, x: number, y: number): boolean {
+		const source = movedWith(img);
+		const target = blockAtPoint(x, y);
+		if (!source || !target) return false;
+		const sourceRow = pictureRowOf(img);
+		const targetRow = pictureRowOf(target);
+		const halfOf = (box: DOMRect, along: 'x' | 'y') => ((along === 'x' ? x < box.left + box.width / 2 : y < box.top + box.height / 2) ? 'before' : 'after');
+
+		if (targetRow || isPictureBlock(target)) {
+			// The picture of the row it is dropped on: the one under the pointer, or the nearest.
+			const cell = targetRow
+				? targetRow.cells.reduce((best, c) => {
+						const box = c.getBoundingClientRect();
+						const d = x < box.left ? box.left - x : x > box.right ? x - box.right : 0;
+						const bestBox = best.getBoundingClientRect();
+						const bestD = x < bestBox.left ? bestBox.left - x : x > bestBox.right ? x - bestBox.right : 0;
+						return d < bestD ? c : best;
+					})
+				: null;
+			const onto = cell ?? target;
+			const side = halfOf((cell?.querySelector('img') ?? target.querySelector('img') ?? target).getBoundingClientRect(), 'x');
+			if (onto === source || onto === img.closest('td, th')) return false;
+			if (sourceRow && targetRow && sourceRow.table === targetRow.table) {
+				// (Its own row: it changes places.)
+				cell![side](img.closest('td, th')!);
+				relayoutPictureRow(targetRow.table);
+				return true;
+			}
+			if (!targetRow || targetRow.cells.length < MOST_PICTURES_IN_ROW) {
+				const unit = takePictureOut(img);
+				if (!unit) return false;
+				if (targetRow) {
+					cell![side](pictureCell(unit));
+					relayoutPictureRow(targetRow.table);
+				} else {
+					const table = document.createElement('table');
+					table.setAttribute('style', TABLE_STYLE);
+					const body = document.createElement('tbody');
+					const row = document.createElement('tr');
+					body.appendChild(row);
+					table.appendChild(body);
+					target.before(table);
+					// (The cells in the order they are seen: the one dropped on its left is first.)
+					const first = pictureCell(side === 'before' ? unit : target);
+					const second = pictureCell(side === 'before' ? target : unit);
+					row.append(first, second);
+					fitPictureRow([first, second]);
+				}
+				return true;
+			}
+			// (A row that is full: the picture goes under it, or over it.)
+		}
+		if (target === source) return false;
+		const side = halfOf(target.getBoundingClientRect(), 'y');
+		const unit = takePictureOut(img);
+		if (!unit || !target.isConnected) return false;
+		target[side](unit);
+		return true;
 	}
 
 	/** Width in px a picture has room for: its cell where it is one of a row of pictures, else the page. */
 	function pictureRoom(): number {
 		const whole = contentWidth();
 		const row = selectedImage ? pictureRowOf(selectedImage) : null;
-		return row ? Math.max(0, Math.floor(whole / row.cells.length) - PICTURE_CELL_PADDING) : whole;
+		if (!row) return whole;
+		if (row.gap === null) return Math.max(0, Math.floor(whole / row.cells.length) - PICTURE_CELL_PADDING);
+		// (With a set gap: the page, less the gaps and the other pictures.)
+		const others = row.cells.reduce((sum, cell) => (cell.contains(selectedImage) ? sum : sum + pictureWidth(cell.querySelector('img')!)), 0);
+		// (At least a little over the least width a picture is given here: the frame takes 40 px
+		// and less as no limit at all.)
+		return Math.max(MIN_PICTURE_IN_ROW + 1, Math.floor(whole - (row.gap * 4) / 3 * (row.cells.length - 1) - others));
 	}
 
 	function removeSelectedImage(): void {
 		if (!selectedImage) return;
+		history?.step();
 		const row = pictureRowOf(selectedImage);
 		if (row) {
 			// One of a row of pictures: the others close up, and a last one is on its own line again.
@@ -2855,7 +3149,6 @@
 			selectedImage = null;
 			const next = row.table.nextElementSibling as HTMLElement | null;
 			closeUpPictureRow(row.table);
-			indentUndo = [];
 			if (next && !/^(TABLE|FIGURE)$/.test(next.tagName)) placeCaret(next);
 			updateCounts();
 			fireChange();
@@ -2874,6 +3167,7 @@
 
 	/** Put the caret in the image's description line, creating it if needed. */
 	function focusCaption(img: HTMLImageElement): void {
+		history?.step();
 		let figure = img.closest('figure');
 		// One of a row of pictures that had no caption is read back as the picture alone in
 		// its cell: it is a figure again when it is given one.
@@ -2902,10 +3196,33 @@
 	function handleDragOver(e: DragEvent): void {
 		if (readonly) return;
 		if (Array.from(e.dataTransfer?.types || []).includes('Files')) e.preventDefault();
+		// (A picture of the document is the editor's to drop: said so, or WebKit drops it nowhere.)
+		if (draggedPicture) {
+			e.preventDefault();
+			if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+		}
 	}
 
 	function handleDrop(e: DragEvent): void {
 		if (readonly) return;
+		// A picture of the document dragged by the mouse is moved by the editor, as its buttons
+		// move it: the browser put it in the line it was dropped in, inside another picture's
+		// figure, with its caption left behind as an empty line of its own.
+		if (draggedPicture) {
+			const img = draggedPicture;
+			draggedPicture = null;
+			e.preventDefault();
+			if (!img.isConnected) return;
+			history?.step();
+			if (dropPicture(img, e.clientX, e.clientY)) {
+				selectedImage = img;
+				pictureMoved();
+			}
+			return;
+		}
+		// (A drop is a step of its own; where the words were already taken out from further up
+		// the document, it is the step that began with that.)
+		if (!dragTaken) history?.step();
 		const files = Array.from(e.dataTransfer?.files || []).filter((f) => f.type.startsWith('image/'));
 		if (files.length === 0) {
 			// Text or markup dragged in, from another page or from further up this one. The
@@ -2926,7 +3243,7 @@
 				e.preventDefault();
 				editorEl?.focus();
 				placeCaretAtPoint(e.clientX, e.clientY);
-				document.execCommand('insertHTML', false, unframed);
+				browserCommand('insertHTML', false, unframed);
 			}
 			return;
 		}
@@ -2984,6 +3301,7 @@
 				// (What the reader writes is safe as it stands; it goes the same way as any other
 				// HTML so there is one way in.)
 				const shown = showDocument(html);
+				newDocument();
 				updateCounts();
 				// (Shown or not, the document before it is gone, and the application is told so.)
 				fireChange();
@@ -3016,10 +3334,13 @@
 		if (mod && e.key === 'u') { e.preventDefault(); exec('underline'); }
 		if (mod && e.key === 'k') { e.preventDefault(); openLinkModal(); }
 		if (mod && e.key === 's') { e.preventDefault(); saveNow(); }
-		if (mod && !e.shiftKey && e.key.toLowerCase() === 'z' && (undoIndent() || undoClear())) { e.preventDefault(); return; }
+		// Undo and Redo are the editor's own: the browser's is never asked. (While an input
+		// method composes, the keys are the method's: what it does with them is its own.)
+		const composingKey = e.isComposing || e.keyCode === 229;
+		if (mod && !composingKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'z') { e.preventDefault(); stepBack(true); return; }
 		// (Redo is Ctrl+Y as well, but not Cmd+Y.)
 		const redoKey = (e.shiftKey && e.key.toLowerCase() === 'z') || (e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'y');
-		if (mod && redoKey && redoClear()) { e.preventDefault(); return; }
+		if (mod && !composingKey && redoKey && !e.altKey) { e.preventDefault(); stepBack(false); return; }
 		if (mod && e.key === ']') { e.preventDefault(); indentBlocks('indent'); return; }
 		if (mod && e.key === '[') { e.preventDefault(); indentBlocks('outdent'); return; }
 
@@ -3038,6 +3359,8 @@
 			removeSelectedImage();
 			return;
 		}
+
+		if ((e.key === 'Enter' || e.key === 'Backspace') && leaveListAt(e)) return;
 
 		if (e.key === 'Tab') handleTab(e);
 		else tabLeavesEditor = e.key === 'Escape';
@@ -3060,7 +3383,10 @@
 		e.preventDefault();
 
 		if (sel.anchorNode.parentElement?.closest?.('pre')) {
-			if (!e.shiftKey) document.execCommand('insertText', false, '  ');
+			if (!e.shiftKey) {
+				history?.typing('insert');
+				browserCommand('insertText', false, '  ');
+			}
 			return;
 		}
 		// Several lines selected: Tab and Shift+Tab indent and outdent them all, as a word
@@ -3070,12 +3396,28 @@
 			return;
 		}
 		if (!e.shiftKey) {
+			// At the start of an item, Tab puts the item under the one before it. (Anywhere
+			// else in it, and in the first item, it types a tab.)
+			if (atItemStart(editorEl, sel)) {
+				history?.step();
+				if (nestItems(editorEl, sel)) {
+					indentChanged();
+					return;
+				}
+			}
+			// (A tab is typed, with the words around it.)
+			history?.typing('insert');
 			insertTab(sel);
 			return;
 		}
 		// Shift+Tab takes one tab off the start of the line the caret is on, wherever the caret is
-		// on it, as a word processor outdents.
-		if (sel.isCollapsed) removeLeadingTab(sel);
+		// on it, as a word processor outdents; and an item that begins with none out from under
+		// the item it is under.
+		if (sel.isCollapsed) {
+			history?.step();
+			if (leadingTab(sel)) removeLeadingTab(sel);
+			else if (unnestItems(editorEl, sel)) indentChanged();
+		}
 	}
 
 	/**
@@ -3085,10 +3427,10 @@
 	 * is not typed inside it.
 	 */
 	function insertTab(sel: Selection): void {
-		document.execCommand('insertText', false, '\t');
+		browserCommand('insertText', false, '\t');
 		if (textBeforeCaret(sel).endsWith('\t')) return;
-		document.execCommand('undo');
-		document.execCommand('insertHTML', false, '<span style="white-space:pre">\t</span>');
+		browserUndo();
+		browserCommand('insertHTML', false, '<span style="white-space:pre">\t</span>');
 		const node = sel.anchorNode;
 		const span = (node instanceof Element ? node : node?.parentElement)?.closest('span');
 		if (span && span.textContent === '\t' && editorEl?.contains(span)) {
@@ -3168,7 +3510,7 @@
 		// Delete through execCommand so Ctrl+Z puts the tab back, then return the caret.
 		sel.removeAllRanges();
 		sel.addRange(range);
-		document.execCommand('delete');
+		browserCommand('delete');
 		if (caret.startContainer.isConnected) {
 			sel.removeAllRanges();
 			sel.addRange(caret);
@@ -3176,6 +3518,8 @@
 	}
 
 	function handlePaste(e: ClipboardEvent): void {
+		// (A paste is a step of its own, with what the editor makes of it.)
+		if (!readonly) history?.step();
 		// clipboardData is only valid during the event — pull the files out first.
 		const files = Array.from(e.clipboardData?.items || [])
 			.filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
@@ -3197,7 +3541,7 @@
 		if (sel?.anchorNode?.parentElement?.closest?.('pre')) {
 			e.preventDefault();
 			const text = e.clipboardData?.getData('text/plain') || '';
-			document.execCommand('insertText', false, text);
+			browserCommand('insertText', false, text);
 			return;
 		}
 		// The browser pastes next; the input event that follows tidies what came in.
@@ -3216,7 +3560,7 @@
 			const unframed = pasteWithoutFrames(html, keptNames);
 			if (unframed !== null) {
 				e.preventDefault();
-				document.execCommand('insertHTML', false, unframed);
+				browserCommand('insertHTML', false, unframed);
 			}
 		}
 	}
@@ -3749,7 +4093,11 @@
 	onMount(() => {
 		if (!editorEl) return;
 		document.addEventListener('selectionchange', trackSelection);
-		const stopTracking = () => document.removeEventListener('selectionchange', trackSelection);
+		const stopTracking = () => {
+			document.removeEventListener('selectionchange', trackSelection);
+			history?.destroy();
+			history = null;
+		};
 		if (autosave) {
 			let saved: string | null = null;
 			try {
@@ -3760,6 +4108,7 @@
 				// origin's storage can write it.
 				if (showDocument(saved)) {
 					updateCounts();
+					history = createHistory(editorEl);
 					return stopTracking;
 				}
 				// (A draft that cannot be shown was dropped without a word; it is said now, and
@@ -3774,6 +4123,8 @@
 		// used to go up through the component as it was made, and there was no editor.)
 		if (!showDocument(content || EMPTY_DOCUMENT)) showError(NOT_SHOWN);
 		updateCounts();
+		// (From the document as it is first shown: there is nothing before it to undo to.)
+		history = createHistory(editorEl);
 		return stopTracking;
 	});
 
@@ -3818,8 +4169,14 @@
 	}}
 />
 
+<!-- (Whatever a click or a press on the editor goes on to do is a step of its own in the
+     history: what was typed before it ends there. Heard on the way down, before the button
+     or the picture's handle that does it.) -->
+<!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
 <div
 	class="ink-editor"
+	onpointerdowncapture={() => history?.step()}
+	onclickcapture={() => history?.step()}
 	style:--ink-min-height={minHeight}
 	style:--ink-font-family={screenFontFamily}
 	style:--ink-font-size="{screenFontSize}pt"
@@ -3882,7 +4239,10 @@
 			aria-readonly={readonly ? 'true' : undefined}
 			spellcheck="true"
 			bind:this={editorEl}
+			onbeforeinput={handleBeforeInput}
 			oninput={handleInput}
+			oncompositionstart={() => history?.composing(true)}
+			oncompositionend={() => history?.composing(false)}
 			onmouseup={caretMoved}
 			onkeyup={caretMoved}
 			onscroll={contentScrolled}
@@ -3896,8 +4256,14 @@
 			onblur={() => (tabLeavesEditor = false)}
 			onpaste={handlePaste}
 			onclick={handleContentClick}
-			ondragstart={() => (draggedFromHere = true)}
-			ondragend={() => (draggedFromHere = false)}
+			ondragstart={(e) => {
+				draggedFromHere = true;
+				pictureDragStarted(e);
+			}}
+			ondragend={() => {
+				draggedFromHere = false;
+				draggedPicture = null;
+			}}
 			ondragover={handleDragOver}
 			ondrop={handleDrop}
 			data-placeholder={placeholder}
@@ -3939,6 +4305,8 @@
 				place={picturePlace}
 				onmove={moveSelectedImage}
 				onbeside={toggleBeside}
+				ongap={setPictureGap}
+				onresizing={pictureResizing}
 			/>
 		{/if}
 	</div>
@@ -4337,6 +4705,31 @@
 		margin-bottom: 12px;
 	}
 
+	/* The bullets and the numbers are said here, and not left to the browser's own style
+	   sheet: the page an editor is put in often takes them off every list it has
+	   (`ol, ul { list-style: none }`, as Tailwind's base styles and most CSS resets do), and
+	   a list in the editor was then indented lines with nothing in front of them. A list
+	   that says its own marker (type="A", or a list-style-type of its own) keeps it. */
+	.ink-content :global(ul:not([type])) {
+		list-style-type: disc;
+	}
+
+	.ink-content :global(:is(ul, ol) ul:not([type])) {
+		list-style-type: circle;
+	}
+
+	.ink-content :global(:is(ul, ol) :is(ul, ol) ul:not([type])) {
+		list-style-type: square;
+	}
+
+	.ink-content :global(ol:not([type])) {
+		list-style-type: decimal;
+	}
+
+	.ink-content :global(li) {
+		display: list-item;
+	}
+
 	.ink-content :global(li) {
 		margin-bottom: 4px;
 	}
@@ -4366,7 +4759,8 @@
 	/* A cell with no border has none in the RTF. While the document is edited it is drawn with
 	   a faint line, or a table of empty cells could not be seen at all. (Not a cell that holds
 	   a picture: pictures side by side are a row of such cells, and show where they are.) */
-	.ink-content[contenteditable='true'] :global(:is(td, th):not([style*='border']):not(:has(> figure, > img))) {
+	/* (Nor the empty cell between two pictures with a set gap: it is the gap.) */
+	.ink-content[contenteditable='true'] :global(:is(td, th):not([style*='border']):not(:has(> figure, > img)):not(table:not([style*='width']) tr:has(> td > :is(figure, img)) > td:empty)) {
 		outline: 1px dashed var(--border, #e5e2dc);
 		outline-offset: -1px;
 	}

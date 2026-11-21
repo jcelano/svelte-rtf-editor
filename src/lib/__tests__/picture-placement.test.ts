@@ -318,6 +318,200 @@ describe('a row of pictures', () => {
 	});
 });
 
+describe('a row of pictures with a set gap', () => {
+	const ROW = `<p>Before</p>${TABLE}<tbody><tr><td style="padding:2px 6px;width:50.0%">${fig('A')}</td><td style="padding:2px 6px;width:50.0%;text-align:center">${fig('B')}</td></tr></tbody></table><p>After</p>`;
+	const GAPPED = '<table style="border-collapse:collapse;margin:4px 0">';
+	const gapInput = () => host!.querySelector<HTMLInputElement>('.ink-img-gap input');
+	function typeGap(value: string): void {
+		const input = gapInput();
+		if (!input) throw new Error('no gap to set');
+		input.value = value;
+		input.dispatchEvent(new Event('change', { bubbles: true }));
+		flushSync();
+	}
+	/** Each cell of the row as its width, and what it holds: a caption, or nothing for a gap. */
+	const cells = (editor: HTMLElement) => Array.from(editor.querySelectorAll('td'), (cell) => `${cell.querySelector('figcaption')?.textContent ?? ''}:${cell.style.width}`);
+	/** The editor laid out on a page this wide, in px. */
+	function pageWidth(editor: HTMLElement, px: number): void {
+		Object.defineProperty(editor, 'clientWidth', { configurable: true, get: () => px });
+	}
+
+	it('is written at its own widths: each picture its cell, the gap an empty cell, nothing stretched to the page', () => {
+		const html = `${GAPPED}<tr><td style="padding:0;width:75pt">${fig('A')}</td><td style="padding:0;width:18pt"></td><td style="padding:0;width:75pt">${fig('B')}</td></tr></table>`;
+		const rtf = htmlToRtf(el(html));
+		// 100 px is 1500 twips, 18 pt is 360; and no space inside a cell, so the picture fills it.
+		expect(rtf.match(/\\cellx\d+/g)).toEqual(['\\cellx1500', '\\cellx1860', '\\cellx3360']);
+		expect(rtf).toContain('\\trowd\\trgaph0\\cellx1500');
+		expect(rtf.match(/\{\\pict/g)).toHaveLength(2);
+		// Read back as it was, and written again the same.
+		const back = rtfToHtml(rtf);
+		expect(back).toBe(html);
+		expect(htmlToRtf(el(back))).toBe(rtf);
+	});
+
+	it('a gap in a row of pictures that has no captions is read back too', () => {
+		const html = `${GAPPED}<tr><td style="padding:0;width:75pt">${fig('')}</td><td style="padding:0;width:36pt"></td><td style="padding:0;width:75pt">${fig('')}</td></tr></table>`;
+		expect(shape(rtfToHtml(htmlToRtf(el(html))))).toBe(`${GAPPED}<tr><td style="padding:0;width:75pt"><img></td><td style="padding:0;width:36pt"></td><td style="padding:0;width:75pt"><img></td></tr></table>`);
+	});
+
+	it('an empty cell in a table of words is no gap: the table is read across the page as it always was', () => {
+		const back = rtfToHtml(htmlToRtf(el(`${GAPPED}<tr><td style="width:75pt">Specimen</td><td style="width:18pt"></td><td style="width:75pt">${fig('B')}</td></tr></table>`)));
+		expect(back).toContain('width:100%');
+	});
+
+	it('a table that only looks like one, with borders or the space a reader puts in its cells, is read as the table it is', () => {
+		// (Its borders were taken off, and it was no longer as wide as the page.)
+		const bordered = `${TABLE}<tr><td style="border:1px solid;width:40%">${fig('A')}</td><td style="border:1px solid;width:20%"></td><td style="border:1px solid;width:40%">${fig('B')}</td></tr></table>`;
+		const back = rtfToHtml(htmlToRtf(el(bordered)));
+		expect(back).toContain('width:100%');
+		expect(back.match(/border:1px solid;/g)).toHaveLength(3);
+		// The same shape with no width of its own, and borders: written across the page, and read with them.
+		const unsized = bordered.replace(TABLE, GAPPED).replace(/width:\d+%/g, 'width:75pt');
+		expect(htmlToRtf(el(unsized))).toContain('\\trgaph120');
+		expect(rtfToHtml(htmlToRtf(el(unsized))).match(/border:1px solid;/g)).toHaveLength(3);
+		// From Word: the space it puts in every cell, and no borders.
+		const R = String.raw;
+		const pict = htmlToRtf(el(`<p><img src="${PNG}" style="width:100px;height:auto"></p>`)).match(/\{\\pict[^}]*\}/)![0];
+		const word = R`{\rtf1\ansi{\trowd\trgaph108\cellx1500\cellx1860\cellx3360\pard\intbl ${pict}\cell\pard\intbl\cell\pard\intbl ${pict}\cell\row}\pard After\par}`;
+		expect(rtfToHtml(word)).toContain('width:100%');
+	});
+
+	it('an empty cell with a border in a table pasted with no width is no gap: the table is left as it is', () => {
+		const pasted = `<table><tbody><tr><td style="border: 1px solid; width: 75pt;">${fig('A')}</td><td style="border: 1px solid; width: 18pt;"></td><td style="border: 1px solid; width: 75pt;">${fig('B')}</td></tr></tbody></table>`;
+		const { editor } = open(`<p>Before</p>${pasted}`);
+		const before = editor.innerHTML;
+		pick(editor, 'A');
+		expect(gapInput()).toBeNull();
+		expect(tool('Place on its own line')).toBeNull();
+		expect(editor.innerHTML).toBe(before);
+	});
+
+	it('a gap the caret left a line break in is still the gap', () => {
+		const row = `${GAPPED}<tbody><tr><td style="padding:0;width:75pt">${fig('A')}</td><td style="padding:0;width:18pt"><br></td><td style="padding:0;width:75pt">${fig('B')}</td></tr></tbody></table>`;
+		const { editor, api } = open(row);
+		pick(editor, 'A');
+		expect(gapInput()!.value).toBe('18');
+		expect(api.getRTF().match(/\\cellx\d+/g)).toEqual(['\\cellx1500', '\\cellx1860', '\\cellx3360']);
+	});
+
+	it('a gap too wide for the page is the widest that leaves every picture room, and a picture can still be resized only so far', () => {
+		const { editor } = open(`${fig('A')}${fig('B')}${fig('C')}${fig('D')}`);
+		pageWidth(editor, 600);
+		for (const name of ['B', 'C', 'D']) {
+			pick(editor, name);
+			press('Place beside the picture above');
+		}
+		typeGap('144');
+		// (600 px less 4 pictures of at least 40 px, in 3 gaps: 146 px, 110 pt.)
+		const widths = cells(editor).filter((cell) => cell.startsWith(':')).map((cell) => parseFloat(cell.slice(1)));
+		expect(widths).toEqual([110, 110, 110]);
+		const row = Array.from(editor.querySelectorAll('img'), (img) => parseFloat(img.style.width)).reduce((a, b) => a + b, 0) + 3 * (110 * 4) / 3;
+		expect(row).toBeLessThanOrEqual(600);
+		expect(gapInput()!.value).toBe('110');
+		// The frame is given a limit, not none: Full width is no wider than the room left.
+		press('Full width');
+		expect(parseFloat(editor.querySelectorAll('img')[3].style.width)).toBeLessThan(100);
+	});
+
+	it('a picture not yet loaded is not made small: it is laid out once it has its width', () => {
+		const html = `${TABLE}<tbody><tr><td>${fig('A')}</td><td><figure><img src="${PNG}" alt="late"><figcaption>B</figcaption></figure></td></tr></tbody></table>`;
+		const { editor } = open(html);
+		const late = editor.querySelector<HTMLImageElement>('img[alt="late"]')!;
+		let loaded = false;
+		late.getBoundingClientRect = () => ({ left: 0, top: 0, width: loaded ? 120 : 0, height: 0, right: 0, bottom: 0, x: 0, y: 0 }) as DOMRect;
+		// (Not loaded: no size of its own yet, nor on the page.)
+		Object.defineProperty(late, 'naturalWidth', { configurable: true, get: () => (loaded ? 120 : 0) });
+		Object.defineProperty(late, 'complete', { configurable: true, get: () => loaded });
+		pick(editor, 'A');
+		typeGap('18');
+		expect(late.style.width).toBe('');
+		expect(cells(editor)).toEqual(['A:75pt', ':18pt', 'B:']);
+		loaded = true;
+		late.dispatchEvent(new Event('load'));
+		flushSync();
+		expect(late.style.width).toBe('120px');
+		expect(cells(editor)).toEqual(['A:75pt', ':18pt', 'B:90pt']);
+	});
+
+	it('is set from the frame of a picture in the row, in points, and taken off by leaving it empty', () => {
+		const { editor, api } = open(ROW);
+		pick(editor, 'A');
+		expect(gapInput()!.value).toBe('');
+		typeGap('18');
+		expect(cells(editor)).toEqual(['A:75pt', ':18pt', 'B:75pt']);
+		expect(shape(editor.innerHTML)).toContain(`${GAPPED}<tr><td style="padding:0;width:75pt"><figure><img><figcaption>A</figcaption>`);
+		expect(gapInput()!.value).toBe('18');
+		expect(api.getRTF().match(/\\cellx\d+/g)).toEqual(['\\cellx1500', '\\cellx1860', '\\cellx3360']);
+		// Any gap: an inch and a half.
+		typeGap('108');
+		expect(cells(editor)).toEqual(['A:75pt', ':108pt', 'B:75pt']);
+		// Empty: the pictures share the page again, each in the middle of its half no more.
+		typeGap('');
+		expect(cells(editor)).toEqual(['A:50.0%', 'B:50.0%']);
+		expect(editor.querySelector('table')!.style.width).toBe('100%');
+	});
+
+	it('what is not a gap is not set: the row stays as it was', () => {
+		const { editor } = open(ROW);
+		pick(editor, 'A');
+		typeGap('12');
+		typeGap('-4');
+		expect(cells(editor)).toEqual(['A:75pt', ':12pt', 'B:75pt']);
+		expect(gapInput()!.value).toBe('12');
+		typeGap('100000');
+		expect(cells(editor)).toEqual(['A:75pt', ':144pt', 'B:75pt']);
+	});
+
+	it('is one step to undo', () => {
+		const { editor } = open(ROW);
+		const before = editor.innerHTML;
+		pick(editor, 'B');
+		typeGap('24');
+		expect((component as unknown as { undo(): boolean }).undo()).toBe(true);
+		expect(editor.innerHTML).toBe(before);
+	});
+
+	it('stays when a picture joins the row or leaves it, and a picture left alone is on its own line', () => {
+		const { editor } = open(`${fig('A')}${fig('B')}${fig('C')}`);
+		pick(editor, 'B');
+		press('Place beside the picture above');
+		typeGap('10');
+		pick(editor, 'C');
+		press('Place beside the picture above');
+		expect(cells(editor)).toEqual(['A:75pt', ':10pt', 'B:75pt', ':10pt', 'C:75pt']);
+		pick(editor, 'B');
+		press('Place on its own line');
+		expect(cells(editor)).toEqual(['A:75pt', ':10pt', 'C:75pt']);
+		pick(editor, 'A');
+		press('Remove image');
+		expect(editor.querySelector('table')).toBeNull();
+		expect(blocks(editor)).toEqual(['C', 'B', 'empty']);
+	});
+
+	it('pictures too wide for the page together with their gaps are made smaller alike', () => {
+		const { editor } = open(ROW.replace(/width:100px/g, 'width:400px'));
+		pageWidth(editor, 600);
+		pick(editor, 'A');
+		// 600 px of page, less 36 pt (48 px) of gap: 276 px each.
+		typeGap('36');
+		expect(Array.from(editor.querySelectorAll('img'), (img) => img.style.width)).toEqual(['276px', '276px']);
+		expect(cells(editor)).toEqual(['A:207pt', ':36pt', 'B:207pt']);
+	});
+
+	it('a picture made wider or narrower takes its cell with it, and has the room the gap and the others leave', () => {
+		const { editor } = open(ROW);
+		pageWidth(editor, 600);
+		pick(editor, 'A');
+		typeGap('36');
+		// The page is 600 px; B is 100, the gap 48: A has 452.
+		press('Full width');
+		expect(editor.querySelector('img')!.style.width).toBe('452px');
+		expect(cells(editor)).toEqual(['A:339pt', ':36pt', 'B:75pt']);
+		press('Half width');
+		expect(cells(editor)).toEqual(['A:169.5pt', ':36pt', 'B:75pt']);
+	});
+});
+
 describe('one under another', () => {
 	it('the space between two pictures is the space after one or before the other', () => {
 		const { editor, api } = open(`${fig('A')}${fig('B')}`);
