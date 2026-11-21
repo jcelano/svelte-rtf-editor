@@ -22,7 +22,8 @@ import {
 	isMonospaceFontName,
 	linkTarget,
 	normalizeFontSize,
-	hardToReadOnWhite
+	hardToReadOnWhite,
+	LEAST_LINES
 } from './rtf-writer.js';
 import { letterReadings, listTypeAttribute, type LetterReading, type NumberStyle } from './list-markers.js';
 
@@ -985,8 +986,12 @@ function spacingStyle(block: ParagraphBlock, part: 'all' | 'before' | 'after' = 
 	if (part !== 'after' && block.before > 0) parts.push(`margin-top:${space(block.before)}`);
 	if (part !== 'before' && block.after > 0) parts.push(`margin-bottom:${space(block.after)}`);
 	if (part === 'all') {
-		if (block.lineMultiple && block.line >= 120 && block.line <= 2400) parts.push(`line-height:${Math.round((block.line / 240) * 100) / 100}`);
-		else if (!block.lineMultiple && block.line < 0 && block.line >= -MOST_SPACE_TWIPS) parts.push(`line-height:${twipsToPt(-block.line)}`);
+		// Lines closer than LEAST_LINES of their text are printed over each other, and are
+		// not read: "\sl-20" put two lines of a diagnosis on top of each other, and the
+		// paragraph after them on both. (A half-point is ten twips.)
+		const tallest = block.runs.reduce((most, run) => Math.max(most, run.fmt.fontSize || 0), 0);
+		if (block.lineMultiple && block.line >= LEAST_LINES * 240 && block.line <= 2400) parts.push(`line-height:${Math.round((block.line / 240) * 100) / 100}`);
+		else if (!block.lineMultiple && block.line < 0 && block.line >= -MOST_SPACE_TWIPS && -block.line >= LEAST_LINES * tallest * 10) parts.push(`line-height:${twipsToPt(-block.line)}`);
 	}
 	return parts.join(';');
 }

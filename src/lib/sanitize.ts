@@ -25,7 +25,7 @@
  *   of its paragraph, text of no size).
  */
 
-import { cssFontFamily, fontChoices, fontKey, hardToReadOnWhite, linkTarget, NO_BACKGROUND, parseColor, sameFontList } from './rtf-writer.js';
+import { cssFontFamily, fontChoices, fontKey, hardToReadOnWhite, LEAST_LINES, linkTarget, NO_BACKGROUND, parseColor, sameFontList } from './rtf-writer.js';
 import { isSafeImageUrl } from './images.js';
 
 /** Elements taken out with everything in them. */
@@ -427,6 +427,22 @@ function fontPxAround(el: Element, known: FontSizes): number {
 	return px;
 }
 
+/**
+ * Whether a line height puts the lines of a paragraph on top of each other: less than
+ * LEAST_LINES of the height of its text, as a number ("0.2"), a percentage, or a length
+ * ("1px", which pages and mail put on what holds a picture). Two lines so close are one line
+ * of ink, with the paragraph after them printed over both; the words are in the document, and
+ * in the RTF, and nobody can read them.
+ */
+function linesOverlap(value: string, fontPx: number): boolean {
+	const match = /^\s*(\d*\.?\d+(?:e[+-]?\d+)?)([a-z%]*)\s*$/i.exec(value);
+	if (!match) return false;
+	const unit = match[2].toLowerCase();
+	if (unit === '' || unit === '%') return Number(match[1]) / (unit ? 100 : 1) < LEAST_LINES;
+	const px = lengthPx(match[1], unit, fontPx);
+	return px !== null && px < LEAST_LINES * fontPx;
+}
+
 /** Whether a property that places or sizes an element has a value a document would give it. */
 function sizeAllowed(name: string, value: string, tag: string, fontPx: number): boolean {
 	if (name === 'margin-left' && (tag === 'ul' || tag === 'ol')) return within(value, { most: MOST_PX, mostBelow: LIST_OUTDENT_PX }, fontPx);
@@ -437,7 +453,7 @@ function sizeAllowed(name: string, value: string, tag: string, fontPx: number): 
 	if (name === 'text-indent') return within(value, { most: MOST_PX, mostBelow: MOST_PX }, fontPx);
 	if (name === 'width' || name === 'height') return SIZED_TAGS.has(tag) && within(value, { most: MOST_PX }, fontPx);
 	if (name === 'display') return DISPLAY_VALUES.has(value.trim().toLowerCase());
-	if (name === 'line-height') return within(value, { most: 400, mostPercent: 1000, mostNumber: 10 }, fontPx);
+	if (name === 'line-height') return within(value, { most: 400, mostPercent: 1000, mostNumber: 10 }, fontPx) && !linesOverlap(value, fontPx);
 	if (/^border.*width$/.test(name) || name === 'border-spacing' || name === 'text-decoration-thickness') return within(value, { most: 100 }, fontPx);
 	if (name.endsWith('tab-size')) return within(value, { most: MOST_PX, mostNumber: 100 }, fontPx);
 	return true;

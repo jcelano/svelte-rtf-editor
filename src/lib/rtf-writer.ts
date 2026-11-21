@@ -868,6 +868,9 @@ export function estimateRtfBytes(editorEl: HTMLElement, options: RtfWriteOptions
 				const down = Math.max(1, parseInt(el.getAttribute('rowspan') ?? '', 10) || 1);
 				const rowCount = el.closest('table')?.querySelectorAll('tr').length ?? 1;
 				total += borders * Math.min(rowCount, el.getAttribute('rowspan') === '0' ? rowCount : down) + 10;
+				// And each color a border has is in the color table, the first time (at most 25
+				// bytes, "\red255\green255\blue255;"): a cell may have four.
+				for (const [side] of BORDER_SIDES) if (cellBorder(el, side)?.color) total += 25;
 			}
 			const rows = parseInt(el.getAttribute('rowspan') ?? '', 10);
 			if (rows !== 1 && Number.isFinite(rows) && !el.parentElement?.closest('td, th')) {
@@ -2270,11 +2273,29 @@ function paragraphLayout(el: HTMLElement, ctx: WalkContext): string {
  * and its spacing.
  */
 function headingLayout(el: HTMLElement, ctx: WalkContext): string {
-	return `${paragraphLayout(el, ctx)}${ctx.inTableCell ? '' : `${edgeIndents(el)}${spacingControls(el)}`}`;
+	return `${paragraphLayout(el, ctx)}${ctx.inTableCell ? '' : `${edgeIndents(el)}${spacingControls(el, 'all', tallestText(el, scaled(ctx, ALL_HEADING_SCALES[el.tagName.toLowerCase()] ?? 1)))}`}`;
 }
 
 /** The most a line is spaced by: ten lines, as the sanitizer lets through. */
 const MOST_LINES = 10;
+
+/**
+ * The least a line is spaced by, as a share of the height of its text. Lines closer than this
+ * are printed over each other: two lines of a diagnosis, there to be selected and not to be
+ * read. A line height below it is no spacing a document has, and is not written (nor read, nor
+ * kept by the sanitizer, nor set by the editor).
+ */
+export const LEAST_LINES = 0.8;
+
+/**
+ * The size of the tallest text an element holds, in half-points: its own under text of `base`,
+ * and every size set on what is inside it.
+ */
+function tallestText(el: HTMLElement, base: number): number {
+	let tallest = sizeOf(el) ?? base;
+	for (const inside of Array.from(el.querySelectorAll<HTMLElement>('[style*="font-size"], font[size]'))) tallest = Math.max(tallest, sizeOf(inside) ?? 0);
+	return tallest;
+}
 
 /**
  * The space before and after a paragraph, and between its lines, or nothing where the element
@@ -2286,10 +2307,25 @@ const MOST_LINES = 10;
  *   line (240 to a line), and "1" too: it is what was chosen, and is read back as that. As a
  *   length ("14pt") as \sl-N\slmult0, which is exactly that height.
  *
+ * A height in RTF is not what it is in CSS. A line of exactly 14pt is cut off at 14pt by Word
+ * and by every reader that does as it does: a picture in the line shows as a strip 14pt high,
+ * and text taller than the line loses its top. In a browser the line grows around a picture,
+ * and tall text is drawn over the line above. Words copied from a web page come with the line
+ * height of that page ("line-height: 14px"), and a picture pasted with them was whole in the
+ * editor and a strip in the RTF. So `tallest` is the size of the tallest text of the paragraph,
+ * in half-points, and:
+ *
+ * - a paragraph that holds a picture has a height its lines have at least (\slN\slmult0, N
+ *   above zero), which is what the browser shows;
+ * - lines closer than LEAST_LINES of the tallest text are not written at all, as a multiple or
+ *   as a height: they are printed over each other.
+ *
+ * With no `tallest` (the estimate, which knows no sizes) the longest form is given.
+ *
  * `part` leaves out what is written on another paragraph: a picture's caption has the space
  * after it, the picture the space before.
  */
-function spacingControls(el: HTMLElement, part: 'all' | 'before' | 'after' = 'all'): string {
+function spacingControls(el: HTMLElement, part: 'all' | 'before' | 'after' = 'all', tallest?: number): string {
 	const style = el.style;
 	if (!style) return '';
 	let out = '';
@@ -2302,10 +2338,12 @@ function spacingControls(el: HTMLElement, part: 'all' | 'before' | 'after' = 'al
 	const multiple = line.match(/^(\d+(?:\.\d+)?|\.\d+)(%?)$/);
 	if (multiple) {
 		const lines = parseFloat(multiple[1]) / (multiple[2] ? 100 : 1);
-		if (lines > 0 && lines <= MOST_LINES) out += `\\sl${Math.round(lines * 240)}\\slmult1`;
+		if (lines >= LEAST_LINES && lines <= MOST_LINES) out += `\\sl${Math.round(lines * 240)}\\slmult1`;
 	} else {
 		const exact = lengthTwips(line);
-		if (exact) out += `\\sl-${exact}\\slmult0`;
+		// (A half-point is ten twips.)
+		if (!exact || (tallest !== undefined && exact < LEAST_LINES * tallest * 10)) return out;
+		out += tallest !== undefined && el.querySelector('img') ? `\\sl${exact}\\slmult0` : `\\sl-${exact}\\slmult0`;
 	}
 	return out;
 }
@@ -2322,7 +2360,7 @@ function edgeIndents(el: HTMLElement): string {
  * indent of the blocks around it plus its own margin.
  */
 function paragraphFormat(el: HTMLElement, ctx: WalkContext): string {
-	return `${alignOf(el, ctx)}${paragraphControls(el, ctx.indent + leftMarginTwips(el))}`;
+	return `${alignOf(el, ctx)}${paragraphControls(el, ctx.indent + leftMarginTwips(el), tallestText(el, ctx.size))}`;
 }
 
 /** The alignment a container hands to the blocks inside it: its own, or the one it was handed. */
@@ -2349,7 +2387,7 @@ function inheritedAlign(el: HTMLElement, ctx: WalkContext): string {
  * nothing, and so does zero, which is what \pard already sets. Not written inside a table cell,
  * where the cell declares its own paragraph.
  */
-function paragraphControls(el: HTMLElement, leftTwips: number): string {
+function paragraphControls(el: HTMLElement, leftTwips: number, tallest?: number): string {
 	let out = '';
 	const stops = (el.getAttribute('data-rtf-tab-stops') ?? '')
 		.split(',')
@@ -2360,7 +2398,7 @@ function paragraphControls(el: HTMLElement, leftTwips: number): string {
 	const style = el.style;
 	if (!style) return out;
 	out += edgeIndents(el);
-	out += spacingControls(el);
+	out += spacingControls(el, 'all', tallest);
 	const keep = (prop: string) => style.getPropertyValue(prop).trim() === 'avoid';
 	if (keep('break-after') || keep('page-break-after')) out += '\\keepn';
 	return out;

@@ -106,7 +106,8 @@
 		fontKey,
 		normalizeFontSize,
 		DEFAULT_FONT_FAMILY,
-		DEFAULT_FONT_SIZE
+		DEFAULT_FONT_SIZE,
+		LEAST_LINES
 	} from '../rtf-writer.js';
 	import {
 		fileToImageSrc,
@@ -1471,7 +1472,8 @@
 	function applySpacing(change: { line?: number | null; before?: number | null; after?: number | null }): void {
 		if (readonly || !editorEl) return;
 		const valid = (n: number | null | undefined, most: number) => n == null || (typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= most);
-		if (!valid(change.line, MOST_LINES) || change.line === 0 || !valid(change.before, MOST_SPACE_PT) || !valid(change.after, MOST_SPACE_PT)) return;
+		// (Lines closer than LEAST_LINES are printed over each other: no spacing to set.)
+		if (!valid(change.line, MOST_LINES) || (change.line != null && change.line < LEAST_LINES) || !valid(change.before, MOST_SPACE_PT) || !valid(change.after, MOST_SPACE_PT)) return;
 		// A picture that is selected is spaced as the paragraph it is.
 		const figure = selectedImage?.closest<HTMLElement>('figure') ?? null;
 		// (Not one in a table cell, where no paragraph is spaced: nor is the paragraph the
