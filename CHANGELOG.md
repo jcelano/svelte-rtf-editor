@@ -1,5 +1,133 @@
 # svelte-rtf-editor
 
+## 1.14.0
+
+### Minor Changes
+
+- 0624eb2: **Lists and Undo are the editor's own**
+
+  In 1.13.0 the list buttons and Undo did what each browser's own commands do, and that was
+  neither the same from browser to browser nor right in any of them.
+
+  **Lists**
+
+  - **A list is made the same in Chrome, Edge, Safari and Firefox.** Chromium and Safari left
+    the list inside the paragraph it was made from, which no HTML can say: kept and shown again
+    it was an empty paragraph, the list and another empty paragraph, and an empty line before
+    and after the list in the RTF. Firefox started a new list for every line made an item one
+    at a time, so each was numbered 1. Chromium put the caret at the start of the line, and
+    what was typed next came before the words. The editor now makes the list itself: a `<ul>`
+    or `<ol>` beside the paragraphs around it, one list with a list of its kind it is next to,
+    the caret where it was.
+  - **A list taken off is a paragraph for each item.** It was one paragraph with line breaks,
+    or words in no paragraph at all.
+  - **A paragraph made an item, and back, is the same paragraph.** Its `id`, `class`, an
+    application's `data-*` attributes, its language and the color or font of its words go with
+    it. How it was laid out (indent, alignment, spacing, tab stops) does not: an item has the
+    list's.
+  - **The other list button changes the whole list** the caret is in, bullets to numbers or
+    back. It made the one item a list of its own, between two lists of what was left.
+  - **A list within a list.** `Tab` at the start of an item, or Increase indent, puts the item
+    under the item before it; `Shift+Tab` or Decrease indent takes it out. The RTF has it one
+    step further in (`\li1440`), and it is read back as a list inside the item.
+  - **`Enter` in an empty item and `Backspace` at the start of an item leave the list**, one
+    list at a time. (Backspace did nothing in the first item of a list in Chromium.)
+  - **A heading made an item is an item**, not a heading with a list inside it.
+  - **Bullets and numbers show in a page that takes them off its own lists.** A page with
+    `ol, ul { list-style: none }` (Tailwind's base styles, most CSS resets) took the markers off
+    the lists of a document too, in the editor and in `RtfViewer`. Both now say the markers
+    themselves.
+  - **The list buttons show which kind of list the caret is in**, as Bold shows bold.
+
+  **Undo and Redo**
+
+  - **Undo takes back whatever changed the document, in the order it was done.** The browser's
+    history knew nothing of what the editor changes itself: a picture or a table put in, a
+    picture moved, placed beside another or resized, an indent, a spacing. Its Undo went past
+    those and took back the typing before them, and after some of them could undo nothing. The
+    editor now keeps the history: `Ctrl+Z`, `Ctrl+Shift+Z`, `Ctrl+Y`, the toolbar and the
+    browser's Edit menu all go through it.
+  - **`editor.undo()` and `editor.redo()`**, for an application's own toolbar. Each returns
+    whether there was a step.
+  - **A new document starts a new history.** After `setHTML()`, `clear()` or an imported file,
+    Undo does not lead back into the document that was there before.
+  - **In Firefox, Undo takes back a paste the editor took something out of** (a button, words
+    Word had hidden). Firefox's own Undo did not.
+  - A run of typing is one step until a pause of a second, a move of the caret, or a change from
+    typing to deleting. 200 steps are kept, each embedded picture once.
+  - **Words dragged from one place in the document to another are one step**: one Undo puts
+    them back where they were.
+  - **What an input method composes (Japanese, Chinese, Korean, dictation) is one step**, and
+    Undo waits until it is done.
+
+  A block a browser leaves inside a paragraph (Firefox, for pasted paragraphs) is now put beside
+  the paragraph in the document being edited, not only in the HTML handed out.
+
+  **Pictures side by side**
+
+  - **An exact gap between pictures side by side.** The frame of a picture in a row has a Gap
+    field, in points. The pictures are then that far apart on the screen, in the RTF and in Word,
+    and read back the same; before, the distance followed from how wide the page was, and could
+    only be changed by resizing and aligning each picture in its half. Left empty, the row shares
+    the page equally, as before.
+  - **A picture dragged onto another is put beside it**, each with its own description under it,
+    as Place beside does. Dragged anywhere else, it is moved there whole. The browser used to
+    put the picture inside the other picture's figure, and both descriptions ended up under the
+    two pictures at the left.
+
+- 7697cb7: **The layout of a report: spacing, tables with borders, pictures side by side**
+
+  - **Line spacing and the space before and after a paragraph.** The toolbar has a Spacing list:
+    1, 1.15, 1.5 or 2 lines, and 0, 6 or 12 pt before and after the paragraphs the selection
+    touches (a heading and a selected picture too). `setLineSpacing(lines)` and
+    `setParagraphSpacing({ before, after })` take any value. They are written as `\sl…\slmult`,
+    `\sb` and `\sa`, and `rtfToHtml` now reads all three back; until now `\sb` and `\sa` were
+    written for a paragraph that had them and lost when the RTF was read. Each change is a step
+    for Undo, and Copy format carries a paragraph's spacing.
+  - **Tables with borders.** A cell's own borders are written to the RTF (`\clbrdrt\brdrs\brdrw15`,
+    with the line, the width and the color of each side) and read back; a table had none in the
+    RTF whatever it had on the page. The toolbar has an Insert table button (rows, columns,
+    borders or none, a header row), and `insertTable(rows, columns, options)` does the same from
+    code. A header cell that has borders is marked by `{\*\inkth}` in what it holds; one with
+    none keeps the bare line under it. Rows and columns cannot be added or removed yet.
+  - **Pictures.** The frame of a selected picture has Move up and Move down, and Place beside the
+    picture above: two to four pictures in a row, each with its own description. In the document
+    and in the RTF the row is a table of one row with no borders; `rtfToHtml` reads a picture
+    and its description in a cell back as the figure it was.
+  - **A picture has no space of its own around it** in the editor and in `RtfViewer`, as it has
+    none in the RTF: it was drawn with 20 px (16 px in the viewer) above and below that no
+    reader of the RTF showed, and in which a space that was set could not be seen. Documents
+    are not changed; pictures sit closer to the text around them on screen until a space is set.
+  - A line someone drew under a cell (`\clbrdrb\brdrs\brdrw10`, a signature line) is now shown,
+    as a cell's border, where it was read and dropped.
+  - The frame's Align left no longer takes a picture's indent and spacing off with its alignment,
+    the frame's alignment buttons show the alignment a click has just set, and its buttons stay
+    on the page for a small picture at the edge.
+  - Two tests that time the reader allow for a slow machine (8 s, where the code they guard
+    against took 12 s and more).
+
+### Patch Changes
+
+- 7b7e72d: **The four smaller findings of the review of `main` before 1.13.0**
+
+  - **Light words on a gradient or a picture are not left white on white.** No picture is loaded
+    for a document and an RTF has no gradient, so both are taken off what comes in; the color of
+    the words that stood on them was left, and the words were in the report where nobody saw
+    them, in the editor and in the RTF. Their color is now taken off with the background it was
+    chosen for: by `sanitizeHtml`, on a paste, and where a document is opened. A light color with
+    a background color behind it stays (the writer leaves it out of the RTF, as before), and so
+    does one with no background at all, which is the writer's own choice.
+  - **Markdown follows a list item's own number.** `<li value="7">` was "7." in the RTF and "2."
+    in the Markdown. Written "7." after "1." it would still be shown as 2: Markdown counts on from
+    a list's first number. It is written `7)`, the other mark, which starts a new list at that
+    number, and so is a numbered list that comes right after another (the reader makes two lists
+    of numbers that jump, 1, 2, 5, 6, and they were shown as 1 to 4). Checked with pandoc.
+  - **The reader is linear again on a list nested one level deeper at every item.** Lettered items
+    of that shape took 1 s at 20,000 items and 4.2 s at 40,000; they take 0.13 s.
+  - **Branch coverage is 86.3%, from 83.3%,** with tests of the Tab key, of links in the editor
+    and of the keyboard in a dialog, which only the browser tests had held to. The floors are
+    raised to stay a little under what the suite reaches.
+
 ## 1.13.0
 
 ### Minor Changes
