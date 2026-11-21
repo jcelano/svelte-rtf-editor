@@ -1711,6 +1711,25 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			}
 		}
 
+		// Pictures side by side with a set gap: one row, a picture in each cell and an empty
+		// cell between each two. It is read at its own widths, as it was written, and not
+		// stretched across the page: what was set is the distance between the pictures.
+		// (See picture-rows.ts.)
+		const only = placedRows.length === 1 ? placedRows[0] : null;
+		const onePicture = (html: string) => /^<(figure|img)\b/.test(html) && html.split('<img').length === 2;
+		if (
+			only &&
+			only.length >= 3 &&
+			only.length % 2 === 1 &&
+			only.every((cell, i) => !cell.merged && !cell.header && cell.rowspan === 1 && cell.end === cell.start && cell.right > cell.left && (i % 2 === 0 ? onePicture(cell.html) : cell.html === ''))
+		) {
+			const cells = only.map((cell) => `<td style="padding:0;width:${(cell.right - cell.left) / 20}pt">${cell.html}</td>`).join('');
+			blocks.push({ kind: 'table', html: `<table style="border-collapse:collapse;margin:4px 0"><tr>${cells}</tr></table>` });
+			for (const aside of tableAsides) blocks.push(aside);
+			tableAsides = [];
+			return;
+		}
+
 		const total = edges[edges.length - 1] || 1;
 		// A cell's width is the difference of where it ends and where it starts, each as a
 		// share of the table rounded to a hundredth of a percent. Written that way the widths

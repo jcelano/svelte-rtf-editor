@@ -936,6 +936,21 @@ test.describe('what a third review found', () => {
 		expect(await page.locator(`${content} p`).count()).toBe(3);
 	});
 
+	test('words moved by dragging are moved back by one Undo, and moved again by one Redo', async ({ page }) => {
+		// (The move is two inputs, the words taken out and the words dropped. Each was a step of
+		// its own: the first Undo took the dropped words out, and they were nowhere.)
+		await open(page, { content: '<p>alpha beta gamma</p><p>second line</p><p>third line</p>' });
+		const before = await html(page);
+		await selectIn(page, 0, 0, 5);
+		await dragSelectionToThirdLine(page);
+		await expect(page.locator(`${content} p`).nth(2)).toContainText('alpha');
+		const moved = await html(page);
+		await page.keyboard.press('ControlOrMeta+z');
+		await expect.poll(() => html(page)).toBe(before);
+		await page.keyboard.press(REDO_KEYS[0]);
+		await expect.poll(() => html(page)).toBe(moved);
+	});
+
 	test('and an element dragged with them keeps the id it had', async ({ page }) => {
 		// (What is moved was treated as pasted, and a pasted element loses its id: it might be in
 		// the document already. A moved one is in the document once, before and after.)
@@ -1068,8 +1083,7 @@ test.describe('what a third review found', () => {
 		expect(await page.locator(`${content} iframe`).count()).toBe(0);
 		await page.keyboard.press('ControlOrMeta+z');
 		await expect(page.locator(content)).not.toContainText('came in');
-		// (Safari's engine may take the step before a paste back with it, whatever is pasted.)
-		if (browserName !== 'webkit') await expect(page.locator(content)).toContainText('Body typed');
+		await expect(page.locator(content)).toContainText('Body typed');
 		// And the words typed before it can still be taken back.
 		await expect
 			.poll(async () => {
@@ -1122,11 +1136,10 @@ test.describe('what a third review found', () => {
 		}
 	});
 
-	// (Firefox does not undo a paste the editor has taken an element or words out of: so it was in 1.11.0.)
-	const UNDOES_SUCH_A_PASTE = (browserName: string) => browserName !== 'firefox';
+	// (Firefox's own Undo did not take back a paste the editor had taken an element or words out
+	// of. The editor's Undo does, in every browser.)
 
 	test('Redo does not put the words of a button in the document a second time', async ({ page, browserName }) => {
-		test.fixme(!UNDOES_SUCH_A_PASTE(browserName));
 		await open(page, { content: '<p>Body text</p>' });
 		const pasted = await pasteAtEnd(page, '<p>first</p><p>second</p><button>Send</button><textarea>typed in a box</textarea>');
 		expect(pasted).not.toMatch(/<button|<textarea/);
@@ -1137,7 +1150,6 @@ test.describe('what a third review found', () => {
 	test('Undo of a paste takes with it the words left where a button was', async ({ page, browserName }) => {
 		// (The browser's Undo knows nothing of those words: "Send" stayed in the report, a word
 		// of a paste the writer had taken back.)
-		test.fixme(!UNDOES_SUCH_A_PASTE(browserName));
 		await open(page, { content: '<p>Body text</p>' });
 		const before = await html(page);
 		const pasted = await pasteAtEnd(page, '<p>first</p><p>second</p><button>Send</button><textarea>typed in a box</textarea>');
@@ -1151,7 +1163,6 @@ test.describe('what a third review found', () => {
 
 	test('Redo does not show again the words Word hid in a paste', async ({ page, browserName }) => {
 		// (Redo puts the paste back as the browser first made it, before those words were taken out.)
-		test.fixme(!UNDOES_SUCH_A_PASTE(browserName));
 		// (WebKit rewrites markup a page puts on the clipboard: "mso-hide" is gone before the paste.)
 		test.fixme(browserName === 'webkit');
 		await open(page, { content: '<p>Body text</p>' });
@@ -2063,6 +2074,124 @@ test.describe('the layout of a report: spacing, tables with borders, pictures si
 		expect(await rtf(page)).toMatch(/\\pard\\ql\\sb240 \{\\pict/);
 	});
 
+	/** Two pictures side by side, with this many points set between them. */
+	async function gapped(page: Page, points: string): Promise<void> {
+		await twoPictures(page);
+		await page.click(`${content} img >> nth=1`);
+		await tool(page, 'Place beside the picture above').click();
+		await page.fill('.ink-img-gap input', points);
+		await page.press('.ink-img-gap input', 'Enter');
+	}
+	const between = async (page: Page) => {
+		const [a, b] = await boxes(page);
+		return b.left - a.right;
+	};
+
+	test('the gap set between two pictures side by side is the distance between them, on the page and in the RTF', async ({ page }) => {
+		await gapped(page, '36');
+		// 36 pt is 48 px.
+		await expect.poll(() => between(page)).toBeCloseTo(48, 0);
+		// Too wide for the page together, they were made smaller alike, and fit on it.
+		const [a, b] = await boxes(page);
+		expect(a.width).toBeCloseTo(b.width, 0);
+		const page_ = await page.evaluate(() => document.querySelector('.ink-content')!.getBoundingClientRect().right);
+		expect(b.right).toBeLessThanOrEqual(page_);
+		// The gap is no cell drawn with a line while the document is edited.
+		expect(await page.evaluate(() => getComputedStyle(document.querySelector('.ink-content td:empty')!).outlineStyle)).toBe('none');
+		// In the RTF the gap is an empty cell of 720 twips, and no space inside a cell.
+		const written = await rtf(page);
+		const edges = written.match(/\\cellx(\d+)/g)!.map((edge) => Number(edge.slice(6)));
+		expect(edges).toHaveLength(3);
+		expect(edges[1] - edges[0]).toBe(720);
+		expect(written).toContain('\\trgaph0');
+		// Read back, the pictures are as far apart as they were, and the RTF is written the same.
+		await page.evaluate(async (value) => {
+			window.ed.setHTML(window.lib.rtfToHtml(value));
+			await Promise.all(Array.from(document.querySelectorAll('.ink-content img'), (img) => (img as HTMLImageElement).decode()));
+		}, written);
+		await expect.poll(() => between(page)).toBeCloseTo(48, 0);
+		expect(await rtf(page)).toBe(written);
+		// And the viewer shows them as far apart.
+		await page.evaluate((value) => window.setViewer(value), written);
+		const viewerGap = await page.evaluate(() => {
+			const [a, b] = Array.from(document.querySelectorAll('#viewer img'), (img) => img.getBoundingClientRect());
+			return b.left - a.right;
+		});
+		expect(viewerGap).toBeCloseTo(48, 0);
+	});
+
+	test('a picture beside another, resized by its handle, keeps the gap between them', async ({ page }) => {
+		await gapped(page, '18');
+		await expect.poll(() => between(page)).toBeCloseTo(24, 0);
+		await page.click(`${content} img >> nth=0`);
+		const handle = page.locator('.ink-img-handle.se');
+		const at = (await handle.boundingBox())!;
+		await page.mouse.move(at.x + at.width / 2, at.y + at.height / 2);
+		await page.mouse.down();
+		await page.mouse.move(at.x - 100, at.y + 10, { steps: 6 });
+		// (While it is being resized, too.)
+		expect(await between(page)).toBeCloseTo(24, 0);
+		await page.mouse.up();
+		const [a] = await boxes(page);
+		expect(await between(page)).toBeCloseTo(24, 0);
+		expect(a.width).toBeLessThan(330);
+	});
+
+	/** Drag the picture `from` (its index) by the mouse to a point given as a share of another element's box. */
+	async function dragPicture(page: Page, from: number, to: string, at: { x: number; y: number }): Promise<void> {
+		const source = (await page.locator(`${content} img >> nth=${from}`).boundingBox())!;
+		const target = (await page.locator(to).boundingBox())!;
+		await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2);
+		await page.mouse.down();
+		await page.mouse.move(source.x + source.width / 2 + 8, source.y + source.height / 2 + 8, { steps: 3 });
+		await page.mouse.move(target.x + target.width * at.x, target.y + target.height * at.y, { steps: 12 });
+		await page.mouse.up();
+	}
+	const RIGHT = { x: 0.8, y: 0.5 };
+	const LEFT = { x: 0.2, y: 0.5 };
+
+	test('a picture dragged onto another is put beside it, each with its own caption under it', async ({ page }) => {
+		// (The browser put the dragged picture in the other's figure, and its caption was left
+		// behind as an empty line: both captions under the two pictures, at the left.)
+		await twoPictures(page);
+		await dragPicture(page, 1, `${content} img >> nth=0`, RIGHT);
+		await expect.poll(() => blocks(page)).toEqual(['Gross description', '[Figure 1. H&E|Figure 2. Ki-67]', 'Diagnosis']);
+		const [a, b] = await boxes(page);
+		expect(b.left).toBeGreaterThan(a.right);
+		expect(a.captionTop).toBeGreaterThan(a.bottom);
+		expect(b.captionLeft).toBeCloseTo(b.left, 0);
+		// It is a row as Place beside makes one: a gap can be set.
+		await expect(page.locator('.ink-img-gap input')).toBeVisible();
+		// And one step to undo.
+		await page.keyboard.press('ControlOrMeta+z');
+		await expect.poll(() => blocks(page)).toEqual(['Gross description', 'Figure 1. H&E', 'Figure 2. Ki-67', 'Diagnosis']);
+	});
+
+	test('dropped on the left half of a picture, it is put before it', async ({ page }) => {
+		await twoPictures(page);
+		await dragPicture(page, 1, `${content} img >> nth=0`, LEFT);
+		await expect.poll(() => blocks(page)).toEqual(['Gross description', '[Figure 2. Ki-67|Figure 1. H&E]', 'Diagnosis']);
+	});
+
+	test('in a row, a picture dragged onto the other changes places with it; dragged onto a paragraph, it leaves the row', async ({ page }) => {
+		await twoPictures(page);
+		await dragPicture(page, 1, `${content} img >> nth=0`, RIGHT);
+		await expect.poll(() => blocks(page)).toEqual(['Gross description', '[Figure 1. H&E|Figure 2. Ki-67]', 'Diagnosis']);
+		await dragPicture(page, 1, `${content} img >> nth=0`, LEFT);
+		await expect.poll(() => blocks(page)).toEqual(['Gross description', '[Figure 2. Ki-67|Figure 1. H&E]', 'Diagnosis']);
+		await dragPicture(page, 0, `${content} p >> nth=1`, { x: 0.3, y: 0.9 });
+		await expect.poll(() => blocks(page)).toEqual(['Gross description', 'Figure 1. H&E', 'Diagnosis', 'Figure 2. Ki-67', 'empty']);
+	});
+
+	test('the gap is taken off by leaving it empty: the pictures share the page again', async ({ page }) => {
+		await gapped(page, '18');
+		await page.click(`${content} img >> nth=0`);
+		await page.fill('.ink-img-gap input', '');
+		await page.press('.ink-img-gap input', 'Enter');
+		await expect(page.locator(`${content} table`)).toHaveAttribute('style', /width:\s*100%/);
+		await expect(page.locator(`${content} td`)).toHaveCount(2);
+	});
+
 	test('a table that comes with borders, as Word, Excel and Google Docs paste one, has them in the RTF', async ({ page }) => {
 		await open(page);
 		await page.evaluate(() =>
@@ -2090,5 +2219,552 @@ test.describe('the layout of a report: spacing, tables with borders, pictures si
 		await expect(page.locator(`${content} td`)).toHaveCount(3);
 		await page.keyboard.type('a');
 		expect(await page.locator(`${content} td >> nth=0`).textContent()).toBe('a');
+	});
+});
+
+test.describe('lists: in a page with styles of its own, and as the HTML the editor hands out', () => {
+	const rtf = (page: Page) => page.evaluate(() => window.ed.getRTF());
+	const END = process.platform === 'darwin' ? 'Meta+ArrowRight' : 'End';
+	const bullet = (page: Page) => page.getByRole('button', { name: 'Bullet list' }).click();
+	const numbered = (page: Page) => page.getByRole('button', { name: 'Numbered list' }).click();
+	/** What Tailwind's base styles and most CSS resets say about lists. */
+	const RESET = 'ol, ul, menu { list-style: none; margin: 0; padding: 0; }';
+	const markers = (page: Page, within: string) =>
+		page.evaluate((within) => Array.from(document.querySelectorAll(`${within} ul, ${within} ol`), (list) => `${list.tagName.toLowerCase()}:${getComputedStyle(list).listStyleType}`), within);
+	async function endOfFirst(page: Page): Promise<void> {
+		await page.click(`${content} p >> nth=0`);
+		await page.keyboard.press(END);
+	}
+
+	test('bullets and numbers show in a page that takes them off its own lists', async ({ page }) => {
+		const nested = '<ul><li>skin<ul><li>left<ul><li>distal</li></ul></li></ul></li></ul><ol><li>first</li><li>second</li></ol><ol type="A"><li>lettered</li></ol><ol style="list-style-type: lower-roman;"><li>roman</li></ol>';
+		await open(page, { content: nested });
+		await page.addStyleTag({ content: RESET });
+		expect(await markers(page, content)).toEqual(['ul:disc', 'ul:circle', 'ul:square', 'ol:decimal', 'ol:none', 'ol:lower-roman']);
+		// An item has its marker's room, and the marker is drawn (an item that is a list item).
+		expect(await page.locator(`${content} li >> nth=0`).evaluate((li) => getComputedStyle(li).display)).toBe('list-item');
+		expect(await page.locator(`${content} ul >> nth=0`).evaluate((ul) => parseFloat(getComputedStyle(ul).paddingLeft))).toBeGreaterThan(20);
+		await page.evaluate(() => window.setViewer(window.ed.getRTF()));
+		await expect(page.locator('#viewer ol')).toHaveCount(3);
+		expect((await markers(page, '#viewer')).slice(0, 4)).toEqual(['ul:disc', 'ul:circle', 'ul:square', 'ol:decimal']);
+	});
+
+	test('a list made from the toolbar in such a page has its bullets and its numbers', async ({ page }) => {
+		await open(page, { content: '<p>Specimens</p><p>Steps</p>' });
+		await page.addStyleTag({ content: RESET });
+		await endOfFirst(page);
+		await bullet(page);
+		await page.getByText('Steps', { exact: true }).click();
+		await numbered(page);
+		expect(await markers(page, content)).toEqual(['ul:disc', 'ol:decimal']);
+	});
+
+	test('the caret stays where it was when a line is made a list item', async ({ page }) => {
+		await open(page, { content: '<p>Specimens</p><p>two</p>' });
+		await endOfFirst(page);
+		await bullet(page);
+		await page.keyboard.type(' received');
+		expect(await page.locator(`${content} li`).textContent()).toBe('Specimens received');
+		// And in the middle of a line.
+		await page.getByText('two', { exact: true }).click();
+		await page.keyboard.press(END);
+		await page.keyboard.press('ArrowLeft');
+		await numbered(page);
+		await page.keyboard.type('X');
+		expect(await page.locator(`${content} ol li`).textContent()).toBe('twXo');
+	});
+
+	test('the HTML of a list made from the toolbar is HTML that reads back as the same document', async ({ page }) => {
+		await open(page, { content: '<p>Specimens</p><p>x</p>' });
+		await page.click(`${content} p >> nth=1`);
+		await page.keyboard.press(END);
+		await page.keyboard.press('Backspace');
+		await bullet(page);
+		await page.keyboard.type('skin');
+		await page.keyboard.press('Enter');
+		await page.keyboard.type('node');
+		await page.keyboard.press('Enter');
+		await page.keyboard.press('Enter');
+		await page.keyboard.type('Diagnosis');
+		const handedOut = await html(page);
+		// No list inside a paragraph, which a parser reads as an empty paragraph on each side of it.
+		const parsed = await page.evaluate((value) => {
+			const d = document.createElement('div');
+			d.innerHTML = value;
+			return d.innerHTML;
+		}, handedOut);
+		expect(parsed).toBe(handedOut);
+		expect(handedOut).not.toMatch(/<p[^>]*>\s*<(ul|ol|div)/);
+		const written = await rtf(page);
+		expect(body(written)).toMatch(/^\\pard Specimens\\par \\pard\\li720\\fi-360\\bullet\\tab skin\\par \\pard\\li720\\fi-360\\bullet\\tab node\\par \\pard Diagnosis\\par \}$/);
+		// Kept by an application and shown again: the same document, with no empty lines added.
+		await page.evaluate((value) => window.ed.setHTML(value), handedOut);
+		expect(await html(page)).toBe(handedOut);
+		expect(await rtf(page)).toBe(written);
+	});
+
+	test('Undo takes a list back, and Redo makes it again', async ({ page }) => {
+		await open(page, { content: '<p>Specimens</p><p>two</p>' });
+		await endOfFirst(page);
+		await bullet(page);
+		await expect(page.locator(`${content} li`)).toHaveCount(1);
+		await page.getByRole('button', { name: 'Undo (Ctrl+Z)' }).click();
+		expect(await html(page)).toBe('<p>Specimens</p><p>two</p>');
+		await page.getByRole('button', { name: 'Redo' }).click();
+		await expect(page.locator(`${content} li`)).toHaveCount(1);
+		expect(await page.locator(`${content} li`).textContent()).toBe('Specimens');
+		expect(await html(page)).not.toMatch(/<p[^>]*><ul/);
+	});
+
+	const items = (page: Page) => page.locator(`${content} li`).allTextContents();
+	const line = (page: Page, text: string) => page.locator(content).getByText(text, { exact: true }).click();
+
+	for (const order of [
+		['one', 'two', 'three'],
+		['three', 'two', 'one']
+	]) {
+		test(`lines made items one at a time (${order.join(', ')}) are one list, numbered on from one another`, async ({ page }) => {
+			await open(page, { content: '<p>one</p><p>two</p><p>three</p><p>after</p>' });
+			for (const text of order) {
+				await line(page, text);
+				await numbered(page);
+			}
+			// (Firefox made a list of each, and each began at 1.)
+			await expect(page.locator(`${content} ol`)).toHaveCount(1);
+			expect(await items(page)).toEqual(['one', 'two', 'three']);
+			expect((await rtf(page)).match(/\d\.\\tab/g)).toEqual(['1.\\tab', '2.\\tab', '3.\\tab']);
+			// Each was one step, and Undo takes the last one back.
+			await page.getByRole('button', { name: 'Undo' }).click();
+			expect(await items(page)).toEqual(order.slice(0, 2).sort((a, b) => ['one', 'two', 'three'].indexOf(a) - ['one', 'two', 'three'].indexOf(b)));
+			await page.getByRole('button', { name: 'Undo' }).click();
+			expect(await items(page)).toEqual([order[0]]);
+			await page.getByRole('button', { name: 'Undo' }).click();
+			await expect(page.locator(`${content} li`)).toHaveCount(0);
+			await expect(page.locator(`${content} p`)).toHaveCount(4);
+		});
+	}
+
+	test('a line under a list is made its next item, and one between two lists joins them', async ({ page }) => {
+		await open(page, { content: '<ol><li>a</li><li>b</li></ol><p>c</p><p>d</p><ol><li>e</li></ol><p>after</p>' });
+		await line(page, 'c');
+		await page.keyboard.press(END);
+		await numbered(page);
+		await page.keyboard.type('!');
+		expect(await items(page)).toEqual(['a', 'b', 'c!', 'e']);
+		await expect(page.locator(`${content} ol`)).toHaveCount(2);
+		await line(page, 'd');
+		await numbered(page);
+		await expect(page.locator(`${content} ol`)).toHaveCount(1);
+		expect(await items(page)).toEqual(['a', 'b', 'c!', 'd', 'e']);
+		// A list of the other kind beside it is not one to join.
+		await line(page, 'after');
+		await bullet(page);
+		await expect(page.locator(`${content} ol`)).toHaveCount(1);
+		await expect(page.locator(`${content} ul li`)).toHaveText(['after']);
+	});
+
+	test('the list buttons show which kind of list the caret is in', async ({ page }) => {
+		await open(page, { content: '<ul><li>bulleted</li></ul><ol><li>numbered</li><li>second<ul><li>within</li></ul></li></ol><p>neither</p>' });
+		const pressed = async () => [
+			await page.getByRole('button', { name: 'Bullet list' }).getAttribute('aria-pressed'),
+			await page.getByRole('button', { name: 'Numbered list' }).getAttribute('aria-pressed')
+		];
+		await line(page, 'bulleted');
+		expect(await pressed()).toEqual(['true', 'false']);
+		await line(page, 'numbered');
+		expect(await pressed()).toEqual(['false', 'true']);
+		await line(page, 'within');
+		expect(await pressed()).toEqual(['true', 'false']);
+		await line(page, 'neither');
+		expect(await pressed()).toEqual(['false', 'false']);
+		await numbered(page);
+		expect(await pressed()).toEqual(['false', 'true']);
+	});
+
+	test('the caret stays where it was in words that are in no paragraph', async ({ page }) => {
+		await open(page);
+		await page.evaluate(() => window.ed.setHTML(''));
+		await page.click(content);
+		await page.keyboard.type('alpha');
+		await numbered(page);
+		await page.keyboard.type(' more');
+		await page.keyboard.press('Enter');
+		await page.keyboard.type('beta');
+		expect(await items(page)).toEqual(['alpha more', 'beta']);
+	});
+});
+
+test.describe('lists: made by the editor itself, the same in every browser', () => {
+	const rtf = (page: Page) => page.evaluate(() => window.ed.getRTF());
+	const MOD = process.platform === 'darwin' ? 'Meta' : 'Control';
+	const HOME = process.platform === 'darwin' ? 'Meta+ArrowLeft' : 'Home';
+	const END = process.platform === 'darwin' ? 'Meta+ArrowRight' : 'End';
+	const button = (page: Page, name: string) => page.getByRole('button', { name });
+	const bullet = (page: Page) => button(page, 'Bullet list').click();
+	const numbered = (page: Page) => button(page, 'Numbered list').click();
+	const line = (page: Page, text: string) => page.locator(content).getByText(text, { exact: true }).click();
+	const THREE = '<li>one</li><li>two</li><li>three</li>';
+
+	test('a list is taken off as paragraphs, one for each item; one item taken off parts the list around it', async ({ page }) => {
+		await open(page, { content: `<ol>${THREE}</ol>` });
+		await line(page, 'two');
+		await page.keyboard.press(`${MOD}+a`);
+		await numbered(page);
+		// (They were one paragraph, with a line break between them.)
+		expect(await html(page)).toBe('<p>one</p><p>two</p><p>three</p>');
+		await bullet(page);
+		expect(await html(page)).toBe(`<ul>${THREE}</ul>`);
+		await line(page, 'two');
+		await bullet(page);
+		expect(await html(page)).toBe('<ul><li>one</li></ul><p>two</p><ul><li>three</li></ul>');
+		await expect(button(page, 'Bullet list')).toHaveAttribute('aria-pressed', 'false');
+	});
+
+	test('a paragraph made an item and a paragraph again keeps its id and the look of its words, and the RTF its color', async ({ page }) => {
+		// (An application's id on a paragraph went with the paragraph: and with it the place
+		// the application kept in the document.)
+		const marked = '<p id="finding-2" style="color: rgb(192, 0, 0);">two</p>';
+		await open(page, { content: `<p>one</p>${marked}<p>three</p>` });
+		await line(page, 'two');
+		await bullet(page);
+		expect(await html(page)).toBe('<p>one</p><ul><li id="finding-2" style="color: rgb(192, 0, 0);">two</li></ul><p>three</p>');
+		expect(await rtf(page)).toContain('\\cf2 \\pard\\li720\\fi-360\\bullet\\tab two\\par');
+		await bullet(page);
+		expect(await html(page)).toBe(`<p>one</p>${marked}<p>three</p>`);
+	});
+
+	test('the other list button, with the caret in a list, makes the whole list the other kind', async ({ page }) => {
+		// (It made the one item a list of its own, between two lists of what was left.)
+		await open(page, { content: `<ul>${THREE}</ul>` });
+		await line(page, 'two');
+		await numbered(page);
+		expect(await html(page)).toBe(`<ol>${THREE}</ol>`);
+		expect((await rtf(page)).match(/\d\.\\tab/g)).toEqual(['1.\\tab', '2.\\tab', '3.\\tab']);
+		await expect(button(page, 'Numbered list')).toHaveAttribute('aria-pressed', 'true');
+		await expect(button(page, 'Bullet list')).toHaveAttribute('aria-pressed', 'false');
+		// With items selected, those items are.
+		await line(page, 'three');
+		await page.keyboard.press(HOME);
+		await page.keyboard.press(`Shift+${END}`);
+		await bullet(page);
+		expect(await html(page)).toBe('<ol><li>one</li><li>two</li></ol><ul><li>three</li></ul>');
+	});
+
+	test('Tab at the start of an item puts it under the item before it, and Shift+Tab takes it out again', async ({ page }) => {
+		await open(page);
+		await page.click(content);
+		await numbered(page);
+		await page.keyboard.type('a');
+		await page.keyboard.press('Enter');
+		await page.keyboard.press('Tab');
+		await page.keyboard.type('b');
+		await page.keyboard.press('Enter');
+		await page.keyboard.press('Shift+Tab');
+		await page.keyboard.type('c');
+		expect(await html(page)).toBe('<ol><li>a<ol><li>b</li></ol></li><li>c</li></ol>');
+		// The RTF has the item one step further in, numbered from 1 again; and reads back so.
+		const written = await rtf(page);
+		expect(written.match(/\\li\d+\\fi-360 \d\./g)).toEqual(['\\li720\\fi-360 1.', '\\li1440\\fi-360 1.', '\\li720\\fi-360 2.']);
+		await page.evaluate((value) => window.setViewer(value), written);
+		await expect(page.locator('#viewer ol ol li')).toHaveText('b');
+		// Anywhere else in an item, Tab types a tab, as it did.
+		await page.keyboard.press('Tab');
+		expect(await page.locator(`${content} li >> nth=2`).textContent()).toBe('c\t');
+		await expect(page.locator(`${content} ol`)).toHaveCount(2);
+		// And in the first item of a list, which has none before it to be under.
+		await open(page, { content: '<ul><li>only</li></ul>' });
+		await line(page, 'only');
+		await page.keyboard.press(HOME);
+		await page.keyboard.press('Tab');
+		expect(await page.locator(`${content} li`).textContent()).toBe('\tonly');
+		await expect(page.locator(`${content} ul`)).toHaveCount(1);
+	});
+
+	test('Increase indent puts the items selected under the item before them; Decrease indent takes them out', async ({ page }) => {
+		await open(page, { content: `<ul>${THREE}</ul>` });
+		await line(page, 'two');
+		await page.keyboard.press(HOME);
+		await page.keyboard.press('Shift+ArrowDown');
+		await page.keyboard.press(`Shift+${END}`);
+		await button(page, 'Increase indent').click();
+		expect(await html(page)).toBe('<ul><li>one<ul><li>two</li><li>three</li></ul></li></ul>');
+		await line(page, 'three');
+		await button(page, 'Decrease indent').click();
+		expect(await html(page)).toBe('<ul><li>one<ul><li>two</li></ul></li><li>three</li></ul>');
+		// Undo takes it back one step at a time, with the keys as with the button.
+		await page.keyboard.press(`${MOD}+z`);
+		expect(await html(page)).toBe('<ul><li>one<ul><li>two</li><li>three</li></ul></li></ul>');
+		await button(page, 'Undo').click();
+		expect(await html(page)).toBe(`<ul>${THREE}</ul>`);
+		// The first item has none before it: the list itself is moved, as a paragraph is.
+		await line(page, 'one');
+		await button(page, 'Increase indent').click();
+		await expect(page.locator(`${content} ul`)).toHaveCount(1);
+		expect(await page.locator(`${content} ul`).evaluate((list) => (list as HTMLElement).style.marginLeft)).not.toBe('');
+	});
+
+	test('Enter in an item with nothing in it leaves the list, one list at a time', async ({ page }) => {
+		await open(page);
+		await page.click(content);
+		await bullet(page);
+		await page.keyboard.type('a');
+		await page.keyboard.press('Enter');
+		await page.keyboard.press('Tab');
+		await page.keyboard.type('b');
+		await page.keyboard.press('Enter');
+		await page.keyboard.press('Enter');
+		await page.keyboard.type('c');
+		expect(await html(page)).toBe('<ul><li>a<ul><li>b</li></ul></li><li>c</li></ul>');
+		await page.keyboard.press('Enter');
+		await page.keyboard.press('Enter');
+		await page.keyboard.type('after');
+		expect(await html(page)).toBe('<ul><li>a<ul><li>b</li></ul></li><li>c</li></ul><p>after</p>');
+		await expect(button(page, 'Bullet list')).toHaveAttribute('aria-pressed', 'false');
+	});
+
+	test('Backspace at the start of an item makes it a paragraph, where it is', async ({ page }) => {
+		// (In Chromium it did nothing in the first item of a list.)
+		await open(page, { content: '<ul><li>one</li><li>two</li></ul><p>x</p>' });
+		for (const text of ['two', 'one']) {
+			await line(page, text);
+			await page.keyboard.press(HOME);
+			await page.keyboard.press('Backspace');
+		}
+		expect(await html(page)).toBe('<p>one</p><p>two</p><p>x</p>');
+		await page.keyboard.type('Z');
+		expect(await html(page)).toBe('<p>Zone</p><p>two</p><p>x</p>');
+		// Anywhere else in an item it takes off a letter, as it did.
+		await open(page, { content: '<ul><li>one</li></ul>' });
+		await line(page, 'one');
+		await page.keyboard.press(END);
+		await page.keyboard.press('Backspace');
+		expect(await html(page)).toBe('<ul><li>on</li></ul>');
+	});
+
+	test('a heading made an item is an item of its words, not a heading with a list in it', async ({ page }) => {
+		await open(page, { content: '<h2>Final diagnosis</h2><p>Skin</p>' });
+		await line(page, 'Final diagnosis');
+		await bullet(page);
+		expect(await html(page)).toBe('<ul><li>Final diagnosis</li></ul><p>Skin</p>');
+	});
+
+	test('the list buttons are lit for the whole document selected, in a list', async ({ page }) => {
+		// (Firefox says such a selection by the document's element, not by a word in an item.)
+		await open(page, { content: `<ol>${THREE}</ol>` });
+		await line(page, 'two');
+		await page.keyboard.press(`${MOD}+a`);
+		await expect(button(page, 'Numbered list')).toHaveAttribute('aria-pressed', 'true');
+	});
+});
+
+test.describe("Undo and Redo: the editor's own, of whatever changed the document", () => {
+	const MOD = process.platform === 'darwin' ? 'Meta' : 'Control';
+	const END = process.platform === 'darwin' ? 'Meta+ArrowRight' : 'End';
+	const button = (page: Page, name: string) => page.getByRole('button', { name });
+	const undo = (page: Page) => button(page, 'Undo').click();
+	const redo = (page: Page) => button(page, 'Redo').click();
+	const tool = (page: Page, title: string) => page.locator(`.ink-img-tools button[title="${title}"]`);
+	const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+	async function typeAtEnd(page: Page, text: string): Promise<void> {
+		await page.click(`${content} p >> nth=0`);
+		await page.keyboard.press(END);
+		await page.keyboard.type(text);
+	}
+	const shape = (page: Page) => page.evaluate(() => Array.from(document.querySelector('.ink-content')!.children, (el) => (el.tagName === 'P' ? el.textContent : el.tagName.toLowerCase())));
+
+	test('each thing done is a step, taken back in the order it was done: typing, a button, typing again', async ({ page }) => {
+		await open(page, { content: '<p>start</p>' });
+		await typeAtEnd(page, '-one');
+		await button(page, 'Bullet list').click();
+		await page.keyboard.type('-two');
+		expect(await html(page)).toBe('<ul><li>start-one-two</li></ul>');
+		await undo(page);
+		expect(await html(page)).toBe('<ul><li>start-one</li></ul>');
+		await undo(page);
+		expect(await html(page)).toBe('<p>start-one</p>');
+		await undo(page);
+		expect(await html(page)).toBe('<p>start</p>');
+		// With nothing left to undo, nothing happens.
+		await undo(page);
+		expect(await html(page)).toBe('<p>start</p>');
+		for (let i = 0; i < 3; i++) await redo(page);
+		expect(await html(page)).toBe('<ul><li>start-one-two</li></ul>');
+		// The keys do what the buttons do.
+		await page.keyboard.press(`${MOD}+z`);
+		expect(await html(page)).toBe('<ul><li>start-one</li></ul>');
+		await page.keyboard.press(`${MOD}+Shift+z`);
+		expect(await html(page)).toBe('<ul><li>start-one-two</li></ul>');
+		// The caret is back where it was, and after a new change there is nothing to redo.
+		await page.keyboard.press(`${MOD}+z`);
+		await page.keyboard.type('!');
+		expect(await html(page)).toBe('<ul><li>start-one!</li></ul>');
+		await redo(page);
+		expect(await html(page)).toBe('<ul><li>start-one!</li></ul>');
+	});
+
+	test('a table put in is taken back by Undo, and not the typing before it', async ({ page }) => {
+		// (The browser's Undo knew nothing of the table: it took the typing back and left the table.)
+		await open(page, { content: '<p>Results</p>' });
+		await typeAtEnd(page, '-typed');
+		await button(page, 'Insert table').click();
+		const dialog = page.getByRole('dialog');
+		await dialog.getByLabel('Rows').fill('2');
+		await dialog.getByLabel('Columns').fill('2');
+		await dialog.getByRole('button', { name: 'Insert' }).click();
+		await expect(page.locator(`${content} table`)).toHaveCount(1);
+		await undo(page);
+		expect(await html(page)).toBe('<p>Results-typed</p>');
+		await redo(page);
+		await expect(page.locator(`${content} table`)).toHaveCount(1);
+		// The caret is in the first cell again.
+		await page.keyboard.type('a');
+		expect(await page.locator(`${content} td, ${content} th`).first().textContent()).toBe('a');
+		await undo(page);
+		await undo(page);
+		await undo(page);
+		expect(await html(page)).toBe('<p>Results</p>');
+	});
+
+	test('a picture put in is taken back by Undo, and is whole again after Redo', async ({ page }) => {
+		await open(page, { content: '<p>first</p>' });
+		await typeAtEnd(page, '-typed');
+		await button(page, 'Insert image').click();
+		await page.getByLabel('Image address').fill(PNG);
+		await page.getByRole('button', { name: 'Insert', exact: true }).click();
+		await expect(page.locator(`${content} figure`)).toHaveCount(1);
+		await page.locator(`${content} img`).evaluate((img) => (img as HTMLImageElement).decode());
+		await undo(page);
+		await expect(page.locator(`${content} figure`)).toHaveCount(0);
+		expect(await page.locator(`${content} p >> nth=0`).textContent()).toBe('first-typed');
+		await redo(page);
+		await expect(page.locator(`${content} figure`)).toHaveCount(1);
+		expect(await page.locator(`${content} img`).getAttribute('src')).toBe(PNG);
+	});
+
+	test('a picture moved, and one put beside another, go back where they were', async ({ page }) => {
+		await open(page);
+		await page.evaluate(async () => {
+			const picture = (color: string) => {
+				const canvas = document.createElement('canvas');
+				canvas.width = 200;
+				canvas.height = 100;
+				const g = canvas.getContext('2d')!;
+				g.fillStyle = color;
+				g.fillRect(0, 0, 200, 100);
+				return canvas.toDataURL('image/png');
+			};
+			const figure = (color: string, caption: string) => `<figure><img src="${picture(color)}" alt="" style="width:200px;height:auto"><figcaption>${caption}</figcaption></figure>`;
+			window.ed.setHTML(`<p>Gross</p>${figure('#b04a5a', 'Figure 1')}<p>Micro</p>${figure('#4a6ab0', 'Figure 2')}`);
+			await Promise.all(Array.from(document.querySelectorAll('.ink-content img'), (img) => (img as HTMLImageElement).decode()));
+		});
+		const before = await html(page);
+		const captions = () => page.locator(`${content} figcaption`).allTextContents();
+		await page.click(`${content} img >> nth=1`);
+		await tool(page, 'Move up').click();
+		expect(await shape(page)).toEqual(['Gross', 'figure', 'figure', 'Micro']);
+		await tool(page, 'Move up').click();
+		expect(await captions()).toEqual(['Figure 2', 'Figure 1']);
+		await undo(page);
+		expect(await captions()).toEqual(['Figure 1', 'Figure 2']);
+		expect(await shape(page)).toEqual(['Gross', 'figure', 'figure', 'Micro']);
+		await page.click(`${content} img >> nth=1`);
+		await tool(page, 'Place beside the picture above').click();
+		await expect(page.locator(`${content} table`)).toHaveCount(1);
+		await undo(page);
+		await expect(page.locator(`${content} table`)).toHaveCount(0);
+		await undo(page);
+		expect(await html(page)).toBe(before);
+		await redo(page);
+		await redo(page);
+		await expect(page.locator(`${content} table img`)).toHaveCount(2);
+		// The pictures are the ones that were there: whole, and shown.
+		expect(await page.locator(`${content} img`).evaluateAll((imgs) => imgs.every((img) => (img as HTMLImageElement).src.startsWith('data:image/png') && (img as HTMLImageElement).src.length > 200))).toBe(true);
+	});
+
+	test('an indent and a spacing set between two runs of typing are each a step', async ({ page }) => {
+		await open(page, { content: '<p>para</p><p>next</p>' });
+		await typeAtEnd(page, '-a');
+		await button(page, 'Increase indent').click();
+		await page.keyboard.type('-b');
+		await page.selectOption('select.tb-spacing', 'spaceAfter:12');
+		const first = () => page.locator(`${content} p >> nth=0`).evaluate((p) => `${p.textContent}|${(p as HTMLElement).style.marginLeft ? 'indent' : ''}|${(p as HTMLElement).style.marginBottom}`);
+		expect(await first()).toBe('para-a-b|indent|12pt');
+		await undo(page);
+		expect(await first()).toBe('para-a-b|indent|');
+		await undo(page);
+		expect(await first()).toBe('para-a|indent|');
+		await undo(page);
+		expect(await first()).toBe('para-a||');
+		await undo(page);
+		expect(await html(page)).toBe('<p>para</p><p>next</p>');
+		for (let i = 0; i < 4; i++) await redo(page);
+		expect(await first()).toBe('para-a-b|indent|12pt');
+	});
+
+	test('typing after a pause is a step of its own, and a new paragraph is one', async ({ page }) => {
+		await open(page, { content: '<p>a</p>' });
+		await typeAtEnd(page, 'bc');
+		await page.waitForTimeout(1200);
+		await page.keyboard.type('de');
+		await page.keyboard.press('Enter');
+		await page.keyboard.type('fg');
+		expect(await shape(page)).toEqual(['abcde', 'fg']);
+		await undo(page);
+		expect(await shape(page)).toEqual(['abcde', '']);
+		await undo(page);
+		expect(await shape(page)).toEqual(['abcde']);
+		await undo(page);
+		expect(await shape(page)).toEqual(['abc']);
+		await undo(page);
+		expect(await shape(page)).toEqual(['a']);
+	});
+
+	test('Undo does not lead back into the document that was there before a new one was set', async ({ page }) => {
+		await open(page, { content: '<p>the first report</p>' });
+		await typeAtEnd(page, '-typed');
+		await page.evaluate(() => window.ed.setHTML('<p>another report</p>'));
+		await undo(page);
+		await page.click(content);
+		await page.keyboard.press(`${MOD}+z`);
+		expect(await html(page)).toBe('<p>another report</p>');
+		// And what is typed in the new one is taken back as far as the new one.
+		await typeAtEnd(page, '-x');
+		await undo(page);
+		await undo(page);
+		expect(await html(page)).toBe('<p>another report</p>');
+	});
+
+	test('undo() and redo() are the application\'s to call, and say whether there was a step', async ({ page }) => {
+		type WithHistory = Editor & { undo(): boolean; redo(): boolean };
+		await open(page, { content: '<p>start</p>' });
+		expect(await page.evaluate(() => (window.ed as WithHistory).undo())).toBe(false);
+		await typeAtEnd(page, '-one');
+		expect(await page.evaluate(() => (window.ed as WithHistory).undo())).toBe(true);
+		expect(await html(page)).toBe('<p>start</p>');
+		expect(await page.evaluate(() => (window.ed as WithHistory).redo())).toBe(true);
+		expect(await html(page)).toBe('<p>start-one</p>');
+		expect(await page.evaluate(() => (window.ed as WithHistory).redo())).toBe(false);
+	});
+
+	test('what an input method composes is one step, and Undo waits until it is done', async ({ page, browserName }) => {
+		// (Chromium alone lets a test compose as an input method does, through its own protocol.)
+		test.skip(browserName !== 'chromium', 'composition is driven through the Chrome DevTools Protocol');
+		await open(page, { content: '<p>start</p>' });
+		// (Typed first, and ended as a step by a click on the toolbar.)
+		await typeAtEnd(page, '-');
+		await button(page, 'Bold').click();
+		await button(page, 'Bold').click();
+		const cdp = await page.context().newCDPSession(page);
+		for (const text of ['k', 'か', 'かn', 'かな']) await cdp.send('Input.imeSetComposition', { text, selectionStart: text.length, selectionEnd: text.length });
+		// (In the middle of it, Undo takes nothing from under the method.)
+		await page.keyboard.press(`${MOD}+z`);
+		await undo(page);
+		expect(await html(page)).toBe('<p>start-かな</p>');
+		await cdp.send('Input.insertText', { text: 'かな' });
+		expect(await html(page)).toBe('<p>start-かな</p>');
+		await page.keyboard.press(`${MOD}+z`);
+		expect(await html(page)).toBe('<p>start-</p>');
+		await page.keyboard.press(`${MOD}+Shift+z`);
+		expect(await html(page)).toBe('<p>start-かな</p>');
 	});
 });

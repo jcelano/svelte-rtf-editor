@@ -17,6 +17,7 @@
  */
 
 import { tableModel, columnShares, tableRowsInOrder, rowCells, type GridCell } from './table-model.js';
+import { gappedRowWidths } from './picture-rows.js';
 import { itemNumber, listStart, markerText, numberStyleOf } from './list-markers.js';
 
 // ── Types ──
@@ -1916,11 +1917,18 @@ function tableRtf(table: HTMLElement, ctx: WalkContext): string {
 	if (model.columns === 0) return rtf;
 
 	let cumulative = 0;
-	const edges = columnShares(model, table).map((share) => {
-		cumulative += share;
-		return Math.round(cumulative * PAGE_WIDTH);
-	});
-	edges[edges.length - 1] = PAGE_WIDTH; // snap last edge to avoid rounding drift
+	// Pictures side by side with a set gap between them are written at their own widths, the
+	// gap an empty cell, with no space inside a cell: the picture fills its cell, and nothing
+	// is stretched to the page (see picture-rows.ts).
+	const gapped = gappedRowWidths(table);
+	const edges = gapped
+		? gapped.map((twips) => Math.round((cumulative += twips)))
+		: columnShares(model, table).map((share) => {
+				cumulative += share;
+				return Math.round(cumulative * PAGE_WIDTH);
+			});
+	if (!gapped) edges[edges.length - 1] = PAGE_WIDTH; // snap last edge to avoid rounding drift
+	const gaph = gapped ? 0 : 120;
 
 	const started = new Set<GridCell>();
 	for (let r = 0; r < model.rows.length; r++) {
@@ -1965,7 +1973,7 @@ function tableRtf(table: HTMLElement, ctx: WalkContext): string {
 		}
 
 		const lastRow = r === model.rows.length - 1 ? '\\lastrow' : '';
-		rtf += `{\\trowd\\trgaph120${definition}\\trkeep\\intbl{${bodies}}\\intbl${lastRow}\\row}`;
+		rtf += `{\\trowd\\trgaph${gaph}${definition}\\trkeep\\intbl{${bodies}}\\intbl${lastRow}\\row}`;
 	}
 	return rtf;
 }

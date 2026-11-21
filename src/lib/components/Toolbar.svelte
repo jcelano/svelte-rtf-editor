@@ -175,10 +175,10 @@
 
 	<!-- Lists -->
 	<div class="toolbar-group">
-		<ToolbarButton title="Bullet list" onclick={() => exec('insertUnorderedList')}>
+		<ToolbarButton active={formatState.bulletList} title="Bullet list" onclick={() => exec('insertUnorderedList')}>
 			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="9" y1="6" x2="20" y2="6"/><line x1="9" y1="12" x2="20" y2="12"/><line x1="9" y1="18" x2="20" y2="18"/><circle cx="5" cy="6" r="1.5" fill="currentColor"/><circle cx="5" cy="12" r="1.5" fill="currentColor"/><circle cx="5" cy="18" r="1.5" fill="currentColor"/></svg>
 		</ToolbarButton>
-		<ToolbarButton title="Numbered list" onclick={() => exec('insertOrderedList')}>
+		<ToolbarButton active={formatState.numberedList} title="Numbered list" onclick={() => exec('insertOrderedList')}>
 			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="10" y1="6" x2="20" y2="6"/><line x1="10" y1="12" x2="20" y2="12"/><line x1="10" y1="18" x2="20" y2="18"/><text x="3" y="8" font-size="8" fill="currentColor" stroke="none" font-family="sans-serif">1</text><text x="3" y="14" font-size="8" fill="currentColor" stroke="none" font-family="sans-serif">2</text><text x="3" y="20" font-size="8" fill="currentColor" stroke="none" font-family="sans-serif">3</text></svg>
 		</ToolbarButton>
 	</div>

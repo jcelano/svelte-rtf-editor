@@ -94,8 +94,9 @@ describe('Increase and Decrease indent', () => {
 		expect(p.style.marginLeft).toBe('96px');
 		expect(p.textContent).toBe('abc');
 		expect(press(editor, 'z').defaultPrevented).toBe(true);
+		expect((editor.firstElementChild as HTMLElement).style.marginLeft).toBe('48px');
 		expect(press(editor, 'z').defaultPrevented).toBe(true);
-		expect(editor.firstChild).toBe(abc);
+		expect(editor.innerHTML).toBe('abc<div>def</div>');
 		expect(editor.querySelector('p')).toBeNull();
 	});
 
@@ -108,13 +109,14 @@ describe('Increase and Decrease indent', () => {
 		expect(two.style.marginLeft).toBe('');
 	});
 
-	it('Undo after new content is loaded is the browser’s own again', () => {
+	it('Undo after new content is loaded does not lead back into the document before it', () => {
 		const { editor, api } = open('<p>one</p>');
 		select(textOf(editor, 'one'), 0);
 		press(editor, ']');
 		api.setHTML('<p>case two</p>');
 		flushSync();
-		expect(press(editor, 'z').defaultPrevented).toBe(false);
+		// (The key is the editor's, and there is nothing to undo: it is another case's report.)
+		expect(press(editor, 'z').defaultPrevented).toBe(true);
 		expect(editor.innerHTML).toBe('<p>case two</p>');
 	});
 
