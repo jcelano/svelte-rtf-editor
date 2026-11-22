@@ -22,8 +22,12 @@
 		/** The document font's name: the first of the list, and what '' is shown as. */
 		documentFont?: string;
 		onfont?: (name: string) => void;
-		/** The spacing of the paragraph at the caret: lines apart (null: none set), and points before and after. */
-		spacing?: { line: number | null; before: number; after: number };
+		/**
+		 * The spacing of the paragraph at the caret: lines apart (null: none set), and points before
+		 * and after; and in a list, the gap after its markers in points (null: the list sets none).
+		 * Out of a list `gap` is left out, and the list does not offer it.
+		 */
+		spacing?: { line: number | null; before: number; after: number; gap?: number | null };
 		/** The Copy format brush is in hand: the button shows as pressed. */
 		copyingFormat?: boolean;
 		oncopyformat?: () => void;
@@ -66,6 +70,7 @@
 	const lineChoices = $derived(offered([1, 1.15, 1.5, 2], spacing.line));
 	const beforeChoices = $derived(offered([0, 6, 12], spacing.before));
 	const afterChoices = $derived(offered([0, 6, 12], spacing.after));
+	const gapChoices = $derived(offered([9, 18, 27, 36], spacing.gap ?? null));
 	const mark = (on: boolean) => (on ? '\u2713 ' : '\u2003');
 
 	/** One choice of the spacing list is a command; the list goes back to showing its name. */
@@ -247,6 +252,14 @@
 					<option value="spaceAfter:{points}">{mark(spacing.after === points)}{points} pt</option>
 				{/each}
 			</optgroup>
+			{#if spacing.gap !== undefined}
+				<optgroup label="Bullet or number gap">
+					{#each gapChoices as points (points)}
+						<option value="markerGap:{points}">{mark(spacing.gap === points)}{points} pt</option>
+					{/each}
+					<option value="markerGap:none">{mark(spacing.gap === null)}Default</option>
+				</optgroup>
+			{/if}
 		</select>
 	</div>
 

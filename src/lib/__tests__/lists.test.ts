@@ -314,9 +314,9 @@ describe('rtfToHtml: what is not a list stays the paragraph it is', () => {
 		expect(paragraph(R`\pard \bullet\tab item\par \pard 2.\tab item\par`)).toBe('<p>•&emsp;item</p>\n<p>2.&emsp;item</p>');
 	});
 
-	it('a list hung by another distance than the writer\'s, which would not be written back the same', () => {
-		expect(paragraph(R`\pard\li720\fi-720\bullet\tab hang\par`)).toBe('<p style="margin-left:36pt;text-indent:-36pt">•&emsp;hang</p>');
-		expect(paragraph(R`\pard\li360\fi-180 1.\tab hang\par`)).toContain('1.&emsp;hang');
+	it('a hang too small or too large for any gap after a marker (see marker-gap.test.ts)', () => {
+		expect(paragraph(R`\pard\li720\fi-60\bullet\tab hang\par`)).toBe('<p style="margin-left:36pt;text-indent:-3pt">•&emsp;hang</p>');
+		expect(paragraph(R`\pard\li4320\fi-4320 1.\tab hang\par`)).toContain('1.&emsp;hang');
 	});
 
 	it('a marker the writer does not send: a parenthesis, a dash, letters that are no number', () => {
@@ -357,10 +357,10 @@ describe('rtfToHtml: what is not a list stays the paragraph it is', () => {
 	});
 
 	it('none of them loses its marker or its text when written again', () => {
-		const rtfBody = R`\pard - Invasive adenocarcinoma.\par \pard\li720\fi-720\bullet\tab hang\par \pard\li720\fi-360 a.\tab letter\par`;
+		const rtfBody = R`\pard - Invasive adenocarcinoma.\par \pard\li720\fi-60\bullet\tab hang\par \pard\li720\fi-360 a.\tab letter\par`;
 		const saved = htmlToRtf(el(read(rtfBody)));
 		expect(saved).toContain('\\pard - Invasive adenocarcinoma.\\par ');
-		expect(saved).toContain('\\pard\\li720\\fi-720 \\u8226\\\'3f\\u8195\\\'3fhang\\par ');
+		expect(saved).toContain('\\pard\\li720\\fi-60 \\u8226\\\'3f\\u8195\\\'3fhang\\par ');
 		expect(saved).toContain('\\pard\\li720\\fi-360 a.\\tab letter\\par ');
 		expect(htmlToRtf(el(rtfToHtml(saved)))).toBe(saved);
 	});
@@ -473,7 +473,8 @@ describe('a list numbered in letters or Roman numerals', () => {
 		// A specimen line as other systems write it: no hanging indent of the writer's.
 		const typed = read(R`\pard A.\tab Left breast, biopsy:\par`);
 		expect(typed).toBe('<p>A.<span style="white-space:pre">\t</span>Left breast, biopsy:</p>');
-		expect(read(R`\pard\li720\fi-720 B.\tab hung by another distance\par`)).toContain('B.<span style="white-space:pre">\t</span>');
+		// (Hung as a list is, by any gap a list has, it is a list item: see marker-gap.test.ts.)
+		expect(read(R`\pard\li720\fi-720 B.\tab hung by the gap of a list\par`)).toBe('<ol type="A" start="2" style="margin-left:-18pt;padding-left:36pt"><li>hung by the gap of a list</li></ol>');
 		expect(read(R`\pard\qc\li720\fi-360 C.\tab centered\par`)).toContain('C.<span style="white-space:pre">\t</span>');
 		// And is written back as it was read.
 		expect(htmlToRtf(el(typed))).toContain('A.\\tab Left breast, biopsy:');

@@ -1929,6 +1929,48 @@ test.describe('the layout of a report: spacing, tables with borders, pictures si
 		expect(again).toBe('<p style="margin-bottom:12pt">Specimen A: skin, left forearm, shave biopsy.</p>\n<p>Specimen B: skin, right forearm.</p>');
 	});
 
+	test('the Spacing list sets the gap after the markers of a list: the marker stays, the text moves, and the RTF has it', async ({ page }) => {
+		await open(page, { content: '<p>Diagnosis:</p><ol start="3"><li>Skin, left forearm.</li><li value="7">Margins free of tumor.</li><li>No invasion.</li></ol>' });
+		/** Where each item's marker and its text start, in px from the paragraph above. */
+		const places = () =>
+			page.evaluate(() => {
+				const edge = document.querySelector('.ink-content p')!.getBoundingClientRect().left;
+				return Array.from(document.querySelectorAll('.ink-content li'), (li) => {
+					const range = document.createRange();
+					range.selectNodeContents(li);
+					const text = range.getClientRects()[0].left - edge;
+					const marker = li.hasAttribute('data-ink-marker') ? li.getBoundingClientRect().left - edge - parseFloat(getComputedStyle(li.parentElement!).paddingLeft) : null;
+					return { marker, text: Math.round(text), shown: getComputedStyle(li, '::before').content };
+				});
+			});
+		await page.click('.ink-content li >> nth=0');
+		await page.selectOption(spacing, 'markerGap:36');
+		const wide = await places();
+		// Each marker at the list's edge, and its text 36 pt (48 px) further in; the numbers as
+		// the list has them, an item's own value too (which Chromium's own count does not see).
+		for (const place of wide) {
+			expect(place.marker).toBe(0);
+			expect(place.text).toBe(48);
+		}
+		expect(wide.map((place) => place.shown)).toEqual(['"3."', '"7."', '"8."']);
+		await page.selectOption(spacing, 'markerGap:9');
+		expect((await places()).map((place) => place.text)).toEqual([12, 12, 12]);
+		expect(await page.locator(`${spacing} option[value="markerGap:9"]`).textContent()).toContain('✓');
+		// What is given is the document: the gap, and no markers of the editor's.
+		expect(await page.evaluate(() => window.ed.getHTML())).toBe('<p>Diagnosis:</p><ol start="3" style="padding-left: 9pt;"><li>Skin, left forearm.</li><li value="7">Margins free of tumor.</li><li>No invasion.</li></ol>');
+		expect(await rtf(page)).toContain('\\pard\\li540\\fi-180 3.\\tab Skin, left forearm.\\par \\pard\\li540\\fi-180 7.\\tab Margins free of tumor.\\par ');
+		// An item typed in is numbered with the rest.
+		await page.click('.ink-content li >> nth=2');
+		await page.keyboard.press('End');
+		await page.keyboard.press('Enter');
+		await page.keyboard.type('Added.');
+		await expect.poll(async () => (await places()).map((place) => place.shown)).toEqual(['"3."', '"7."', '"8."', '"9."']);
+		// Default puts the list back as it was, the browser's own markers and all.
+		await page.click('.ink-content li >> nth=0');
+		await page.selectOption(spacing, 'markerGap:none');
+		expect(await page.evaluate(() => document.querySelector('.ink-content ol')!.outerHTML)).toBe('<ol start="3"><li>Skin, left forearm.</li><li value="7">Margins free of tumor.</li><li>No invasion.</li><li>Added.</li></ol>');
+	});
+
 	test('the Spacing list spaces a list item and a line in a table cell, on the page and in the RTF', async ({ page }) => {
 		await open(page, {
 			content: '<ul><li>Margins free of tumor.</li><li>No lymphovascular invasion.</li></ul><table><tbody><tr><td>Specimen A</td><td>Skin</td></tr><tr><td>Specimen B</td><td>Skin</td></tr></tbody></table>'

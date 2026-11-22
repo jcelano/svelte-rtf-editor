@@ -137,3 +137,86 @@ export function letterReadings(letters: string): LetterReading[] {
 	}
 	return readings;
 }
+
+// ── The gap after the marker ──
+// How far an item's text starts from its bullet or number is the list's text indent, as Word
+// has it: the marker starts where the list does, and the text that far further in. In the HTML
+// it is the list's own `padding-left`, which is that distance in CSS too: from the list's edge
+// to its items' text. The editor draws the marker at the list's edge (see markItems), and the
+// RTF has it as the hang of each item (\fi-N). A list with no padding of its own has the gap
+// the writer always gave one: a quarter inch, \fi-360.
+
+/** The least gap there is, in twips: 6 pt. Closer, a number runs into its text. */
+export const LEAST_MARKER_GAP = 120;
+/** The most, in twips: two inches. */
+export const MOST_MARKER_GAP = 2880;
+
+const TWIPS_PER: Record<string, number> = { px: 15, pt: 20, in: 1440, cm: 1440 / 2.54, mm: 144 / 2.54 };
+
+/**
+ * The gap a list sets after its markers, in twips, or null where it sets none: no
+ * `padding-left` of its own, or one out of the range above (a page's `padding-left: 0`).
+ */
+export function markerGapTwips(list: Element): number | null {
+	const value = ((list as HTMLElement).style?.paddingLeft ?? '').trim().toLowerCase();
+	const m = value.match(/^(\d+(?:\.\d+)?|\.\d+)(px|pt|in|cm|mm)$/);
+	if (!m) return null;
+	const twips = Math.round(parseFloat(m[1]) * TWIPS_PER[m[2]]);
+	return twips >= LEAST_MARKER_GAP && twips <= MOST_MARKER_GAP ? twips : null;
+}
+
+/**
+ * Where the editor writes, for the screen, the marker an item of a list with a gap shows. A
+ * browser draws its own markers against the item's text, and cannot be told how far before
+ * it; so for such a list the editor draws them itself, at the list's edge (see the editor's
+ * style), from this. It is worked out here, as the RTF writer works it out: a browser's own
+ * count does not see an item's `value` in every browser. It is no part of the document, and
+ * the editor takes it out of what it gives (getHTML, onsave, the draft).
+ */
+export const MARKER_ATTRIBUTE = 'data-ink-marker';
+
+/** The bullets of a list in a list, as the browser draws them: disc, circle, square. */
+const BULLETS: Record<string, string> = { disc: '•', circle: '◦', square: '▪' };
+
+/**
+ * Write the marker of each item of each list with a gap under `root`, and take it off the
+ * items of every other list. Only what differs is written, so that a document that has not
+ * changed is not changed by this either.
+ */
+export function markItems(root: Element): void {
+	for (const list of Array.from(root.querySelectorAll('ul, ol'))) {
+		const gapped = markerGapTwips(list) !== null;
+		const ordered = list.tagName === 'OL';
+		let counter = ordered ? listStart(list) : 1;
+		let bullet = '';
+		if (gapped && !ordered) {
+			const own = ((list as HTMLElement).style?.listStyleType ?? '').trim().toLowerCase();
+			let depth = 0;
+			for (let up = list.parentElement?.closest('ul, ol'); up && root.contains(up); up = up.parentElement?.closest('ul, ol')) depth++;
+			bullet = BULLETS[own] ?? (depth === 0 ? BULLETS.disc : depth === 1 ? BULLETS.circle : BULLETS.square);
+		}
+		for (const item of Array.from(list.children)) {
+			if (item.tagName !== 'LI') continue;
+			let marker: string | null = null;
+			if (gapped) {
+				if (ordered) {
+					counter = itemNumber(item, counter);
+					marker = `${markerText(counter, numberStyleOf(list, item))}.`;
+					counter++;
+				} else {
+					marker = bullet;
+				}
+			}
+			if (marker === null) {
+				if (item.hasAttribute(MARKER_ATTRIBUTE)) item.removeAttribute(MARKER_ATTRIBUTE);
+			} else if (item.getAttribute(MARKER_ATTRIBUTE) !== marker) {
+				item.setAttribute(MARKER_ATTRIBUTE, marker);
+			}
+		}
+	}
+}
+
+/** Take the editor's markers out of a copy of a document. */
+export function withoutMarkers(root: Element): void {
+	for (const item of Array.from(root.querySelectorAll(`[${MARKER_ATTRIBUTE}]`))) item.removeAttribute(MARKER_ATTRIBUTE);
+}

@@ -18,7 +18,7 @@
 
 import { tableModel, columnShares, tableRowsInOrder, rowCells, type GridCell } from './table-model.js';
 import { gappedRowWidths } from './picture-rows.js';
-import { itemNumber, listStart, markerText, numberStyleOf } from './list-markers.js';
+import { itemNumber, listStart, markerGapTwips, markerText, numberStyleOf } from './list-markers.js';
 
 // ── Types ──
 
@@ -904,6 +904,9 @@ export function estimateRtfBytes(editorEl: HTMLElement, options: RtfWriteOptions
 				if (child.nodeType === Node.TEXT_NODE ? !COLLAPSIBLE_WHITESPACE.test(child.textContent || '') : !isBlock(child)) total += 27;
 			}
 		}
+		// A list with a gap of its own hangs its items by it: "\fi-2880" and a wider "\liN" are
+		// up to four more on each of their paragraphs than the quarter inch counted for them.
+		if ((tag === 'ul' || tag === 'ol') && markerGapTwips(el) !== null) total += 4 * (1 + el.querySelectorAll(':scope > li, :scope > li :is(p, div, br)').length);
 		// A paragraph inside a list item is written at the item's indent (\liN, up to 7).
 		if ((tag === 'p' || tag === 'div') && el.parentElement?.tagName === 'LI') total += 8;
 		// A numbered item's number is counted as one character; a list that starts high has
@@ -1791,7 +1794,10 @@ function listRtfAt(list: HTMLElement, ctx: WalkContext): string {
 	// A list read back from RTF carries the indent beyond its level's own as a margin, which
 	// is negative for a list nested by less than half an inch.
 	const margin = lengthTwips(list.style?.marginLeft, true) ?? 0;
-	const left = Math.max(LIST_HANG, ctx.indent + margin + LIST_STEP);
+	// The marker stands where it always has, a quarter inch into the level; the text is the
+	// list's gap after it (see markerGapTwips), a quarter inch where it sets none.
+	const hang = markerGapTwips(list) ?? LIST_HANG;
+	const left = Math.max(hang, ctx.indent + margin + LIST_STEP - LIST_HANG + hang);
 	let counter = ordered ? listStart(list) : 1;
 
 	const itemCtx = { ...ctx, indent: left, cellAlign: listAlign(ctx) };
@@ -1814,7 +1820,7 @@ function listRtfAt(list: HTMLElement, ctx: WalkContext): string {
 			const marker = ordered ? ` ${markerText(counter, numberStyleOf(list, child as Element))}.\\tab ` : '\\bullet\\tab ';
 			// The item's own color and the like; its marker takes them too, as on screen.
 			const own = charFormat(child as HTMLElement, tag, itemCtx, true);
-			rtf += `${own.on}${itemRtf(child as HTMLElement, own.ctx, paragraph, marker)}${own.off}`;
+			rtf += `${own.on}${itemRtf(child as HTMLElement, own.ctx, paragraph, `\\fi-${hang}${marker}`)}${own.off}`;
 			counter++;
 		} else if (tag === 'ul' || tag === 'ol') {
 			flushLoose();
@@ -1830,7 +1836,7 @@ function listRtfAt(list: HTMLElement, ctx: WalkContext): string {
 }
 
 /**
- * A list item's paragraphs, opening with `paragraph` (its indent), the first with its marker,
+ * A list item's paragraphs, opening with `paragraph` (its indent), the first with its hang and marker,
  * and its spacing: the space before on the first paragraph, the space after on the last, and
  * the line spacing on each, as an item of more than one paragraph is shown.
  */
@@ -1838,11 +1844,11 @@ function itemRtf(item: HTMLElement, ctx: WalkContext, paragraph: string, marker:
 	const before = spacingControls(item, 'before');
 	const after = spacingControls(item, 'after');
 	const lines = spacingControls(item, 'lines', tallestText(item, ctx.size));
-	if (!before && !after && !lines) return flowRtf(Array.from(item.childNodes), ctx, `${paragraph}\\fi-${LIST_HANG}${marker}`, `${paragraph} `);
+	if (!before && !after && !lines) return flowRtf(Array.from(item.childNodes), ctx, `${paragraph}${marker}`, `${paragraph} `);
 	// (Where the item's last paragraph begins is known once it is written: each begins with
 	// ITEM_PARAGRAPH, which is the space after on the last and nothing on the others. The
 	// character is never in what is written: text is escaped, and a control character with it.)
-	const written = flowRtf(Array.from(item.childNodes), ctx, `${paragraph}${before}${lines}${ITEM_PARAGRAPH}\\fi-${LIST_HANG}${marker}`, `${paragraph}${lines}${ITEM_PARAGRAPH} `);
+	const written = flowRtf(Array.from(item.childNodes), ctx, `${paragraph}${before}${lines}${ITEM_PARAGRAPH}${marker}`, `${paragraph}${lines}${ITEM_PARAGRAPH} `);
 	const last = written.lastIndexOf(ITEM_PARAGRAPH);
 	return `${written.slice(0, last)}${after}${written.slice(last + 1)}`.replaceAll(ITEM_PARAGRAPH, '');
 }
