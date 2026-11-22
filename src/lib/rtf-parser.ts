@@ -130,7 +130,17 @@ interface RunFormat {
  */
 type Run =
 	| { type: 'text'; text: string; fmt: RunFormat }
-	| { type: 'html'; kind: 'br' | 'tab' | 'gap' | 'img'; html: string; fmt: RunFormat };
+	| {
+			type: 'html';
+			kind: 'br' | 'tab' | 'gap' | 'img';
+			html: string;
+			fmt: RunFormat;
+			/** On the line break a paragraph mark in a table cell is read as: that paragraph's spacing. */
+			spacing?: CellSpacing | null;
+	  };
+
+/** The spacing of a paragraph in a table cell, which the cell's paragraphs are read with where one has any. */
+type CellSpacing = Pick<ParagraphBlock, 'before' | 'after' | 'line' | 'lineMultiple'>;
 
 /** A bullet or a number, then a tab, at the start of a paragraph. */
 interface ListMarker {
@@ -1182,6 +1192,8 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 	let inTableCell = false;
 	/** \par seen in a table cell since its last text: line breaks owed if more text follows. */
 	let cellBreaks = 0;
+	/** The spacing of the paragraph each of those paragraph marks ended; null for a line that is no paragraph's (a row of a table in the cell). */
+	let cellBreakSpacing: (CellSpacing | null)[] = [];
 	/** \lastrow seen in the definition of the row being read: its \row ends the table. */
 	let lastRow = false;
 	/** \nestcell seen: a tab is owed if more text follows on the line. */
@@ -1470,10 +1482,15 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		}
 		if (cellBreaks > 0) {
 			const count = cellBreaks;
+			const spacings = cellBreakSpacing;
 			cellBreaks = 0;
+			cellBreakSpacing = [];
 			if (inTableCell) {
 				// A paragraph mark inside a cell: the cell's text goes on, on a new line.
-				for (let k = 0; k < count; k++) pushHtml('br', '<br>', state);
+				for (let k = 0; k < count; k++) {
+					pushHtml('br', '<br>', state);
+					(runs[runs.length - 1] as { spacing?: CellSpacing | null }).spacing = spacings[k] ?? null;
+				}
 			} else {
 				// \pard has left the table without a \cell: what was read is a paragraph.
 				for (let k = 0; k < count; k++) flushParagraph();
@@ -1507,13 +1524,41 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		pushHtml(kind, html, state);
 	}
 
+	/** The spacing the paragraph being read has. */
+	function spacingHere(state: RenderState): CellSpacing {
+		return { before: state.spaceBefore, after: state.spaceAfter, line: state.lineSpacing, lineMultiple: state.lineMultiple };
+	}
+
+	/**
+	 * What a table cell holds, as HTML. Its paragraphs are lines of the cell, a <br> apart; where
+	 * one of them is spaced (\sa, \sb, \sl, as Word writes a cell's paragraphs), each is a
+	 * paragraph of its own with its spacing. `last` is the spacing of the last one.
+	 */
+	function cellHtml(last: CellSpacing): string {
+		const paragraphs: { runs: Run[]; spacing: CellSpacing }[] = [];
+		let from = 0;
+		runs.forEach((run, i) => {
+			if (run.type !== 'html' || !run.spacing) return;
+			paragraphs.push({ runs: runs.slice(from, i), spacing: run.spacing });
+			from = i + 1;
+		});
+		paragraphs.push({ runs: runs.slice(from), spacing: last });
+		const styles = paragraphs.map((paragraph) => spacingStyle({ ...paragraph.spacing, runs: paragraph.runs } as ParagraphBlock));
+		if (styles.every((style) => !style)) return trimSpaces(renderRuns(runs));
+		return paragraphs
+			.map((paragraph, k) => `<p${styles[k] ? ` style="${styles[k]}"` : ''}>${trimSpaces(renderRuns(paragraph.runs)) || '<br>'}</p>`)
+			.join('');
+	}
+
 	/** \par, where it ends a paragraph and where, in a table cell, it starts a new line. */
 	function paragraphMark(state: RenderState): void {
 		if (inTableCell) {
 			cellBreaks++;
+			cellBreakSpacing.push(spacingHere(state));
 		} else {
 			// Paragraph marks from a cell that \pard has since left end paragraphs too.
 			for (; cellBreaks > 0; cellBreaks--) flushParagraph();
+			cellBreakSpacing = [];
 			flushParagraph();
 		}
 	}
@@ -1873,14 +1918,14 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 				const saved = {
 					blocks, runs, onlyText, marker, paragraphHasListMarker, paragraphIsCaption, paragraphAsides,
 					tableAsides, tableRows, currentRowCells, currentRowDefs, lastRowDefs, pendingDef, pendingSide,
-					cellBorders, borderSide, cellMarkedHeader, captionAt, inTableCell, cellBreaks, contentAlign, lastRow, nestTabPending,
+					cellBorders, borderSide, cellMarkedHeader, captionAt, inTableCell, cellBreaks, cellBreakSpacing, contentAlign, lastRow, nestTabPending,
 					pendingHighSurrogate, pendingUnicodeSkip, noteNumber, unshown, stateBase
 				};
 				restore = () => {
 					({
 						blocks, runs, onlyText, marker, paragraphHasListMarker, paragraphIsCaption, paragraphAsides,
 						tableAsides, tableRows, currentRowCells, currentRowDefs, lastRowDefs, pendingDef, pendingSide,
-						cellBorders, borderSide, cellMarkedHeader, captionAt, inTableCell, cellBreaks, contentAlign, lastRow, nestTabPending,
+						cellBorders, borderSide, cellMarkedHeader, captionAt, inTableCell, cellBreaks, cellBreakSpacing, contentAlign, lastRow, nestTabPending,
 						pendingHighSurrogate, pendingUnicodeSkip, noteNumber, unshown, stateBase
 					} = saved);
 				};
@@ -1901,6 +1946,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 				cellMarkedHeader = false;
 				inTableCell = false;
 				cellBreaks = 0;
+				cellBreakSpacing = [];
 				lastRow = false;
 				nestTabPending = false;
 				pendingHighSurrogate = 0;
@@ -2039,6 +2085,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 					// the row's definition and its \nestrow.
 					nestTabPending = false;
 					cellBreaks++;
+					cellBreakSpacing.push(null);
 				}
 				continue;
 			}
@@ -2298,7 +2345,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 					paragraphIsCaption = false;
 					const figure = cellFigure();
 					currentRowCells.push({
-						html: figure ?? trimSpaces(renderRuns(runs)),
+						html: figure ?? cellHtml(spacingHere(state)),
 						onWhite: figure ? undefined : cellOnWhite(),
 						// The alignment of the cell's last paragraph, also where that paragraph
 						// was ended inside a group ({\pard\intbl\qr 1.0\par}\cell, as this writer
@@ -2310,6 +2357,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 					newRuns();
 					// The paragraph mark that ends a cell's last paragraph adds no line.
 					cellBreaks = 0;
+					cellBreakSpacing = [];
 					nestTabPending = false;
 					break;
 				case 'nestcell':
@@ -2320,6 +2368,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 				case 'nestrow':
 					nestTabPending = false;
 					cellBreaks++;
+					cellBreakSpacing.push(null);
 					break;
 				case 'row': {
 					// Text after the row's last \cell is a cell that was not closed, not the
@@ -2339,6 +2388,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 					pendingDef = newCellDef();
 					inTableCell = false;
 					cellBreaks = 0;
+					cellBreakSpacing = [];
 					nestTabPending = false;
 					// The cell's indents and alignment end with the row, in whichever group
 					// set them: \row may sit in a group of its own ({\row}). Not in the text a
@@ -2446,9 +2496,11 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 					// A page break. On screen it is a rule; the writer sends it back as \page.
 					if (inTableCell) {
 						cellBreaks++;
+						cellBreakSpacing.push(null);
 						break;
 					}
 					for (; cellBreaks > 0; cellBreaks--) flushParagraph();
+					cellBreakSpacing = [];
 					if (runs.length > 0) flushParagraph();
 					flushTable();
 					blocks.push({ kind: 'rule', pageBreak: true });
@@ -2525,6 +2577,8 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		letters?: string;
 		left: number;
 		html: string;
+		/** Its spacing, as the <li>'s style: Word spaces list paragraphs as any other. */
+		spacing: string;
 	}
 	const items: (ListItem | null)[] = blocks.map((b) => {
 		if (b.kind !== 'paragraph' || !b.marker || b.inTable || b.caption) return null;
@@ -2534,7 +2588,8 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			number: b.marker.number,
 			letters: b.marker.letters,
 			left: b.left,
-			html: trimSpaces(renderRuns(b.runs.slice(b.marker.end)))
+			html: trimSpaces(renderRuns(b.runs.slice(b.marker.end))),
+			spacing: spacingStyle(b)
 		};
 	});
 
@@ -2605,7 +2660,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			const top = open[open.length - 1];
 			const { style, number } = readingOf(at, top);
 			if (top && item.left === top.left && item.kind === top.kind && (item.kind === 'ul' || (number === top.next && style === top.style))) {
-				html += '</li><li>';
+				html += `</li><li${item.spacing ? ` style="${item.spacing}"` : ''}>`;
 				top.next = number + 1;
 			} else {
 				// A change from bullets to numbers, or a number out of sequence, is a new list
@@ -2616,7 +2671,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 				const margin = item.left - (parent ? parent.left : 0) - LIST_STEP;
 				const start = item.kind === 'ol' && number !== 1 ? ` start="${number}"` : '';
 				const type = item.kind === 'ol' && style !== 'decimal' ? ` type="${listTypeAttribute(style)}"` : '';
-				html += `<${item.kind}${type}${start}${margin !== 0 ? ` style="margin-left:${twipsToPt(margin)}"` : ''}><li>`;
+				html += `<${item.kind}${type}${start}${margin !== 0 ? ` style="margin-left:${twipsToPt(margin)}"` : ''}><li${item.spacing ? ` style="${item.spacing}"` : ''}>`;
 				open.push({ kind: item.kind, left: item.left, next: number + 1, style });
 			}
 			html += item.html || '<br>';

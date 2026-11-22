@@ -918,7 +918,18 @@ export function estimateRtfBytes(editorEl: HTMLElement, options: RtfWriteOptions
 			}
 		}
 		// A heading's spacing, and a picture's (before the picture, after its caption).
-		if ((HEADING_TAGS.has(tag) || tag === 'figure') && !el.closest('td, th')) total += spacingControls(el).length;
+		if (HEADING_TAGS.has(tag) || (tag === 'figure' && !el.closest('td, th'))) total += spacingControls(el).length;
+		// A list item's: the line spacing on each of its paragraphs (one more for each block
+		// or line break in it), the space before and after once.
+		if (tag === 'li') {
+			const lines = spacingControls(el, 'lines').length;
+			if (lines || el.style?.marginTop || el.style?.marginBottom) total += spacingControls(el).length + lines * el.querySelectorAll(`${blockSelector}, br`).length;
+		}
+		// A paragraph's in a table cell, which then restates "\\pard\\intbl " (11).
+		if ((tag === 'p' || tag === 'div') && el.closest('td, th')) {
+			const spacing = spacingControls(el).length;
+			if (spacing) total += spacing + 11;
+		}
 		// A figure with no picture is a paragraph of what it holds: "\pard\intbl\qc\liN " and
 		// "\par " (at most 30).
 		if (tag === 'figure' && !el.querySelector('img')) total += 30;
@@ -1450,8 +1461,8 @@ function walkNodeAt(node: Node, ctx: WalkContext, restate: boolean, endLooseText
 				break;
 			}
 			if (ctx.inTableCell) {
-				// Alignment or an indent needs a paragraph of its own, even as the cell's first.
-				const layout = paragraphLayout(el, ctx);
+				// Alignment, an indent or spacing needs a paragraph of its own, even as the cell's first.
+				const layout = cellParagraphLayout(el, ctx);
 				const restate = afterLooseText
 					? `\\par \\pard\\intbl${layout} `
 					: el.previousElementSibling || layout ? `\\pard\\intbl${layout} ` : '';
@@ -1803,7 +1814,7 @@ function listRtfAt(list: HTMLElement, ctx: WalkContext): string {
 			const marker = ordered ? ` ${markerText(counter, numberStyleOf(list, child as Element))}.\\tab ` : '\\bullet\\tab ';
 			// The item's own color and the like; its marker takes them too, as on screen.
 			const own = charFormat(child as HTMLElement, tag, itemCtx, true);
-			rtf += `${own.on}${flowRtf(Array.from(child.childNodes), own.ctx, `${paragraph}\\fi-${LIST_HANG}${marker}`, `${paragraph} `)}${own.off}`;
+			rtf += `${own.on}${itemRtf(child as HTMLElement, own.ctx, paragraph, marker)}${own.off}`;
 			counter++;
 		} else if (tag === 'ul' || tag === 'ol') {
 			flushLoose();
@@ -1817,6 +1828,27 @@ function listRtfAt(list: HTMLElement, ctx: WalkContext): string {
 	flushLoose();
 	return rtf;
 }
+
+/**
+ * A list item's paragraphs, opening with `paragraph` (its indent), the first with its marker,
+ * and its spacing: the space before on the first paragraph, the space after on the last, and
+ * the line spacing on each, as an item of more than one paragraph is shown.
+ */
+function itemRtf(item: HTMLElement, ctx: WalkContext, paragraph: string, marker: string): string {
+	const before = spacingControls(item, 'before');
+	const after = spacingControls(item, 'after');
+	const lines = spacingControls(item, 'lines', tallestText(item, ctx.size));
+	if (!before && !after && !lines) return flowRtf(Array.from(item.childNodes), ctx, `${paragraph}\\fi-${LIST_HANG}${marker}`, `${paragraph} `);
+	// (Where the item's last paragraph begins is known once it is written: each begins with
+	// ITEM_PARAGRAPH, which is the space after on the last and nothing on the others. The
+	// character is never in what is written: text is escaped, and a control character with it.)
+	const written = flowRtf(Array.from(item.childNodes), ctx, `${paragraph}${before}${lines}${ITEM_PARAGRAPH}\\fi-${LIST_HANG}${marker}`, `${paragraph}${lines}${ITEM_PARAGRAPH} `);
+	const last = written.lastIndexOf(ITEM_PARAGRAPH);
+	return `${written.slice(0, last)}${after}${written.slice(last + 1)}`.replaceAll(ITEM_PARAGRAPH, '');
+}
+
+/** Where a paragraph of a list item begins, while the item is written (see itemRtf). */
+const ITEM_PARAGRAPH = '\u0001';
 
 /**
  * The alignment a list's items are written with: the table cell's, inside one. Anywhere else a
@@ -2191,7 +2223,7 @@ function restateAfterBlock(node: Node, ctx: WalkContext): string {
 	const formatted =
 		FORMATTED_BLOCK_TAGS.has(tag) ||
 		// (A container's own alignment or indent is its blocks': what is inside it had them.)
-		(['p', 'div'].includes(tag) && ((ctx.inTableCell ? paragraphLayout(block, ctx) : paragraphFormat(block, ctx)) !== '' || Array.from(block.children).some(isBlock))) ||
+		(['p', 'div'].includes(tag) && ((ctx.inTableCell ? cellParagraphLayout(block, ctx) : paragraphFormat(block, ctx)) !== '' || Array.from(block.children).some(isBlock))) ||
 		(HEADING_TAGS.has(tag) && headingLayout(block, ctx) !== '') ||
 		(tag === 'pre' && ctx.indent + leftMarginTwips(block) > 0);
 	return formatted ? `\\pard${inCell(ctx)}${cellAlign(ctx)}${liControl(ctx.indent)} ` : '';
@@ -2273,7 +2305,13 @@ function paragraphLayout(el: HTMLElement, ctx: WalkContext): string {
  * and its spacing.
  */
 function headingLayout(el: HTMLElement, ctx: WalkContext): string {
-	return `${paragraphLayout(el, ctx)}${ctx.inTableCell ? '' : `${edgeIndents(el)}${spacingControls(el, 'all', tallestText(el, scaled(ctx, ALL_HEADING_SCALES[el.tagName.toLowerCase()] ?? 1)))}`}`;
+	const spacing = spacingControls(el, 'all', tallestText(el, scaled(ctx, ALL_HEADING_SCALES[el.tagName.toLowerCase()] ?? 1)));
+	return `${paragraphLayout(el, ctx)}${ctx.inTableCell ? spacing : `${edgeIndents(el)}${spacing}`}`;
+}
+
+/** A paragraph's layout in a table cell: its alignment, left indent and spacing. */
+function cellParagraphLayout(el: HTMLElement, ctx: WalkContext): string {
+	return `${paragraphLayout(el, ctx)}${spacingControls(el, 'all', tallestText(el, ctx.size))}`;
 }
 
 /** The most a line is spaced by: ten lines, as the sanitizer lets through. */
@@ -2323,17 +2361,18 @@ function tallestText(el: HTMLElement, base: number): number {
  * With no `tallest` (the estimate, which knows no sizes) the longest form is given.
  *
  * `part` leaves out what is written on another paragraph: a picture's caption has the space
- * after it, the picture the space before.
+ * after it, the picture the space before. `lines` is the line spacing alone: a list item of
+ * more than one paragraph has it on each, the space before on its first and after on its last.
  */
-function spacingControls(el: HTMLElement, part: 'all' | 'before' | 'after' = 'all', tallest?: number): string {
+function spacingControls(el: HTMLElement, part: 'all' | 'before' | 'after' | 'lines' = 'all', tallest?: number): string {
 	const style = el.style;
 	if (!style) return '';
 	let out = '';
-	const sb = part === 'after' ? null : lengthTwips(style.marginTop);
+	const sb = part === 'after' || part === 'lines' ? null : lengthTwips(style.marginTop);
 	if (sb) out += `\\sb${sb}`;
-	const sa = part === 'before' ? null : lengthTwips(style.marginBottom);
+	const sa = part === 'before' || part === 'lines' ? null : lengthTwips(style.marginBottom);
 	if (sa) out += `\\sa${sa}`;
-	if (part !== 'all') return out;
+	if (part !== 'all' && part !== 'lines') return out;
 	const line = (style.lineHeight ?? '').trim().toLowerCase();
 	const multiple = line.match(/^(\d+(?:\.\d+)?|\.\d+)(%?)$/);
 	if (multiple) {

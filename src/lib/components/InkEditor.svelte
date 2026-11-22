@@ -1432,8 +1432,10 @@
 	// | 6 pt after           | margin-bottom: 6pt     | \sa120            |
 	// | lines 1.5 apart      | line-height: 1.5       | \sl360\slmult1   |
 	//
-	// Not in a table cell, where the writer sends a paragraph's alignment and left indent only,
-	// and not on a list. Each change is one step of the editor's history, as an indent is.
+	// A list item is spaced as one paragraph: the style is on the <li>, as Word's list
+	// paragraphs carry it. In a table cell, the paragraph the caret is in: a line typed straight
+	// into the cell is made a paragraph first. Each change is one step of the editor's history,
+	// as an indent is.
 
 	/** A paragraph's spacing as its own style sets it: lines apart (null: the editor's own), and points before and after. */
 	interface ParagraphSpacing {
@@ -1457,15 +1459,32 @@
 		return { line: lines !== null && lines > 0 ? Math.round(lines * 100) / 100 : null, before: spacePt(el.style.marginTop), after: spacePt(el.style.marginBottom) };
 	}
 
-	/** The paragraph, heading or picture the caret is in, where spacing can be set on it. */
+	/** The paragraph, heading, list item or picture the caret is in, where spacing can be set on it. */
 	function spacedBlockAtCaret(): HTMLElement | null {
 		if (!editorEl) return null;
 		const node = selectedImage ?? window.getSelection()?.anchorNode ?? null;
 		if (!node || !editorEl.contains(node)) return null;
+		// (A picture in a table cell is the cell's: no paragraph is spaced there.)
+		if (selectedImage?.closest('td, th')) return null;
+		return spacedBlockFor(node);
+	}
+
+	/**
+	 * The block that is spaced where a node is: the list item it is in (the innermost), or the
+	 * paragraph, heading or picture it is in, in a table cell too. Null where there is none,
+	 * as for a line typed straight into the document or a cell, which is made one to be spaced.
+	 */
+	function spacedBlockFor(node: Node): HTMLElement | null {
+		if (!editorEl || node === editorEl || !editorEl.contains(node)) return null;
 		const el = node instanceof Element ? node : node.parentElement;
-		if (!el || el.closest('td, th, li')) return null;
+		if (!el) return null;
+		const cell = el.closest('td, th');
+		const inScope = (b: Element | null): b is HTMLElement =>
+			b instanceof HTMLElement && b !== editorEl && editorEl!.contains(b) && (!cell || cell.contains(b));
+		const item = el.closest('li');
+		if (inScope(item)) return item;
 		const block = el.closest<HTMLElement>(INDENT_TARGETS);
-		if (!block || block === editorEl || !editorEl.contains(block)) return null;
+		if (!inScope(block)) return null;
 		return isPlainParagraph(block) || /^(H[1-6]|FIGURE)$/.test(block.tagName) ? block : null;
 	}
 
@@ -1913,11 +1932,19 @@
 			const item = el.closest('li');
 			const closest = el.closest(INDENT_TARGETS);
 			const block = inScope(item) ? item.parentElement : inScope(closest) ? closest : null;
+			if (cmd === 'spacing') {
+				const spaced = spacedBlockFor(node);
+				if (spaced) return spaced;
+				// (Nor is a block that holds others, a list or a quotation, spaced as one.)
+				if (inScope(closest) || inScope(item)) return null;
+				const made = wrapLooseLine(node);
+				if (made) wrapped.set(made.p, made.br);
+				return made?.p ?? null;
+			}
 			if (cmd !== 'indent' && cmd !== 'outdent') {
 				if (cell) return null;
-				// (Spacing is also a heading's and a picture's: the writer sends it for those.)
-				if (inScope(block)) return isPlainParagraph(block) || (cmd === 'spacing' && /^(H[1-6]|FIGURE)$/.test(block.tagName)) ? block : null;
-				if (cmd !== 'spacing' && decreases(cmd)) return null;
+				if (inScope(block)) return isPlainParagraph(block) ? block : null;
+				if (decreases(cmd)) return null;
 				const made = wrapLooseLine(node);
 				if (made) wrapped.set(made.p, made.br);
 				return made?.p ?? null;
