@@ -310,7 +310,8 @@ describe('the spacing list of the toolbar', () => {
 			choose(list, 'spaceAfter:6');
 			choose(list, 'lineSpacing:2');
 			caret(editor, words);
-			expect(marked(list)).toEqual(['lineSpacing:2', 'spaceBefore:0', 'spaceAfter:6']);
+			// (In a list the gap after its markers is marked too: see marker-gap.test.ts.)
+			expect(marked(list).filter((value) => !value.startsWith('markerGap'))).toEqual(['lineSpacing:2', 'spaceBefore:0', 'spaceAfter:6']);
 		}
 		expect(editor.querySelector('ul')!.outerHTML).toBe('<ul><li style="margin-bottom: 6pt; line-height: 2;">item</li><li>other</li></ul>');
 		// (A line typed straight into a cell is made a paragraph to carry it.)

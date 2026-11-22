@@ -96,6 +96,7 @@
 	import { createHistory, type DocumentHistory } from '../history.js';
 	import { GAPPED_ROW_STYLE, MOST_GAP_PT, isGapCell, isPlainCell, lengthTwips, pointsOf } from '../picture-rows.js';
 	import { toggleList, nestItems, unnestItems, leaveList, inEmptyItem, atItemStart, listKindAt, type ListKind } from '../lists.js';
+	import { LEAST_MARKER_GAP, MOST_MARKER_GAP, markerGapTwips, markItems, withoutMarkers, MARKER_ATTRIBUTE } from '../list-markers.js';
 	import {
 		htmlToRtf,
 		estimateRtfBytes,
@@ -345,9 +346,12 @@
 	 */
 	function documentHtml(): string {
 		if (!editorEl) return '';
-		if (!editorEl.querySelector(`p > :is(${BLOCKS})`)) return editorEl.innerHTML;
+		const marked = editorEl.querySelector(`[${MARKER_ATTRIBUTE}]`) !== null;
+		if (!marked && !editorEl.querySelector(`p > :is(${BLOCKS})`)) return editorEl.innerHTML;
 		const copy = editorEl.cloneNode(true) as HTMLElement;
 		liftBlocks(copy, false);
+		// (The markers the editor draws a list with a gap by are the screen's, not the document's.)
+		if (marked) withoutMarkers(copy);
 		return copy.innerHTML;
 	}
 
@@ -1006,6 +1010,12 @@
 			hangAtCaret();
 			return;
 		}
+		if (cmd === 'markerGap') {
+			const n = value === null || value === '' ? null : Number(value);
+			if (n !== null && !Number.isFinite(n)) return;
+			setListMarkerGap(n);
+			return;
+		}
 		if (cmd === 'lineSpacing' || cmd === 'spaceBefore' || cmd === 'spaceAfter') {
 			const n = value === null || value === '' ? null : Number(value);
 			if (n !== null && !Number.isFinite(n)) return;
@@ -1442,6 +1452,8 @@
 		line: number | null;
 		before: number;
 		after: number;
+		/** In a list: the gap after its markers, in points (null: it sets none). Left out elsewhere. */
+		gap?: number | null;
 	}
 	/** The most that is set: ten lines, and a space of two inches. */
 	const MOST_LINES = 10;
@@ -1547,6 +1559,56 @@
 	export function setParagraphSpacing(space: { before?: number | null; after?: number | null }): void {
 		if (!space || typeof space !== 'object') return;
 		applySpacing({ before: space.before, after: space.after });
+	}
+
+	// ── The gap after a list's markers ──
+	// How far an item's text starts from its bullet or number: the list's text indent, as Word
+	// has it, written as the list's padding-left (see markerGapTwips). The marker stays where
+	// it is; the text moves. The editor draws the markers of such a list itself (markItems).
+
+	/** The list the caret is in: the innermost, for an item of a list within a list. */
+	function listAtCaret(): HTMLElement | null {
+		const node = window.getSelection()?.anchorNode ?? null;
+		if (!editorEl || !node || !editorEl.contains(node)) return null;
+		const item = (node instanceof Element ? node : node.parentElement)?.closest('li');
+		const list = item?.parentElement;
+		return list && editorEl.contains(list) && /^(UL|OL)$/.test(list.tagName) ? list : null;
+	}
+
+	/**
+	 * Set how far the text of the items of the lists the selection touches starts from their
+	 * bullet or number, in points: 6 to 144. `null` takes the setting off, and the list has the
+	 * quarter inch (18 pt) it always had. Also what the toolbar's spacing list calls.
+	 */
+	export function setListMarkerGap(points: number | null): void {
+		if (readonly || !editorEl) return;
+		if (points !== null && (typeof points !== 'number' || !Number.isFinite(points) || points * 20 < LEAST_MARKER_GAP || points * 20 > MOST_MARKER_GAP)) return;
+		restoreSelection();
+		editorEl.focus();
+		const sel = window.getSelection();
+		if (!sel || sel.rangeCount === 0 || !sel.anchorNode || !editorEl.contains(sel.anchorNode)) return;
+		const range = sel.getRangeAt(0);
+		const lists: HTMLElement[] = [];
+		const add = (node: Node) => {
+			const item = (node instanceof Element ? node : node.parentElement)?.closest('li');
+			const list = item?.parentElement;
+			if (list && editorEl!.contains(list) && /^(UL|OL)$/.test(list.tagName) && !lists.includes(list)) lists.push(list);
+		};
+		add(range.startContainer);
+		const walker = document.createTreeWalker(editorEl, NodeFilter.SHOW_TEXT);
+		for (let n = walker.nextNode(); n; n = walker.nextNode()) if (range.intersectsNode(n) && (n.textContent ?? '').trim()) add(n);
+		if (lists.length === 0) return;
+		history?.step();
+		let changed = false;
+		for (const list of lists) {
+			const before = list.getAttribute('style');
+			list.style.paddingLeft = points === null ? '' : `${Math.round(points * 100) / 100}pt`;
+			if (!list.getAttribute('style')) list.removeAttribute('style');
+			if (list.getAttribute('style') !== before) changed = true;
+		}
+		if (!changed) return;
+		markItems(editorEl);
+		indentChanged();
 	}
 
 	/** An element's left margin in px: its own, from the inline style, or 0. */
@@ -2029,6 +2091,11 @@
 		currentFont = fontList.length > 0 ? fontAtSelection() : '';
 		const spaced = spacedBlockAtCaret();
 		currentSpacing = spaced ? spacingOf(spaced) : { line: null, before: 0, after: 0 };
+		const gapped = listAtCaret();
+		if (gapped) {
+			const twips = markerGapTwips(gapped);
+			currentSpacing.gap = twips === null ? null : twips / 20;
+		}
 
 		// The list the caret's item is in: the innermost, for an item of a list within a list.
 		const listKind = editorEl ? listKindAt(editorEl, window.getSelection()) : null;
@@ -4157,6 +4224,28 @@
 		return stopTracking;
 	});
 
+	// The markers of a list with a gap, drawn by the editor (see markItems), follow every change
+	// to the document: an item put in or taken out, a list renumbered, its gap set. They are no
+	// step of the history of their own: they go with the change they follow.
+	$effect(() => {
+		if (!editorEl || typeof MutationObserver === 'undefined') return;
+		const root = editorEl;
+		let queued = false;
+		const mark = () => {
+			queued = false;
+			if (history) history.quietly(() => markItems(root));
+			else markItems(root);
+		};
+		const observer = new MutationObserver(() => {
+			if (queued) return;
+			queued = true;
+			queueMicrotask(mark);
+		});
+		observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'start', 'type', 'value'] });
+		mark();
+		return () => observer.disconnect();
+	});
+
 	// Suppress unused warning for importing state (used in template)
 	$effect(() => { void importing; });
 </script>
@@ -4761,6 +4850,25 @@
 
 	.ink-content :global(li) {
 		margin-bottom: 4px;
+	}
+
+	/* A list with a gap after its markers (its own padding-left: see markerGapTwips) has its
+	   markers drawn by the editor, at the list's edge, where Word has its number: the text is
+	   the gap further in. The browser's own marker is drawn against the text, by how wide it
+	   is, and could not be put there. */
+	.ink-content :global(:is(ul, ol):has(> li[data-ink-marker])) {
+		position: relative;
+	}
+
+	.ink-content :global(li[data-ink-marker]) {
+		list-style: none;
+	}
+
+	.ink-content :global(li[data-ink-marker]::before) {
+		content: attr(data-ink-marker);
+		position: absolute;
+		left: 0;
+		white-space: nowrap;
 	}
 
 	.ink-content :global(a) {

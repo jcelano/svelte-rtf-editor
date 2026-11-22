@@ -25,7 +25,7 @@ import {
 	hardToReadOnWhite,
 	LEAST_LINES
 } from './rtf-writer.js';
-import { letterReadings, listTypeAttribute, type LetterReading, type NumberStyle } from './list-markers.js';
+import { LEAST_MARKER_GAP, MOST_MARKER_GAP, letterReadings, listTypeAttribute, type LetterReading, type NumberStyle } from './list-markers.js';
 
 // ── Types ──
 
@@ -318,6 +318,15 @@ const RULE_DASHES = '\u2014'.repeat(20);
 
 /** A hanging indent of this many twips is the one the writer gives a list item (\fi-360). */
 const LIST_HANG = 360;
+
+/**
+ * Whether a paragraph hangs as a list item does: its first line out by a gap a list can have
+ * (see markerGapTwips), and no further than the page. A list hung by any such gap is read as a
+ * list with that gap, which is written back the same.
+ */
+function hangsAsItem(first: number, left: number): boolean {
+	return -first >= LEAST_MARKER_GAP && -first <= MOST_MARKER_GAP && left >= -first;
+}
 
 /** The longest number a numbered list item is read with. */
 const MAX_LIST_NUMBER_DIGITS = 9;
@@ -1648,8 +1657,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		const lettered = opensParagraph && lead != null ? lead.match(LETTER_MARKER) : null;
 		if (
 			lettered &&
-			state.firstLineIndent === -LIST_HANG &&
-			state.leftIndent >= LIST_HANG &&
+			hangsAsItem(state.firstLineIndent, state.leftIndent) &&
 			state.rightIndent === 0 &&
 			(state.align || 'left') === 'left' &&
 			letterReadings(lettered[1]).length > 0
@@ -2576,28 +2584,36 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		number: number;
 		letters?: string;
 		left: number;
+		/** How far its first line hangs, in twips: the gap after its marker. */
+		hang: number;
 		html: string;
 		/** Its spacing, as the <li>'s style: Word spaces list paragraphs as any other. */
 		spacing: string;
 	}
 	const items: (ListItem | null)[] = blocks.map((b) => {
 		if (b.kind !== 'paragraph' || !b.marker || b.inTable || b.caption) return null;
-		if (b.first !== -LIST_HANG || b.left < LIST_HANG || b.right !== 0 || b.align !== 'left') return null;
+		if (!hangsAsItem(b.first, b.left) || b.right !== 0 || b.align !== 'left') return null;
 		return {
 			kind: b.marker.kind,
 			number: b.marker.number,
 			letters: b.marker.letters,
 			left: b.left,
+			hang: -b.first,
 			html: trimSpaces(renderRuns(b.runs.slice(b.marker.end))),
 			spacing: spacingStyle(b)
 		};
 	});
 
+	/** Where an item's marker stands, in twips: its text's indent less its hang. */
+	const markAt = (item: ListItem) => item.left - item.hang;
+
 	/** Consecutive list items as nested <ul> and <ol>, one string per list at the top level. */
 	function renderLists(list: ListItem[]): string[] {
 		const out: string[] = [];
 		let html = '';
-		const open: { kind: 'ul' | 'ol'; left: number; next: number; style: NumberStyle }[] = [];
+		// (A level is where its markers stand, as Word has it: lists with other gaps after the
+		// marker are at one level where their markers are at one place.)
+		const open: { kind: 'ul' | 'ol'; left: number; at: number; hang: number; next: number; style: NumberStyle }[] = [];
 		/**
 		 * The number an item has and the way its list counts. Letters can be read two ways: "C"
 		 * is the third letter and the Roman 100. It is the one that goes on with the list the
@@ -2615,16 +2631,16 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		const nextAtLevel: number[] = new Array(list.length).fill(-1);
 		{
 			/** The items after this one that one before it may still go on to: the nearest at each indent, the smallest indent first. */
-			const ahead: { left: number; at: number }[] = [];
+			const ahead: { mark: number; at: number }[] = [];
 			for (let i = list.length - 1; i >= 0; i--) {
-				const left = list[i].left;
-				while (ahead.length > 0 && ahead[ahead.length - 1].left > left) ahead.pop();
+				const mark = markAt(list[i]);
+				while (ahead.length > 0 && ahead[ahead.length - 1].mark > mark) ahead.pop();
 				const same = ahead[ahead.length - 1];
-				if (same && same.left === left) {
+				if (same && same.mark === mark) {
 					nextAtLevel[i] = same.at;
 					same.at = i;
 				} else {
-					ahead.push({ left, at: i });
+					ahead.push({ mark, at: i });
 				}
 			}
 		}
@@ -2632,7 +2648,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			const item = list[at];
 			if (!item.letters) return { style: 'decimal', number: item.number };
 			const readings = letterReadings(item.letters);
-			if (top && top.kind === 'ol' && item.left === top.left) {
+			if (top && top.kind === 'ol' && markAt(item) === top.at) {
 				const goesOn = readings.find((r) => r.style === top.style && r.number === top.next);
 				if (goesOn) return goesOn;
 			}
@@ -2656,23 +2672,26 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		};
 		for (const [at, item] of list.entries()) {
 			// A smaller indent ends the lists nested deeper than it.
-			while (open.length > 0 && item.left < open[open.length - 1].left) closeList();
+			while (open.length > 0 && markAt(item) < open[open.length - 1].at) closeList();
 			const top = open[open.length - 1];
 			const { style, number } = readingOf(at, top);
-			if (top && item.left === top.left && item.kind === top.kind && (item.kind === 'ul' || (number === top.next && style === top.style))) {
+			if (top && markAt(item) === top.at && item.hang === top.hang && item.kind === top.kind && (item.kind === 'ul' || (number === top.next && style === top.style))) {
 				html += `</li><li${item.spacing ? ` style="${item.spacing}"` : ''}>`;
 				top.next = number + 1;
 			} else {
-				// A change from bullets to numbers, or a number out of sequence, is a new list
-				// in the same place.
-				if (top && item.left === top.left) closeList();
+				// A change from bullets to numbers, a number out of sequence or another gap after
+				// the marker is a new list in the same place.
+				if (top && markAt(item) === top.at) closeList();
 				const parent = open[open.length - 1];
-				// What the indent adds to the half inch a list level has by itself.
-				const margin = item.left - (parent ? parent.left : 0) - LIST_STEP;
+				// What the indent adds to the half inch a list level has by itself: the marker
+				// stands a quarter inch into the level, and the text the list's gap after it.
+				const margin = item.left - item.hang - (parent ? parent.left : 0) - (LIST_STEP - LIST_HANG);
 				const start = item.kind === 'ol' && number !== 1 ? ` start="${number}"` : '';
 				const type = item.kind === 'ol' && style !== 'decimal' ? ` type="${listTypeAttribute(style)}"` : '';
-				html += `<${item.kind}${type}${start}${margin !== 0 ? ` style="margin-left:${twipsToPt(margin)}"` : ''}><li${item.spacing ? ` style="${item.spacing}"` : ''}>`;
-				open.push({ kind: item.kind, left: item.left, next: number + 1, style });
+				// (A gap other than the quarter inch is the list's padding: see markerGapTwips.)
+				const listStyle = [margin !== 0 ? `margin-left:${twipsToPt(margin)}` : '', item.hang !== LIST_HANG ? `padding-left:${twipsToPt(item.hang)}` : ''].filter(Boolean).join(';');
+				html += `<${item.kind}${type}${start}${listStyle ? ` style="${listStyle}"` : ''}><li${item.spacing ? ` style="${item.spacing}"` : ''}>`;
+				open.push({ kind: item.kind, left: item.left, at: markAt(item), hang: item.hang, next: number + 1, style });
 			}
 			html += item.html || '<br>';
 		}
