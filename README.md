@@ -144,6 +144,7 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 | `fontSize`      | `number`   | `12`                         | Body text size in points, on screen and in the RTF        |
 | `fontSizes`     | `number[]` | `[8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36]` | The sizes, in points, the toolbar's size list offers for selected text. The body size is always among them; `[]` takes the list off the toolbar. See [Size of selected text](#size-of-selected-text) |
 | `fonts`         | `string[]` | `[]`                         | The fonts the toolbar's font list offers for selected text, beside the document's own. `[]` means no font list, and one font for the whole document. See [Fonts for selected text](#fonts-for-selected-text) |
+| `fontMenu`      | `boolean`  | `false`                      | A right-click on the text opens a menu of `fonts` in place of the browser's menu. Shift + right-click still opens the browser's. See [The font menu](#the-font-menu) |
 | `keepAttributes` | `string[]` | `[]` | `data-` attributes of your own that stay on HTML you set or the user pastes. See [HTML from outside](#html-from-outside) |
 | `keepClasses` | `string[]` | `[]` | Class names of your own that stay the same way |
 
@@ -361,6 +362,24 @@ The list is the limit. A font that is not on it is not offered, is taken off HTM
 - Set back to the document font, the words lose their `<font>` in Chromium and Safari, and in Firefox are given one that names the document font. The RTF is the same.
 - Code stays in Courier New whatever font is around it. A monospace font you offer is written as that font, and read back as code, which is what a reader makes of text in a monospace font.
 - [Clear formatting](#clear-formatting) takes a font off with the rest.
+
+#### The font menu
+
+The font list is in the toolbar. Set `fontMenu` and a right-click on the text opens the same fonts as a menu as well, where the pointer is:
+
+```svelte
+<InkEditor fonts={['Georgia', 'Calibri, Carlito, sans-serif', 'Arial']} fontMenu />
+```
+
+The menu shows the document font first, then yours, each in its own font, with the font of the selected text checked. Choosing one sets the font of the selection, exactly as the toolbar's list does, and Undo takes it off again. On a Mac a right-click selects the word it is on, so a right-click on a word and a choice from the menu are enough to set that word.
+
+The menu is off by default because it takes the place of the browser's own menu, and with it the spelling suggestions, Copy and Paste. The browser's menu is still there when you need it:
+
+- Shift + right-click opens the browser's menu. The foot of the font menu says so.
+- A right-click on a link or a picture opens the browser's menu, which has what a link or a picture needs (Open link, Copy image).
+- Without `fonts`, or with `readonly`, `fontMenu` changes nothing.
+
+From the keyboard, the menu key or Shift+F10 opens the menu at the caret, where the browser sends the page the menu's event (Chromium does; check the others in your own setup). In the menu, the arrow keys, Home and End move, Enter or Space chooses, and Escape or Tab closes it and gives the text the keyboard back. A click anywhere else, a scroll, or the window losing the keyboard closes it too.
 
 ### Clear formatting
 

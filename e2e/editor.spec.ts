@@ -1832,6 +1832,125 @@ test.describe('Fonts', () => {
 		expect(await html(page)).toBe('<p><font face="Calibri, Carlito, sans-serif">one</font> two</p>');
 	});
 
+	/** Right-click in the middle of the selected text. */
+	async function rightClickSelection(page: Page, modifiers: ('Shift')[] = []): Promise<void> {
+		const box = await page.evaluate(() => {
+			const r = getSelection()!.getRangeAt(0).getBoundingClientRect();
+			return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+		});
+		await page.mouse.move(box.x, box.y);
+		for (const key of modifiers) await page.keyboard.down(key);
+		await page.mouse.down({ button: 'right' });
+		await page.mouse.up({ button: 'right' });
+		for (const key of modifiers) await page.keyboard.up(key);
+	}
+	const menu = '[role="menu"][aria-label="Font"]';
+
+	test('a right-click opens no menu of the editor unless the application asks for one', async ({ page }) => {
+		await open(page, { content: '<p>one two</p>', fonts });
+		await selectChars(page, 0, 3);
+		await rightClickSelection(page);
+		await expect(page.locator(menu)).toHaveCount(0);
+		// (Nor with the menu asked for, where there are no fonts to offer.)
+		await open(page, { content: '<p>one two</p>', fontMenu: '' });
+		await selectChars(page, 0, 3);
+		await rightClickSelection(page);
+		await expect(page.locator(menu)).toHaveCount(0);
+	});
+
+	test('the font menu sets the font of the selected words, shows the font they are in, and is undone with the rest', async ({ page }) => {
+		await open(page, { content: '<p>one two three</p>', fonts, fontMenu: '' });
+		const before = await html(page);
+		await selectChars(page, 4, 7);
+		await rightClickSelection(page);
+		await expect(page.locator(menu)).toBeVisible();
+		const names = (await page.locator(`${menu} [role="menuitemradio"]`).allTextContents()).map((t) => t.replace('✓', '').trim());
+		expect(names).toEqual(['Segoe UI', 'Georgia', 'Calibri', 'Arial']);
+		await expect(page.locator(`${menu} [aria-checked="true"]`)).toHaveText(/Segoe UI/);
+		// Each choice is shown in its own font.
+		expect(await page.locator(`${menu} [role="menuitemradio"]`, { hasText: 'Georgia' }).evaluate((b) => getComputedStyle(b).fontFamily)).toMatch(/^Georgia/);
+		await page.locator(`${menu} [role="menuitemradio"]`, { hasText: 'Georgia' }).click();
+		await expect(page.locator(menu)).toHaveCount(0);
+		expect(await html(page)).toBe('<p>one <font face="Georgia, serif">two</font> three</p>');
+		// The words keep the selection and the keyboard: typing goes on there.
+		expect(await page.evaluate(() => [document.activeElement?.className.includes('ink-content'), getSelection()!.toString()])).toEqual([true, 'two']);
+		// The toolbar's list shows it, and the menu, opened again, has it checked.
+		expect(await shown(page)).toBe('Georgia');
+		await selectChars(page, 4, 7);
+		await rightClickSelection(page);
+		await expect(page.locator(`${menu} [aria-checked="true"]`)).toHaveText(/Georgia/);
+		await page.keyboard.press('Escape');
+		await expect(page.locator(menu)).toHaveCount(0);
+		await page.keyboard.press('ControlOrMeta+z');
+		await expect.poll(() => html(page)).toBe(before);
+	});
+
+	test('the font menu is used from the keyboard, and a press elsewhere closes it', async ({ page }) => {
+		await open(page, { content: '<p>one two three</p>', fonts, fontMenu: '' });
+		await selectChars(page, 8, 13);
+		await rightClickSelection(page);
+		await expect(page.locator(`${menu} [role="menuitemradio"]`).first()).toBeFocused();
+		await page.keyboard.press('ArrowDown');
+		await page.keyboard.press('ArrowDown');
+		await page.keyboard.press('Enter');
+		await expect(page.locator(menu)).toHaveCount(0);
+		expect(await html(page)).toBe('<p>one two <font face="Calibri, Carlito, sans-serif">three</font></p>');
+		// Up from the first goes round to the last.
+		await selectChars(page, 0, 3);
+		await rightClickSelection(page);
+		await page.keyboard.press('ArrowUp');
+		await expect(page.locator(`${menu} [role="menuitemradio"]`).last()).toBeFocused();
+		await page.keyboard.press(' ');
+		expect(await html(page)).toBe('<p><font face="Arial, sans-serif">one</font> two <font face="Calibri, Carlito, sans-serif">three</font></p>');
+		// A click outside closes it and changes nothing.
+		await selectChars(page, 4, 7);
+		await rightClickSelection(page);
+		await expect(page.locator(menu)).toBeVisible();
+		const now = await html(page);
+		await page.mouse.click(5, 5);
+		await expect(page.locator(menu)).toHaveCount(0);
+		expect(await html(page)).toBe(now);
+	});
+
+	test('the menu key opens the font menu at the caret', async ({ page, browserName }) => {
+		// (Only Chromium makes the menu's event of a key that a test presses.)
+		test.skip(browserName !== 'chromium', 'the key opens no menu under test in this engine');
+		await open(page, { content: '<p>one two three</p>', fonts, fontMenu: '' });
+		await selectChars(page, 4, 7);
+		await page.keyboard.press('ContextMenu');
+		await expect(page.locator(`${menu} [aria-checked="true"]`)).toBeFocused();
+		const [word, box] = await Promise.all([
+			page.evaluate(() => getSelection()!.getRangeAt(0).getBoundingClientRect().toJSON()),
+			page.locator(menu).boundingBox()
+		]);
+		expect(Math.abs(box!.x - word.left)).toBeLessThan(2);
+		expect(box!.y).toBeGreaterThanOrEqual(word.bottom);
+		await page.keyboard.press('End');
+		await page.keyboard.press('Enter');
+		expect(await html(page)).toBe('<p>one <font face="Arial, sans-serif">two</font> three</p>');
+	});
+
+	test('Shift with the right-click, and a right-click on a link, leave the browser its own menu', async ({ page }) => {
+		await open(page, { content: '<p>one <a href="https://example.com/">two</a> three</p>', fonts, fontMenu: '' });
+		const prevented = () => page.evaluate(() => window.__ran ?? '');
+		await page.evaluate(() => {
+			window.addEventListener('contextmenu', (e) => (window.__ran = String(e.defaultPrevented)));
+		});
+		await selectChars(page, 8, 13);
+		await rightClickSelection(page, ['Shift']);
+		await expect(page.locator(menu)).toHaveCount(0);
+		// (Firefox gives Shift and a right-click to its own menu without telling the page.)
+		expect(await prevented()).not.toBe('true');
+		await selectChars(page, 4, 7);
+		await rightClickSelection(page);
+		await expect(page.locator(menu)).toHaveCount(0);
+		expect(await prevented()).toBe('false');
+		await selectChars(page, 8, 13);
+		await rightClickSelection(page);
+		await expect(page.locator(menu)).toBeVisible();
+		expect(await prevented()).toBe('true');
+	});
+
 	test('Clear formatting takes the font off', async ({ page }) => {
 		await open(page, { content: '<p>one <font face="Georgia, serif">two</font> <span style="font-family: Arial, sans-serif;">three</span></p>', fonts });
 		await selectChars(page, 0, 13);
