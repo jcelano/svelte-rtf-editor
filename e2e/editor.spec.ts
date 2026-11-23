@@ -311,6 +311,25 @@ test.describe('what an outside review of 1.12.0 found', () => {
 	});
 });
 
+test.describe('a page rendered on the server', () => {
+	// (The editing area took typing before the editor's script had run, and the editor, once
+	// started, put its document in over it: what was typed in a page's first second was gone.)
+	test('the text cannot be edited until the editor has started, and then can', async ({ page, request }) => {
+		const served = await (await request.get('/')).text();
+		const area = served.match(/<div[^>]*class="ink-content[ "][^>]*>/)?.[0] ?? '';
+		expect(area).toContain('role="textbox"');
+		expect(area).toContain('contenteditable="false"');
+		expect(area).toContain('aria-busy="true"');
+		await page.goto('/');
+		await expect(page.locator(content)).toHaveAttribute('contenteditable', 'true');
+		await expect(page.locator(content)).not.toHaveAttribute('aria-busy', /./);
+		await page.click(content);
+		await page.keyboard.type('kept');
+		await page.waitForTimeout(500);
+		await expect(page.locator(content)).toContainText('kept');
+	});
+});
+
 test.describe('a new document', () => {
 	test('the first words typed are a paragraph, and two lines typed are two paragraphs in the RTF', async ({ page }) => {
 		await open(page);

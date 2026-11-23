@@ -4243,8 +4243,17 @@
 
 
 	// ── Lifecycle ──
+	/**
+	 * Whether the editor has started: its document is in, and its handlers are listening. Until
+	 * then the text cannot be edited. (A page rendered on the server showed an editing area that
+	 * took typing before the editor's script had run; the editor then put its document in, and
+	 * what had been typed was gone.)
+	 */
+	let started = $state(false);
+
 	onMount(() => {
 		if (!editorEl) return;
+		started = true;
 		document.addEventListener('selectionchange', trackSelection);
 		const stopTracking = () => {
 			document.removeEventListener('selectionchange', trackSelection);
@@ -4406,12 +4415,13 @@
 			class:copy-format-pick={copyFormat === 'pick'}
 			class:copy-format-apply={copyFormat === 'apply'}
 			class:links-open={linkArmed && linkHint !== null}
-			contenteditable={!readonly}
+			contenteditable={started && !readonly}
 			role="textbox"
 			tabindex="0"
 			aria-multiline="true"
 			aria-label={ariaLabel}
 			aria-readonly={readonly ? 'true' : undefined}
+			aria-busy={started ? undefined : 'true'}
 			spellcheck="true"
 			bind:this={editorEl}
 			onbeforeinput={handleBeforeInput}
