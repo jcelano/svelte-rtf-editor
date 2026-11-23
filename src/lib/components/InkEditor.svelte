@@ -56,6 +56,18 @@
 	 *                   spelling suggestions, Copy and Paste), and so does a right-click on a
 	 *                   link or a picture. The menu key and Shift+F10 open it at the caret.
 	 *                   Nothing changes without `fonts`, or when readonly. Default: false.
+	 *   tools         — The toolbar's controls, by name (TOOLBAR_TOOLS, toolbar-tools.ts). A
+	 *                   control not named is not rendered; its keyboard shortcut still works.
+	 *                   The order is the editor's own, and an empty group or a divider with
+	 *                   nothing beside it is left out. An unknown name is ignored with a console
+	 *                   warning. Default: all of them.
+	 *   moreTools     — Those of `tools` that wait behind a More button at the end of the first
+	 *                   row, in a second row under it when opened. Default: none, and no button.
+	 *   moreOpen      — Bindable: whether that second row is open. The editor keeps it nowhere
+	 *                   itself. Default: false.
+	 *   moreLabel, lessLabel — The button's words, closed and open. Default: 'More', 'Less'.
+	 *   toolbarEnd    — A snippet of the application's own controls, at the end of the first
+	 *                   row (before the More button).
 	 *   keepAttributes — `data-` attributes the application's documents carry, which
 	 *                   the editor leaves on their elements: a mark on a paragraph that
 	 *                   the application reads back (`data-section="2"`). Every other
@@ -71,6 +83,7 @@
 	 *                   { html, text, wordCount, charCount, estimatedRtfBytes }.
 	 *   onsave        — Fires on auto-save or Ctrl+S with { html }.
 	 *   onimport      — Fires after a successful RTF import with { html }.
+	 *   onmoretoggle  — Fires with the new state when the More button opens or closes its row.
 	 *
 	 * Bindable methods (via bind:this):
 	 *   getHTML()      — Returns the current editor HTML string.
@@ -91,7 +104,8 @@
 	 *                    the application's own marks stay.
 	 */
 
-	import { onMount } from 'svelte';
+	import { onMount, type Snippet } from 'svelte';
+	import { knownTools, TOOLBAR_TOOLS, type ToolbarTool } from '../toolbar-tools.js';
 	import Toolbar from './Toolbar.svelte';
 	import Modal from './Modal.svelte';
 	import FontMenu from './FontMenu.svelte';
@@ -169,6 +183,17 @@
 		fonts?: string[];
 		/** A right-click on the text opens a menu of `fonts`; the browser's menu is Shift + right-click. */
 		fontMenu?: boolean;
+		/** The toolbar's controls, by name; all of them unless given. */
+		tools?: readonly ToolbarTool[];
+		/** Those of `tools` behind a More button, in a second row; none unless given. */
+		moreTools?: readonly ToolbarTool[];
+		/** Whether the second row is open (bindable). */
+		moreOpen?: boolean;
+		moreLabel?: string;
+		lessLabel?: string;
+		/** The application's own controls, at the end of the toolbar's first row. */
+		toolbarEnd?: Snippet;
+		onmoretoggle?: (open: boolean) => void;
 		/** `data-` attributes of the application's own, kept on HTML that is set or pasted. */
 		keepAttributes?: string[];
 		/** Class names of the application's own, kept the same way. */
@@ -191,6 +216,7 @@
 	/** The sizes, in points, the toolbar's size list offers unless `fontSizes` says otherwise. */
 	const DEFAULT_FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36];
 	const NO_KEPT_ATTRIBUTES: string[] = [];
+	const NO_TOOLS: readonly ToolbarTool[] = [];
 
 	// ── Props ──
 	let {
@@ -213,12 +239,27 @@
 		fontSizes = DEFAULT_FONT_SIZES,
 		fonts = NO_KEPT_ATTRIBUTES,
 		fontMenu = false,
+		tools = TOOLBAR_TOOLS,
+		moreTools = NO_TOOLS,
+		moreOpen = $bindable(false),
+		moreLabel = 'More',
+		lessLabel = 'Less',
+		toolbarEnd,
+		onmoretoggle,
 		keepAttributes = NO_KEPT_ATTRIBUTES,
 		keepClasses = NO_KEPT_ATTRIBUTES,
 		onchange,
 		onsave,
 		onimport
 	}: Props = $props();
+
+	const toolSet = $derived(knownTools(tools, 'tools'));
+	const moreToolSet = $derived(knownTools(moreTools, 'moreTools'));
+
+	function toggleMore(open: boolean): void {
+		moreOpen = open;
+		onmoretoggle?.(open);
+	}
 
 	const keptNames = $derived(keptMarks({ keepAttributes, keepClasses, fonts, fontFamily }));
 
@@ -4377,6 +4418,13 @@
 					spacing={currentSpacing}
 					copyingFormat={copyFormat !== 'off'}
 					oncopyformat={toggleCopyFormat}
+					tools={toolSet}
+					moreTools={moreToolSet}
+					{moreOpen}
+					onmoretoggle={toggleMore}
+					{moreLabel}
+					{lessLabel}
+					end={toolbarEnd}
 				/>
 			{/if}
 

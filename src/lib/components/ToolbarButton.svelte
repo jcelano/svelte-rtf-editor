@@ -8,15 +8,18 @@
 		 */
 		active?: boolean;
 		title?: string;
+		/** The control's name (see toolbar-tools.ts), as `data-tool`. */
+		tool?: string;
 		onclick?: () => void;
 		children: Snippet;
 	}
 
-	let { active, title = '', onclick, children }: Props = $props();
+	let { active, title = '', tool, onclick, children }: Props = $props();
 </script>
 
 <button
 	class="tb"
+	data-tool={tool}
 	class:active={active === true}
 	{title}
 	aria-label={title || undefined}

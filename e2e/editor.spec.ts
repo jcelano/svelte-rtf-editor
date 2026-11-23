@@ -17,6 +17,7 @@ declare global {
 		setViewer(rtf: string): void;
 		changes: number;
 		saves: string[];
+		toggles: boolean[];
 		__ran?: string;
 	}
 }
@@ -2968,5 +2969,159 @@ test.describe("Undo and Redo: the editor's own, of whatever changed the document
 		expect(await html(page)).toBe('<p>start-</p>');
 		await page.keyboard.press(`${MOD}+Shift+z`);
 		expect(await html(page)).toBe('<p>start-かな</p>');
+	});
+});
+
+test.describe("the toolbar's controls, by name, and the ones behind More (issue 52)", () => {
+	const tool = (page: Page, name: string) => page.locator(`[role="toolbar"] [data-tool="${name}"]`);
+	const more = (page: Page) => page.locator('[role="toolbar"] [data-tool-more]');
+	/** The names of the controls in sight, in the order the page has them. */
+	const shownTools = (page: Page) =>
+		page.evaluate(() =>
+			Array.from(document.querySelectorAll<HTMLElement>('[role="toolbar"] [data-tool]'))
+				.filter((el) => el.getClientRects().length > 0)
+				.map((el) => el.dataset.tool)
+		);
+	const SECOND = ['font', 'fontSize', 'strikethrough', 'alignLeft', 'alignCenter', 'alignRight', 'link', 'image'];
+	const fonts = 'Georgia|Arial';
+
+	test('every control has its name, in the order of TOOLBAR_TOOLS', async ({ page }) => {
+		await open(page, { content: '<p>one</p>', fonts });
+		const all = await page.evaluate(() => [...window.lib.TOOLBAR_TOOLS]);
+		expect(all).toHaveLength(29);
+		expect(await shownTools(page)).toEqual(all);
+		// (The name stays whatever the tooltip says.)
+		await expect(tool(page, 'horizontalRule')).toHaveAttribute('title', 'Horizontal rule');
+	});
+
+	test('`tools` renders only the controls it names, without empty groups or stray dividers', async ({ page }) => {
+		const warnings: string[] = [];
+		page.on('console', (m) => m.type() === 'warning' && warnings.push(m.text()));
+		await open(page, { content: '<p>one</p>', tools: 'bold' });
+		expect(await shownTools(page)).toEqual(['bold']);
+		await expect(page.locator('[role="toolbar"] .toolbar-divider')).toHaveCount(0);
+		await expect(page.locator('[role="toolbar"] .toolbar-group')).toHaveCount(1);
+
+		await open(page, { content: '<p>one</p>', tools: 'undo,italic,bold,nosuchtool' });
+		expect(await shownTools(page)).toEqual(['bold', 'italic', 'undo']);
+		await expect(page.locator('[role="toolbar"] .toolbar-divider')).toHaveCount(1);
+		expect(warnings.join('\n')).toContain('"nosuchtool"');
+		// A control left out keeps its keyboard shortcut.
+		await page.click(`${content} p`);
+		await page.keyboard.press('ControlOrMeta+a');
+		await page.keyboard.press('ControlOrMeta+u');
+		expect(await html(page)).toBe('<p><u>one</u></p>');
+		// A font list needs fonts to offer, whatever `tools` says.
+		await open(page, { content: '<p>one</p>', tools: 'font,bold' });
+		expect(await shownTools(page)).toEqual(['bold']);
+	});
+
+	test('More opens a second row under the first, and nothing in the first row moves', async ({ page }) => {
+		await open(page, { content: '<p>one</p>', fonts, moreTools: SECOND.join(',') });
+		const firstRow = await shownTools(page);
+		expect(firstRow.some((name) => SECOND.includes(name!))).toBe(false);
+		await expect(more(page)).toHaveText(/More/);
+		await expect(more(page)).toHaveAccessibleName('More');
+		await expect(more(page)).toHaveAttribute('aria-expanded', 'false');
+		for (const name of SECOND) await expect(tool(page, name)).toBeHidden();
+		const boxes = async () =>
+			page.evaluate(() =>
+				Array.from(document.querySelectorAll<HTMLElement>('[role="toolbar"] .toolbar-row:not(.toolbar-more) :is([data-tool], [data-tool-more])')).map((el) => {
+					const r = el.getBoundingClientRect();
+					return [r.x, r.y, r.width, r.height].map(Math.round).join(',');
+				})
+			);
+		const closed = await boxes();
+		await more(page).click();
+		await expect(more(page)).toHaveAccessibleName('Less');
+		await expect(more(page)).toHaveAttribute('aria-expanded', 'true');
+		const row = page.locator(`#${await more(page).getAttribute('aria-controls')}`);
+		await expect(row).toBeVisible();
+		expect(await shownTools(page)).toEqual([...firstRow, ...SECOND]);
+		expect(await boxes()).toEqual(closed);
+		// The second row is under the first, and in the toolbar that stays in sight.
+		const [button, second] = [await more(page).boundingBox(), await row.boundingBox()];
+		expect(second!.y).toBeGreaterThanOrEqual(button!.y + button!.height);
+		await expect(page.locator('.ink-head.sticky [role="toolbar"] .toolbar-more')).toHaveCount(1);
+		await more(page).click();
+		await expect(row).toBeHidden();
+		expect(await boxes()).toEqual(closed);
+		expect(await page.evaluate(() => window.toggles)).toEqual([true, false]);
+	});
+
+	test('the words stay selected when More is pressed, and a size chosen in the second row sizes them', async ({ page }) => {
+		await open(page, { content: '<p>one two three</p>', moreTools: 'fontSize' });
+		await page.evaluate(() => {
+			const text = document.querySelector('.ink-content p')!.firstChild!;
+			(document.querySelector('.ink-content') as HTMLElement).focus();
+			const range = document.createRange();
+			range.setStart(text, 4);
+			range.setEnd(text, 7);
+			getSelection()!.removeAllRanges();
+			getSelection()!.addRange(range);
+		});
+		await more(page).click();
+		expect(await page.evaluate(() => getSelection()!.toString())).toBe('two');
+		await page.selectOption('[data-tool="fontSize"]', '18');
+		expect(await html(page)).toBe('<p>one <font style="font-size: 18pt;">two</font> three</p>');
+		// Closed and opened again, the list shows the size of the words.
+		await more(page).click();
+		await more(page).click();
+		await expect(tool(page, 'fontSize')).toHaveValue('18');
+	});
+
+	test('Tab goes through the controls in the order they are seen: the first row, More, the second row', async ({ page, browserName }) => {
+		// (Safari's engine leaves buttons out of Tab unless the system says otherwise.)
+		test.skip(browserName === 'webkit', 'WebKit does not Tab to buttons by default');
+		await open(page, { content: '<p>one</p>', tools: 'bold,italic,bulletList,link,undo', moreTools: 'italic,link', moreOpen: '1' });
+		await tool(page, 'bold').focus();
+		const seen: string[] = [];
+		for (let i = 0; i < 5; i++) {
+			seen.push(await page.evaluate(() => (document.activeElement as HTMLElement).dataset.tool ?? ('toolMore' in (document.activeElement as HTMLElement).dataset ? 'More' : '?')));
+			await page.keyboard.press('Tab');
+		}
+		expect(seen).toEqual(['bold', 'bulletList', 'undo', 'More', 'italic']);
+	});
+
+	test('on a narrow page the first row wraps with More at the end of its last line, and the second row starts under it', async ({ page }) => {
+		await open(page, { content: '<p>one</p>', moreTools: 'link,image,table', moreOpen: '1', width: '360px' });
+		const lines = await page.evaluate(() => {
+			const top = (el: Element) => Math.round(el.getBoundingClientRect().top);
+			const first = Array.from(document.querySelectorAll('[role="toolbar"] .toolbar-row:not(.toolbar-more) [data-tool]'));
+			const button = document.querySelector('[data-tool-more]')!;
+			const second = document.querySelector('.toolbar-more')!;
+			return {
+				lines: new Set(first.map(top)).size,
+				lastTop: Math.max(...first.map(top)),
+				buttonTop: top(button),
+				buttonRight: button.getBoundingClientRect().right,
+				lastRight: Math.max(...first.filter((el) => top(el) === Math.max(...first.map(top))).map((el) => el.getBoundingClientRect().right)),
+				buttonBottom: button.getBoundingClientRect().bottom,
+				secondTop: second.getBoundingClientRect().top
+			};
+		});
+		expect(lines.lines).toBeGreaterThan(1);
+		expect(Math.abs(lines.buttonTop - lines.lastTop)).toBeLessThan(6);
+		expect(lines.buttonRight).toBeGreaterThan(lines.lastRight);
+		expect(lines.secondTop).toBeGreaterThanOrEqual(lines.buttonBottom);
+	});
+
+	test("the application's own control goes at the end of the first row, before More", async ({ page }) => {
+		await open(page, { content: '<p>one</p>', moreTools: 'link', toolbarEnd: '' });
+		const order = await page.evaluate(() => {
+			const row = document.querySelector('[role="toolbar"] .toolbar-row')!;
+			const all = Array.from(row.querySelectorAll('button, select'));
+			return [all.indexOf(document.querySelector('#template')!), all.indexOf(document.querySelector('[data-tool-more]')!), all.length];
+		});
+		expect(order).toEqual([order[2] - 2, order[2] - 1, order[2]]);
+		// Without More, it is the toolbar's last.
+		await open(page, { content: '<p>one</p>', toolbarEnd: '' });
+		expect(await page.evaluate(() => document.querySelector('[role="toolbar"]')!.lastElementChild!.id)).toBe('template');
+	});
+
+	test('a read-only editor has no toolbar and no More button', async ({ page }) => {
+		await open(page, { content: '<p>one</p>', moreTools: 'link', readonly: '1' });
+		await expect(page.locator('[role="toolbar"]')).toHaveCount(0);
+		await expect(page.locator('[data-tool-more]')).toHaveCount(0);
 	});
 });

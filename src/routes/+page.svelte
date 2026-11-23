@@ -161,7 +161,8 @@
 </h2>
 <div class="editor-wrap">
 	<InkEditor bind:this={editorRef} autosave={false} storageKey="dev-harness" minHeight="20vh" fonts={['Georgia', 'Calibri, Carlito, sans-serif', 'Arial', 'Courier New']}
-		fontMenu />
+		fontMenu
+		moreTools={['font', 'fontSize', 'strikethrough', 'alignLeft', 'alignCenter', 'alignRight', 'hangingOutdent', 'hangingIndent', 'rightOutdent', 'rightIndent', 'copyFormat', 'link', 'image']} />
 
 	{#if measured}
 		<div class="payload">
