@@ -160,7 +160,8 @@
 	</span>
 </h2>
 <div class="editor-wrap">
-	<InkEditor bind:this={editorRef} autosave={false} storageKey="dev-harness" minHeight="20vh" fonts={['Georgia', 'Calibri, Carlito, sans-serif', 'Arial', 'Courier New']} />
+	<InkEditor bind:this={editorRef} autosave={false} storageKey="dev-harness" minHeight="20vh" fonts={['Georgia', 'Calibri, Carlito, sans-serif', 'Arial', 'Courier New']}
+		fontMenu />
 
 	{#if measured}
 		<div class="payload">

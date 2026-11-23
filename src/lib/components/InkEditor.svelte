@@ -50,6 +50,12 @@
 	 *                   any other font is taken off HTML as it comes in, set or pasted.
 	 *                   Default: none: there is no font list, and no font but the
 	 *                   document's is let in.
+	 *   fontMenu      — If true, a right-click on the text opens the editor's own menu of
+	 *                   `fonts` in place of the browser's, to set the font of the selected
+	 *                   text. Shift with the right-click still opens the browser's menu (its
+	 *                   spelling suggestions, Copy and Paste), and so does a right-click on a
+	 *                   link or a picture. The menu key and Shift+F10 open it at the caret.
+	 *                   Nothing changes without `fonts`, or when readonly. Default: false.
 	 *   keepAttributes — `data-` attributes the application's documents carry, which
 	 *                   the editor leaves on their elements: a mark on a paragraph that
 	 *                   the application reads back (`data-section="2"`). Every other
@@ -88,6 +94,7 @@
 	import { onMount } from 'svelte';
 	import Toolbar from './Toolbar.svelte';
 	import Modal from './Modal.svelte';
+	import FontMenu from './FontMenu.svelte';
 	import ImageOverlay, { type PicturePlace } from './ImageOverlay.svelte';
 	import { htmlToMarkdown, downloadFile } from '../utils.js';
 	import { keptMarks, pasteHasWords, pasteNotes, pasteWithoutFrames, removeWordHidden, sanitizedNodes, sanitizeTree, type PasteNotes } from '../sanitize.js';
@@ -160,6 +167,8 @@
 		fontSizes?: number[];
 		/** The fonts offered for text, beside the document's own; none unless given. */
 		fonts?: string[];
+		/** A right-click on the text opens a menu of `fonts`; the browser's menu is Shift + right-click. */
+		fontMenu?: boolean;
 		/** `data-` attributes of the application's own, kept on HTML that is set or pasted. */
 		keepAttributes?: string[];
 		/** Class names of the application's own, kept the same way. */
@@ -203,6 +212,7 @@
 		fontSize = DEFAULT_FONT_SIZE,
 		fontSizes = DEFAULT_FONT_SIZES,
 		fonts = NO_KEPT_ATTRIBUTES,
+		fontMenu = false,
 		keepAttributes = NO_KEPT_ATTRIBUTES,
 		keepClasses = NO_KEPT_ATTRIBUTES,
 		onchange,
@@ -890,6 +900,53 @@
 			if (key) return fontList.some((font) => font.key === key) ? key : '';
 		}
 		return '';
+	}
+
+	// ── The font menu (`fontMenu`) ──
+	// A right-click on the text opens it where the pointer is; the menu key, or Shift+F10, at the
+	// caret. It acts on the selection the right-click left: on a Mac the word it was on, elsewhere
+	// what was selected, or a caret where the pointer was.
+
+	/** Where the font menu is open, in the window's coordinates; null where it is not. */
+	let fontMenuAt: { x: number; y: number } | null = $state(null);
+	const fontMenuChoices = $derived([
+		{ key: '', name: fontChoices([fontFamily])[0]?.name ?? DEFAULT_FONT_FAMILY, css: screenFontFamily },
+		...fontList
+	]);
+
+	function openFontMenu(e: MouseEvent): void {
+		if (!fontMenu || readonly || fontList.length === 0 || !editorEl) return;
+		const target = e.target instanceof Element ? e.target : null;
+		// The browser's own menu: asked for with Shift, and the one with what a link or a picture needs.
+		if (e.shiftKey || target?.closest('a[href], img')) return;
+		e.preventDefault();
+		// (From the keyboard the event has no place of its own: the menu opens at the caret.)
+		let { clientX: x, clientY: y } = e;
+		const fromKeyboard = e.button !== 2 || (x === 0 && y === 0);
+		if (fromKeyboard) {
+			const selection = window.getSelection();
+			const range = selection && selection.rangeCount > 0 && selectionInEditor() ? selection.getRangeAt(0) : null;
+			const box = range?.getClientRects()[0] ?? range?.getBoundingClientRect() ?? editorEl.getBoundingClientRect();
+			x = box.left;
+			y = box.bottom + 4;
+		}
+		saveSelection();
+		currentFont = fontAtSelection();
+		fontMenuAt = { x, y };
+	}
+
+	function closeFontMenu(refocus: boolean): void {
+		if (!fontMenuAt) return;
+		fontMenuAt = null;
+		if (refocus && editorEl) {
+			restoreSelection();
+			editorEl.focus({ preventScroll: true });
+		}
+	}
+
+	function pickFont(key: string): void {
+		fontMenuAt = null;
+		setFont(key);
 	}
 
 	/** The font of the text at the selection, for the toolbar: null where the text selected is in more than one. */
@@ -4384,8 +4441,20 @@
 			}}
 			ondragover={handleDragOver}
 			ondrop={handleDrop}
+			oncontextmenu={openFontMenu}
 			data-placeholder={placeholder}
 		></div>
+
+		{#if fontMenuAt}
+			<FontMenu
+				x={fontMenuAt.x}
+				y={fontMenuAt.y}
+				choices={fontMenuChoices}
+				current={currentFont}
+				onpick={pickFont}
+				onclose={closeFontMenu}
+			/>
+		{/if}
 
 		{#if copySourceBox}
 			<div
