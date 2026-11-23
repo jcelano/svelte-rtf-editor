@@ -2,10 +2,12 @@
 	interface Props {
 		value?: string;
 		title?: string;
+		/** The control's name (see toolbar-tools.ts), as `data-tool`. */
+		tool?: string;
 		onchange?: (color: string) => void;
 	}
 
-	let { value = $bindable('#2C2520'), title = 'Color', onchange }: Props = $props();
+	let { value = $bindable('#2C2520'), title = 'Color', tool, onchange }: Props = $props();
 
 	function handleChange(e: Event) {
 		value = (e.target as HTMLInputElement).value;
@@ -13,7 +15,7 @@
 	}
 </script>
 
-<div class="color-picker-wrap">
+<div class="color-picker-wrap" data-tool={tool}>
 	<button class="color-swatch" {title} type="button">
 		<div class="color-swatch-inner" style="background: {value};"></div>
 	</button>

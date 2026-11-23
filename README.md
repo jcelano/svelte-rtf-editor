@@ -145,6 +145,11 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 | `fontSizes`     | `number[]` | `[8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36]` | The sizes, in points, the toolbar's size list offers for selected text. The body size is always among them; `[]` takes the list off the toolbar. See [Size of selected text](#size-of-selected-text) |
 | `fonts`         | `string[]` | `[]`                         | The fonts the toolbar's font list offers for selected text, beside the document's own. `[]` means no font list, and one font for the whole document. See [Fonts for selected text](#fonts-for-selected-text) |
 | `fontMenu`      | `boolean`  | `false`                      | A right-click on the text opens a menu of `fonts` in place of the browser's menu. Shift + right-click still opens the browser's. See [The font menu](#the-font-menu) |
+| `tools`         | `ToolbarTool[]` | all (`TOOLBAR_TOOLS`)   | The toolbar's controls, by name. A control not named is not rendered. See [Choosing the toolbar's controls](#choosing-the-toolbars-controls) |
+| `moreTools`     | `ToolbarTool[]` | `[]`                    | Those of `tools` that wait behind a More button, in a second row. `[]`: no button |
+| `moreOpen`      | `boolean`  | `false`                      | Bindable: whether that second row is open. The editor keeps it nowhere itself |
+| `moreLabel`, `lessLabel` | `string` | `'More'`, `'Less'`  | The button's words, closed and open                         |
+| `toolbarEnd`    | `Snippet`  | none                         | Controls of your own, at the end of the toolbar's first row (before More) |
 | `keepAttributes` | `string[]` | `[]` | `data-` attributes of your own that stay on HTML you set or the user pastes. See [HTML from outside](#html-from-outside) |
 | `keepClasses` | `string[]` | `[]` | Class names of your own that stay the same way |
 
@@ -155,6 +160,7 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 | `onchange` | `{ html, text, wordCount, charCount, estimatedRtfBytes }` | Fired on every content change. `html`, `text` and `estimatedRtfBytes` are worked out when the handler reads them, so a handler that only wants the counts costs nothing on a long document. They are the document as it is when first read: read them in the handler. A payload kept and read after a later edit gives the document as it is by then |
 | `onsave`   | `{ html }`                                   | Fired on `Ctrl+S`, and after each auto-save where `autosave` is on |
 | `onimport` | `{ html }`                                   | Fired after a successful RTF file import    |
+| `onmoretoggle` | `open: boolean`                          | Fired when the More button opens or closes the second row |
 
 #### Methods (via `bind:this`)
 
@@ -281,6 +287,65 @@ The editing area grows with the document, and the page scrolls. The toolbar stay
 - Under a header of your own that stays at the top too, give the toolbar its place below it: `--ink-toolbar-top: 56px` on the editor or any element around it.
 - It cannot stay where an element around the editor has `overflow: hidden`, `auto` or `scroll` and is not itself what scrolls: that is how `position: sticky` works. Take the `overflow` off that element, or make it the one that scrolls.
 - `stickyToolbar={false}` lets the toolbar go with the page, as it did through 1.12.0.
+
+### Choosing the toolbar's controls
+
+Every control of the toolbar has a name that is part of the API, and is on the element as `data-tool`. A name does not change when a tooltip is reworded or translated; a control added later gets a new name, and the release notes say so.
+
+```ts
+import { TOOLBAR_TOOLS, type ToolbarTool } from 'svelte-rtf-editor';
+// block, font, fontSize, bold, italic, underline, strikethrough, textColor, clearFormatting,
+// bulletList, numberedList, alignLeft, alignCenter, alignRight, outdent, indent, hangingOutdent,
+// hangingIndent, hangAtCaret, rightOutdent, rightIndent, spacing, copyFormat, link, image, table,
+// horizontalRule, undo, redo
+```
+
+**`tools`** says which controls the toolbar has. Leave out what the receiving system does not keep: a control that changes the screen and not the delivered document misleads whoever signs it.
+
+```svelte
+<InkEditor tools={['bold', 'italic', 'underline', 'clearFormatting', 'bulletList', 'numberedList', 'undo', 'redo']} />
+```
+
+- A control that is not named is not rendered at all. Its keyboard shortcut still works (Ctrl+B with `bold` left out).
+- The order is the editor's own, whatever order you name them in. A group left empty is not rendered, and a divider stands only between two groups of controls.
+- `fonts={[]}` and `fontSizes={[]}` still take those lists off; `tools` can only narrow further.
+- A name that is no control is ignored, with a warning in the console.
+
+**`moreTools`** puts some of those controls behind a More button, for what applies but is seldom wanted:
+
+```svelte
+<script>
+	let moreOpen = $state(false); // keep it where you like: the editor stores nothing
+</script>
+
+<InkEditor
+	{fonts}
+	moreTools={['font', 'fontSize', 'strikethrough', 'alignLeft', 'alignCenter', 'alignRight',
+	            'hangingOutdent', 'hangingIndent', 'rightOutdent', 'rightIndent', 'copyFormat', 'link', 'image']}
+	bind:moreOpen
+/>
+```
+
+- The first row has the other controls and, at its end, a button with a word on it: **More** when closed, **Less** when open (`moreLabel`, `lessLabel` to translate them). It has `aria-expanded`, and `aria-controls` names the second row.
+- Open, the second row is under the first, in the editor's order with its dividers. Closed, it is `hidden`.
+- Nothing in the first row moves when the second opens or closes: the button is one width for both of its words.
+- Pressing it leaves the selection where it was, so words selected, then More, then a size, sizes those words. A font or size on the text stays when the row closes, and the lists show it when it opens again.
+- Tab goes through the first row, the button, then the second row: the order they are seen in.
+- The toolbar that stays in sight of a long document (`stickyToolbar`) is both rows.
+- On a narrow page the first row wraps, with the button at the end of its last line; the second row starts on a line of its own.
+- `onmoretoggle(open)` fires on each press.
+
+**`toolbarEnd`** is a place for a control of your own, at the end of the first row and before More. It is inside the toolbar, in the Tab order, and styled by you:
+
+```svelte
+<InkEditor>
+	{#snippet toolbarEnd()}
+		<button type="button" onclick={insertTemplate}>Template</button>
+	{/snippet}
+</InkEditor>
+```
+
+With none of these set, the toolbar is as it was in 1.16.0, apart from the `data-tool` names.
 
 ### Opening a link
 
