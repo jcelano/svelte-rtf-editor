@@ -3144,3 +3144,72 @@ test.describe("the toolbar's controls, by name, and the ones behind More (issue 
 		await expect(page.locator('[data-tool-more]')).toHaveCount(0);
 	});
 });
+
+test.describe('insertText and insertFragment: beyond the tests of the request (#56)', () => {
+	type Inserting = { insertText(text: string): boolean; insertFragment(html: string): unknown[] | null; undo(): boolean };
+	/** Select from the `from`th character of the `a`th paragraph to the `to`th of the `b`th. */
+	async function selectAcross(page: Page, a: number, from: number, b: number, to: number): Promise<void> {
+		await page.evaluate(
+			({ a, from, b, to }) => {
+				const ps = document.querySelectorAll('.ink-content p');
+				const range = document.createRange();
+				range.setStart(ps[a].firstChild!, from);
+				range.setEnd(ps[b].firstChild!, to);
+				(document.querySelector('.ink-content') as HTMLElement).focus();
+				getSelection()!.removeAllRanges();
+				getSelection()!.addRange(range);
+			},
+			{ a, from, b, to }
+		);
+	}
+
+	test('in an empty document the words are its first line', async ({ page }) => {
+		await open(page);
+		expect(await page.evaluate(() => (window.ed as unknown as Inserting).insertText('hi'))).toBe(true);
+		expect(await html(page)).toBe('<p>hi</p>');
+		await open(page);
+		expect(await page.evaluate(() => (window.ed as unknown as Inserting).insertFragment('<i>x</i>'))).toEqual([]);
+		expect(await html(page)).toBe('<p><i>x</i></p>');
+	});
+
+	test('the end of a document that ends in a table is a line after it; in a list, its last item', async ({ page }) => {
+		await open(page, { content: '<table><tbody><tr><td>a</td></tr></tbody></table>' });
+		await page.evaluate(() => (window.ed as unknown as Inserting).insertText('c'));
+		expect(await html(page)).toBe('<table><tbody><tr><td>a</td></tr></tbody></table><p>c</p>');
+		await open(page, { content: '<ul><li>a</li><li>b</li></ul>' });
+		await page.evaluate(() => (window.ed as unknown as Inserting).insertText('c'));
+		expect(await html(page)).toBe('<ul><li>a</li><li>bc</li></ul>');
+	});
+
+	test('inline HTML over words of one paragraph replaces them, with the spaces as they were, and is told once', async ({ page }) => {
+		await open(page, { content: '<p>one two three</p>', onchange: '1' });
+		await selectAcross(page, 0, 4, 0, 7);
+		await page.evaluate(() => (window.changes = 0));
+		await page.evaluate(() => (window.ed as unknown as Inserting).insertFragment('<b>2</b>'));
+		expect(await html(page)).toBe('<p>one <b>2</b> three</p>');
+		expect(await page.evaluate(() => window.changes)).toBe(1);
+	});
+
+	test('inline HTML over a selection across paragraphs joins them, and one Undo takes it all back', async ({ page, browserName }) => {
+		await open(page, { content: '<p>one two</p><p>three four</p>' });
+		await selectAcross(page, 0, 4, 1, 5);
+		await page.evaluate(() => (window.ed as unknown as Inserting).insertFragment('<b>X</b>'));
+		// (Safari's engine gives the words it joins a span with the editor's font.)
+		if (browserName !== 'webkit') expect(await html(page)).toBe('<p>one <b>X</b> four</p>');
+		expect(await page.locator(content).textContent()).toMatch(/^one X\s+four$/);
+		await page.evaluate(() => (window.ed as unknown as Inserting).undo());
+		expect(await html(page)).toBe('<p>one two</p><p>three four</p>');
+	});
+
+	test('what comes in is made safe as a paste is: an id and a style that covers the page go', async ({ page }) => {
+		await open(page, { content: '<p>one</p>' });
+		await page.evaluate(() => (window.ed as unknown as Inserting).insertFragment('<span id="x" style="position:fixed;color:red">s</span>'));
+		expect(await html(page)).toBe('<p>one<span style="color: red;">s</span></p>');
+	});
+
+	test('in a code block, a line break stays a line of the code', async ({ page }) => {
+		await open(page, { content: '<pre>a</pre>' });
+		await page.evaluate(() => (window.ed as unknown as Inserting).insertText('\nb'));
+		expect(await html(page)).toMatch(/^<pre>a(\n|<br>)b<\/pre>$/);
+	});
+});

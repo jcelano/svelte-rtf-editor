@@ -2,6 +2,7 @@
 export { default as RtfViewer } from './RtfViewer.svelte';
 export { default as InkEditor } from './components/InkEditor.svelte';
 export { TOOLBAR_TOOLS, type ToolbarTool } from './toolbar-tools.js';
+export type { FieldInfo } from './fields.js';
 
 // RTF utilities
 export { rtfToHtml, readRtfFile, DEFAULT_MAX_RTF_BYTES } from './rtf-parser.js';
