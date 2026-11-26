@@ -182,9 +182,29 @@ editor.setLineSpacing(1.5) // → void   — line spacing of the selected paragr
 editor.setParagraphSpacing({ before: 6, after: 12 }) // → void — space before and after them, in points; either may be left out, 0 or null is none
 editor.setListMarkerGap(27) // → void   — gap between the markers and the text of the selected lists, in points (6 to 144); null for the quarter inch
 editor.insertTable(3, 2, { borders: true, header: false }) // → void — a table of empty cells after the paragraph the caret is in
+editor.insertText('words') // → boolean — text at the caret, as one Undo step; false if nothing went in. See [Putting text in from code](#putting-text-in-from-code)
+editor.insertFragment('<b>words</b>') // → FieldInfo[] | null — HTML at the caret, made safe, as one Undo step; null if nothing went in
 editor.undo()             // → boolean — take back the last step; false if there was none
 editor.redo()             // → boolean — make a step that was taken back again; false if there was none
 ```
+
+#### Putting text in from code
+
+`insertText()` and `insertFragment()` put words in where the writer is, as a paste would, without replacing the document as `setHTML()` does:
+
+```ts
+editor.insertText('No evidence of malignancy.');
+editor.insertFragment('Margins: <b>negative</b>');
+```
+
+- **Where it goes:** at the caret, or over the selection. If the editor has lost the keyboard (the writer pressed a button of yours), it goes where the caret last was. If there is no such place, because the editor was never clicked or the document was replaced since, it goes at the end of the document: the end of its last line, the last item of a list it ends with, or a new line after a table, picture or rule it ends with.
+- The editor takes the keyboard, and the caret is left after what went in, so typing goes on from there.
+- **One Undo step,** of its own: not joined to what was typed just before it.
+- **One change, told once,** when it is done: one `onchange`, and one `input` event on the editing element (`inputType` `insertText` from `insertText`, `insertFromPaste` from `insertFragment`), however many lines it puts in. The browser's own commands it uses on the way are not heard outside the editor.
+- **`insertText`** puts text in as text. A line break in it starts a paragraph, as Enter does; in a code block it stays a line of the code.
+- **`insertFragment`** is made safe before it reaches the page, by the rules `setHTML()` and a paste share, `keepAttributes` and `keepClasses` included, so nothing in it can run. Then it is tidied as a paste is: an `id` is dropped, a picture given by address is treated as a pasted one. Inline content (words, `<b>`, `<span>`, a picture) goes into the paragraph at the caret exactly as given. HTML with paragraphs is put in by the browser as a paste of the same HTML would be, which splits the paragraph at the caret; Safari wraps such words in a `<span>` of their own there, as its paste does.
+- **Nothing to put in is nothing done:** `insertText('')`, or HTML with nothing left once it is made safe, returns `false` or `null`, changes nothing and adds no Undo step. So does a read-only editor.
+- `insertFragment` returns the fields it put in, for the fields of [#56](https://github.com/jcelano/svelte-rtf-editor/issues/56) that are still to come: today always `[]` when something went in. The type `FieldInfo` is exported already, so what it returns will not change.
 
 #### Auto-save
 

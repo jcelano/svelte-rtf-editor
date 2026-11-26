@@ -99,6 +99,14 @@
 	 *   setFontSize(points) — Sets the size of the selected text, or of what is typed next.
 	 *   setFont(name)  — Sets the font of the selected text, or of what is typed next, to
 	 *                    one of `fonts`; '' or the document font's name sets it back.
+	 *   insertText(text) — Puts text in at the caret, or over the selection, as one Undo step;
+	 *                    a line break in it starts a paragraph. Where the editor has lost the
+	 *                    keyboard, it goes where the caret last was; with no such place, at
+	 *                    the end of the document. The editor takes the keyboard, and the caret
+	 *                    is left after it. false where nothing was put in.
+	 *   insertFragment(html) — The same with HTML, made safe first by the rules setHTML() and a
+	 *                    paste share, and put in as a paste of it is. Returns the fields it put
+	 *                    in (none until fields arrive), or null where nothing was put in.
 	 *   clearFormatting()   — Takes bold, italic, underline, strike, color, size and font off
 	 *                    the selected text. Headings, lists, links, alignment, indents and
 	 *                    the application's own marks stay.
@@ -111,6 +119,7 @@
 	import FontMenu from './FontMenu.svelte';
 	import ImageOverlay, { type PicturePlace } from './ImageOverlay.svelte';
 	import { htmlToMarkdown, downloadFile } from '../utils.js';
+	import type { FieldInfo } from '../fields.js';
 	import { keptMarks, pasteHasWords, pasteNotes, pasteWithoutFrames, removeWordHidden, sanitizedNodes, sanitizeTree, type PasteNotes } from '../sanitize.js';
 	import { givePastedPictures, pastePictures, type PastePictures } from '../paste-pictures.js';
 	import { readRtfFile, DEFAULT_MAX_RTF_BYTES } from '../rtf-parser.js';
@@ -1166,6 +1175,224 @@
 		fireChange();
 		if (autosave && shown) scheduleAutoSave();
 		return true;
+	}
+
+	// ── Text and HTML at the caret, from code ──
+
+	/**
+	 * Put the caret where something from code goes in, and give the editor the keyboard: the
+	 * selection in the document; else where the caret last was; else the end of the document.
+	 */
+	function caretForInsert(): boolean {
+		if (!editorEl) return false;
+		const had = selectionInEditor();
+		editorEl.focus({ preventScroll: true });
+		if (had || select(savedSelection)) return true;
+		placeCaretAtEnd();
+		return selectionInEditor();
+	}
+
+	/** The caret at the end of the document's last line, where typing would go on. */
+	function placeCaretAtEnd(): void {
+		if (!editorEl) return;
+		let block = editorEl.lastElementChild as HTMLElement | null;
+		while (block && /^(UL|OL)$/.test(block.tagName)) block = block.lastElementChild as HTMLElement | null;
+		// (After a table, a picture or a rule, the end is a line of its own after it.)
+		if (!block || /^(TABLE|FIGURE|HR|IMG)$/.test(block.tagName)) {
+			const p = document.createElement('p');
+			p.appendChild(document.createElement('br'));
+			editorEl.appendChild(p);
+			block = p;
+		}
+		const range = document.createRange();
+		const last = block.lastChild;
+		// (Before the line break that gives an empty line its height, not after it.)
+		if (last && last.nodeName === 'BR') {
+			range.setStartBefore(last);
+			range.collapse(true);
+		} else {
+			range.selectNodeContents(block);
+			range.collapse(false);
+		}
+		const sel = window.getSelection();
+		sel?.removeAllRanges();
+		sel?.addRange(range);
+	}
+
+	/**
+	 * Put text in at the caret, or over the selection, as one Undo step of its own; a line break
+	 * in it starts a paragraph, as Enter does. The caret is left after it. false where nothing
+	 * was put in: no text, or a read-only editor.
+	 */
+	export function insertText(text: string): boolean {
+		if (readonly || !editorEl || typeof text !== 'string' || text === '') return false;
+		if (!caretForInsert()) return false;
+		asOneChange('insertText', text, () => {
+			history?.step();
+			const sel = window.getSelection();
+			// (In code, a line break is a line of the code, as a paste there is. Safari's command
+			// makes it a second block of code: the text goes in as it is.)
+			const at = sel?.anchorNode ?? null;
+			const inCode = !!(at && (at.nodeType === Node.ELEMENT_NODE ? (at as Element) : at.parentElement)?.closest('pre'));
+			if (inCode) putInline([document.createTextNode(text.replace(/\r\n?/g, '\n'))]);
+			else {
+				text.split(/\r\n|\r|\n/).forEach((line, i) => {
+					if (i > 0) browserCommand('insertParagraph');
+					if (line) browserCommand('insertText', false, line);
+				});
+			}
+			history?.step();
+			updateToolbarState();
+		});
+		return true;
+	}
+
+	/**
+	 * Put HTML in at the caret, or over the selection, as one Undo step of its own. It is made
+	 * safe first, by the rules setHTML() and a paste share (`keepAttributes` and `keepClasses`
+	 * included), and then put in and tidied as a paste of it is: inline content goes into the
+	 * paragraph at the caret, and paragraphs split it. Returns the fields it put in, in document
+	 * order (none until fields arrive), or null where nothing was put in.
+	 */
+	export function insertFragment(html: string): FieldInfo[] | null {
+		if (readonly || !editorEl || typeof html !== 'string') return null;
+		// (Made safe as nodes of this page, which go in as they are: what was checked is what
+		// goes in. See sanitizedNodes.)
+		const nodes = sanitizedNodes(html, document, undefined, keptNames);
+		if (!nodes.some(hasContent)) return null;
+		if (!caretForInsert()) return null;
+		asOneChange('insertFromPaste', null, () => {
+			history?.step();
+			if (nodes.every(isInline)) {
+				// Inline content goes into the paragraph at the caret as it was given. (The browser's
+				// own command, as its paste, drops a space at either end and makes the one after it
+				// one that does not break; Safari's wraps the words in spans of their own.)
+				putInline(nodes);
+			} else {
+				// Paragraphs split the paragraph at the caret, as a paste of the same HTML does.
+				const holder = document.createElement('div');
+				holder.append(...nodes);
+				expectInsertion();
+				browserCommand('insertHTML', false, holder.innerHTML);
+			}
+			history?.step();
+			updateToolbarState();
+		});
+		return [];
+	}
+
+	/**
+	 * What insertText() and insertFragment() do is one change, told once when it is done: one
+	 * `input` event on the editing element, and one `onchange`. (The browser's commands they
+	 * use send an input event each, one for each line of the text, and a delete before them
+	 * where the selection spans paragraphs; and words put in by the editor itself send none.)
+	 * The input events of the steps are the editor's alone while it works: see holdInput.
+	 */
+	function asOneChange(kind: string, data: string | null, put: () => void): void {
+		inserting++;
+		changedWhileInserting = false;
+		shownWhileInserting = true;
+		try {
+			put();
+		} finally {
+			inserting--;
+		}
+		if (!changedWhileInserting || !editorEl) return;
+		announcing = true;
+		try {
+			editorEl.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: kind, data }));
+		} finally {
+			announcing = false;
+		}
+		fireChange();
+		if (autosave && shownWhileInserting) scheduleAutoSave();
+	}
+
+	/** insertText() or insertFragment() is at work: the input events of its steps are not yet the change. */
+	let inserting = 0;
+	let changedWhileInserting = false;
+	let shownWhileInserting = true;
+	/** The one input event that tells the change: the editor has already done what follows an input. */
+	let announcing = false;
+
+	/**
+	 * An input event of a step of insertText() or insertFragment(), as it reaches the editing
+	 * element: the editor follows it, as any input, and it goes no further. (Listened for as it
+	 * comes down, before the application's own listeners on the element and above it.)
+	 */
+	function holdInput(e: Event): void {
+		if (inserting === 0) return;
+		e.stopImmediatePropagation();
+		handleInput(e);
+	}
+
+	/**
+	 * Put nodes of a line in at the selection, in its place, as they are, and leave the caret
+	 * after them; then what follows a paste: the same tidying, and the change told.
+	 */
+	function putInline(nodes: Node[]): void {
+		const sel = window.getSelection();
+		if (!sel || sel.rangeCount === 0 || nodes.length === 0) return;
+		if (!sel.isCollapsed) {
+			// (Within a paragraph the words go as they are. Across paragraphs the browser
+			// joins the two, which is its delete's to do.)
+			const selected = sel.getRangeAt(0);
+			const blockOf = (node: Node) => (node.nodeType === Node.ELEMENT_NODE ? (node as Element) : node.parentElement)?.closest(BLOCK_SELECTOR);
+			if (blockOf(selected.startContainer) === blockOf(selected.endContainer)) selected.deleteContents();
+			else browserCommand('delete');
+		}
+		expectInsertion();
+		const range = sel.getRangeAt(0);
+		const first = nodes[0];
+		const last = nodes[nodes.length - 1];
+		const fragment = document.createDocumentFragment();
+		fragment.append(...nodes);
+		range.insertNode(fragment);
+		// (An empty line's break, which gave it its height, is not needed now that it has words.)
+		const after = last.nextSibling;
+		if (after?.nodeName === 'BR' && !after.nextSibling && after.parentElement !== editorEl) after.remove();
+		// A space the browser left at either side as one that does not break, to be seen at
+		// the end of a line, is an ordinary space now that there are words beside it.
+		// (Not where what came in has a space of its own there: two spaces would show as one.)
+		const words = nodes.map((node) => node.textContent ?? '').join('');
+		if (/^\S/.test(words)) ordinarySpace(first.previousSibling, 'end');
+		if (/\S$/.test(words)) ordinarySpace(last.nextSibling, 'start');
+		const caret = document.createRange();
+		caret.setStartAfter(last);
+		caret.collapse(true);
+		sel.removeAllRanges();
+		sel.addRange(caret);
+		handleInput();
+	}
+
+	/** The blocks whose words a selection is in. */
+	const BLOCK_SELECTOR = 'p, h1, h2, h3, h4, h5, h6, li, td, th, blockquote, pre, figcaption, div';
+
+	/** A space that does not break, at one end of a text, made an ordinary one. */
+	function ordinarySpace(node: Node | null, end: 'start' | 'end'): void {
+		if (!node || node.nodeType !== Node.TEXT_NODE) return;
+		const text = node as Text;
+		const at = end === 'start' ? 0 : text.data.length - 1;
+		if (at >= 0 && text.data[at] === '\u00a0') text.replaceData(at, 1, ' ');
+	}
+
+	/** Whether a node that came in has something to show: words, a picture, a table, a rule, a line break. */
+	function hasContent(node: Node): boolean {
+		if (node.nodeType === Node.TEXT_NODE) return (node.nodeValue ?? '').trim() !== '';
+		if (node.nodeType !== Node.ELEMENT_NODE) return false;
+		const el = node as Element;
+		return /^(IMG|HR|TABLE|BR)$/.test(el.tagName) || (el.textContent ?? '').trim() !== '' || el.querySelector('img, hr, table, br') !== null;
+	}
+
+	/** The elements that go into a line of text, and not between lines. */
+	const INLINE = new Set(['A', 'ABBR', 'B', 'BDI', 'BDO', 'BIG', 'BR', 'CITE', 'CODE', 'DEL', 'DFN', 'EM', 'FONT', 'I', 'IMG', 'INS', 'KBD', 'MARK', 'Q', 'S', 'SAMP', 'SMALL', 'SPAN', 'STRIKE', 'STRONG', 'SUB', 'SUP', 'TIME', 'U', 'VAR', 'WBR']);
+
+	/** A node, and all it holds, that goes into a line: text, or inline elements of text. */
+	function isInline(node: Node): boolean {
+		if (node.nodeType === Node.TEXT_NODE || node.nodeType === Node.COMMENT_NODE) return true;
+		if (node.nodeType !== Node.ELEMENT_NODE) return false;
+		const el = node as Element;
+		return INLINE.has(el.tagName) && Array.from(el.querySelectorAll('*')).every((inner) => INLINE.has(inner.tagName));
 	}
 
 	/** Undo the last step: what was typed, a command, a picture or a table put in, a picture moved. */
@@ -2356,6 +2583,7 @@
 
 	// ── Input handler ──
 	function handleInput(e?: Event): void {
+		if (announcing) return;
 		placeCopySourceBox();
 		const kind = (e as InputEvent | undefined)?.inputType ?? '';
 		// (The editor's own Undo and Redo do not come this way. These are the browser's, where
@@ -2391,6 +2619,12 @@
 		selectedImage = null;
 		// (Clear formatting says so itself, when the document is as it leaves it.)
 		if (clearing) return;
+		// (insertText() and insertFragment() tell their change once, when they are done.)
+		if (inserting > 0) {
+			changedWhileInserting = true;
+			shownWhileInserting &&= shown;
+			return;
+		}
 		fireChange();
 		if (autosave && shown) scheduleAutoSave();
 	}
@@ -4296,8 +4530,11 @@
 		if (!editorEl) return;
 		started = true;
 		document.addEventListener('selectionchange', trackSelection);
+		const root = editorEl;
+		root.addEventListener('input', holdInput, true);
 		const stopTracking = () => {
 			document.removeEventListener('selectionchange', trackSelection);
+			root.removeEventListener('input', holdInput, true);
 			history?.destroy();
 			history = null;
 		};
