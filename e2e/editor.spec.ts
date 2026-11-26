@@ -3207,6 +3207,64 @@ test.describe('insertText and insertFragment: beyond the tests of the request (#
 		expect(await html(page)).toBe('<p>one<span style="color: red;">s</span></p>');
 	});
 
+	test('each call is one change told once: one input event an application hears, and one onchange', async ({ page }) => {
+		const calls: [string, string, string, number, number, number, number][] = [
+			// [content, select from, call, a, from, b, to]: a caret where a === b and from === to
+			['<p>one</p>', 'text', 'a\nb\nc', 0, 3, 0, 3],
+			['<p>one</p>', 'fragment', ' <b>and</b> more', 0, 3, 0, 3],
+			['<p>one</p>', 'fragment', '<p>A</p><p>B</p>', 0, 3, 0, 3],
+			['<pre>one</pre>', 'text', '\nb', 0, 3, 0, 3],
+			['<p>one two</p><p>three four</p>', 'fragment', '<b>X</b>', 0, 4, 1, 5],
+			['<p>one two</p><p>three four</p>', 'text', 'X\nY', 0, 4, 1, 5]
+		];
+		for (const [content, kind, given, a, from, b, to] of calls) {
+			await open(page, { content, onchange: '1' });
+			await page.evaluate(
+				({ a, from, b, to }) => {
+					const blocks = document.querySelectorAll('.ink-content p, .ink-content pre');
+					const range = document.createRange();
+					range.setStart(blocks[a].firstChild!, from);
+					range.setEnd(blocks[b].firstChild!, to);
+					(document.querySelector('.ink-content') as HTMLElement).focus();
+					getSelection()!.removeAllRanges();
+					getSelection()!.addRange(range);
+				},
+				{ a, from, b, to }
+			);
+			const heard = await page.evaluate(
+				({ kind, given }) => {
+					const el = document.querySelector('.ink-content')!;
+					const types: string[] = [];
+					// (An application's listeners, on the element and on the page above it.)
+					const own = (e: Event) => types.push((e as InputEvent).inputType);
+					let above = 0;
+					const page = () => above++;
+					el.addEventListener('input', own);
+					document.addEventListener('input', page);
+					window.changes = 0;
+					const ed = window.ed as unknown as Inserting;
+					if (kind === 'text') ed.insertText(given);
+					else ed.insertFragment(given);
+					el.removeEventListener('input', own);
+					document.removeEventListener('input', page);
+					return { types, above, changes: window.changes };
+				},
+				{ kind, given }
+			);
+			expect(heard, `${kind} ${JSON.stringify(given)} into ${content}`).toEqual({
+				types: [kind === 'text' ? 'insertText' : 'insertFromPaste'],
+				above: 1,
+				changes: 1
+			});
+		}
+		// (Typing is told as it always was.)
+		await open(page, { content: '<p>one</p>', onchange: '1' });
+		await page.locator(content).click();
+		await page.evaluate(() => (window.changes = 0));
+		await page.keyboard.type('ab');
+		expect(await page.evaluate(() => window.changes)).toBe(2);
+	});
+
 	test('in a code block, a line break stays a line of the code', async ({ page }) => {
 		await open(page, { content: '<pre>a</pre>' });
 		await page.evaluate(() => (window.ed as unknown as Inserting).insertText('\nb'));

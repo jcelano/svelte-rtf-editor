@@ -1227,21 +1227,23 @@
 	export function insertText(text: string): boolean {
 		if (readonly || !editorEl || typeof text !== 'string' || text === '') return false;
 		if (!caretForInsert()) return false;
-		history?.step();
-		const sel = window.getSelection();
-		// (In code, a line break is a line of the code, as a paste there is. Safari's command
-		// makes it a second block of code: the text goes in as it is.)
-		const at = sel?.anchorNode ?? null;
-		const inCode = !!(at && (at.nodeType === Node.ELEMENT_NODE ? (at as Element) : at.parentElement)?.closest('pre'));
-		if (inCode) putInline([document.createTextNode(text.replace(/\r\n?/g, '\n'))]);
-		else {
-			text.split(/\r\n|\r|\n/).forEach((line, i) => {
-				if (i > 0) browserCommand('insertParagraph');
-				if (line) browserCommand('insertText', false, line);
-			});
-		}
-		history?.step();
-		updateToolbarState();
+		asOneChange('insertText', text, () => {
+			history?.step();
+			const sel = window.getSelection();
+			// (In code, a line break is a line of the code, as a paste there is. Safari's command
+			// makes it a second block of code: the text goes in as it is.)
+			const at = sel?.anchorNode ?? null;
+			const inCode = !!(at && (at.nodeType === Node.ELEMENT_NODE ? (at as Element) : at.parentElement)?.closest('pre'));
+			if (inCode) putInline([document.createTextNode(text.replace(/\r\n?/g, '\n'))]);
+			else {
+				text.split(/\r\n|\r|\n/).forEach((line, i) => {
+					if (i > 0) browserCommand('insertParagraph');
+					if (line) browserCommand('insertText', false, line);
+				});
+			}
+			history?.step();
+			updateToolbarState();
+		});
 		return true;
 	}
 
@@ -1259,22 +1261,69 @@
 		const nodes = sanitizedNodes(html, document, undefined, keptNames);
 		if (!nodes.some(hasContent)) return null;
 		if (!caretForInsert()) return null;
-		history?.step();
-		if (nodes.every(isInline)) {
-			// Inline content goes into the paragraph at the caret as it was given. (The browser's
-			// own command, as its paste, drops a space at either end and makes the one after it
-			// one that does not break; Safari's wraps the words in spans of their own.)
-			putInline(nodes);
-		} else {
-			// Paragraphs split the paragraph at the caret, as a paste of the same HTML does.
-			const holder = document.createElement('div');
-			holder.append(...nodes);
-			expectInsertion();
-			browserCommand('insertHTML', false, holder.innerHTML);
-		}
-		history?.step();
-		updateToolbarState();
+		asOneChange('insertFromPaste', null, () => {
+			history?.step();
+			if (nodes.every(isInline)) {
+				// Inline content goes into the paragraph at the caret as it was given. (The browser's
+				// own command, as its paste, drops a space at either end and makes the one after it
+				// one that does not break; Safari's wraps the words in spans of their own.)
+				putInline(nodes);
+			} else {
+				// Paragraphs split the paragraph at the caret, as a paste of the same HTML does.
+				const holder = document.createElement('div');
+				holder.append(...nodes);
+				expectInsertion();
+				browserCommand('insertHTML', false, holder.innerHTML);
+			}
+			history?.step();
+			updateToolbarState();
+		});
 		return [];
+	}
+
+	/**
+	 * What insertText() and insertFragment() do is one change, told once when it is done: one
+	 * `input` event on the editing element, and one `onchange`. (The browser's commands they
+	 * use send an input event each, one for each line of the text, and a delete before them
+	 * where the selection spans paragraphs; and words put in by the editor itself send none.)
+	 * The input events of the steps are the editor's alone while it works: see holdInput.
+	 */
+	function asOneChange(kind: string, data: string | null, put: () => void): void {
+		inserting++;
+		changedWhileInserting = false;
+		shownWhileInserting = true;
+		try {
+			put();
+		} finally {
+			inserting--;
+		}
+		if (!changedWhileInserting || !editorEl) return;
+		announcing = true;
+		try {
+			editorEl.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: kind, data }));
+		} finally {
+			announcing = false;
+		}
+		fireChange();
+		if (autosave && shownWhileInserting) scheduleAutoSave();
+	}
+
+	/** insertText() or insertFragment() is at work: the input events of its steps are not yet the change. */
+	let inserting = 0;
+	let changedWhileInserting = false;
+	let shownWhileInserting = true;
+	/** The one input event that tells the change: the editor has already done what follows an input. */
+	let announcing = false;
+
+	/**
+	 * An input event of a step of insertText() or insertFragment(), as it reaches the editing
+	 * element: the editor follows it, as any input, and it goes no further. (Listened for as it
+	 * comes down, before the application's own listeners on the element and above it.)
+	 */
+	function holdInput(e: Event): void {
+		if (inserting === 0) return;
+		e.stopImmediatePropagation();
+		handleInput(e);
 	}
 
 	/**
@@ -2534,6 +2583,7 @@
 
 	// ── Input handler ──
 	function handleInput(e?: Event): void {
+		if (announcing) return;
 		placeCopySourceBox();
 		const kind = (e as InputEvent | undefined)?.inputType ?? '';
 		// (The editor's own Undo and Redo do not come this way. These are the browser's, where
@@ -2569,6 +2619,12 @@
 		selectedImage = null;
 		// (Clear formatting says so itself, when the document is as it leaves it.)
 		if (clearing) return;
+		// (insertText() and insertFragment() tell their change once, when they are done.)
+		if (inserting > 0) {
+			changedWhileInserting = true;
+			shownWhileInserting &&= shown;
+			return;
+		}
 		fireChange();
 		if (autosave && shown) scheduleAutoSave();
 	}
@@ -4474,8 +4530,11 @@
 		if (!editorEl) return;
 		started = true;
 		document.addEventListener('selectionchange', trackSelection);
+		const root = editorEl;
+		root.addEventListener('input', holdInput, true);
 		const stopTracking = () => {
 			document.removeEventListener('selectionchange', trackSelection);
+			root.removeEventListener('input', holdInput, true);
 			history?.destroy();
 			history = null;
 		};
